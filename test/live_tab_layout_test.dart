@@ -96,6 +96,7 @@ void main() {
       scrollController: scroll,
       categoryScrollController: categoryScroll,
       visibleChannels: () => list,
+      allChannels: () => list,
       orderedCategoryIds: () => const [null, 'news'],
       channelRowExtent: () => rowExtent,
       categoryRowExtent: () => metrics.categoryRowExtent,
@@ -105,6 +106,7 @@ void main() {
       onCategoryActivated: (_) {},
       onPlayChannel: (c) => played.add(c.id),
       onToggleFavorite: (_) {},
+      onNumberCommitted: (_) {},
       onFocusTabs: () {},
     );
     addTearDown(() {
@@ -148,7 +150,8 @@ void main() {
                 categories: const [Category(id: 'news', title: 'News')],
                 selectedCategoryId: null,
                 onCategorySelected: (_) {},
-                previewVideoBuilder: () => const SizedBox.shrink(),
+                previewVideoBuilder: () =>
+                    const ColoredBox(color: Color(0xFF101010)),
                 previewLoading: false,
                 previewError: null,
               ),
@@ -160,6 +163,7 @@ void main() {
     await tester.pump();
     return played;
   }
+
 
   // "Playlists" is the category sidebar's header — it exists only in the wide
   // two-pane layout, alongside the preview panel.
@@ -232,10 +236,117 @@ void main() {
         // a remote, because it runs the same `onPlayChannel` → `_play` path OK
         // does: preview first, fullscreen on the second activation.
         final played = await pumpLiveTab(tester, size: const Size(1280, 800));
-        await tester.tap(find.text('Channel 2'));
+        await tester.tap(find.text('3 - Channel 2'));
         await tester.pump();
         expect(played, ['c2']);
       });
+    });
+  });
+
+  group('the preview picture as a play target', () {
+    // The panel is where "I want to *watch* this" lives once a preview is
+    // running, and on a pointer that is the double click. The single click is
+    // already spoken for: it is what starts a preview from the list, and inside
+    // the panel a first click lands on the channel the panel is showing.
+    // The panel's own rect, not the video inside it: that video is
+    // IgnorePointer while a preview runs, so it is deliberately not a tap
+    // target and a finder pointed at it could only ever warn.
+    Finder previewPicture() => find.byKey(previewSurfaceKey);
+
+    testWidgets('a double click on a running preview goes fullscreen', (
+      tester,
+    ) async {
+      final played = await pumpLiveTab(
+        tester,
+        size: const Size(1280, 800),
+        previewChannelId: 'c0',
+      );
+      expect(previewPicture(), findsOneWidget);
+      expect(find.text('Preview'), findsOneWidget, reason: 'a preview is up');
+
+      await tester.tap(previewPicture());
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(previewPicture());
+      await tester.pumpAndSettle();
+
+      expect(played, ['c0']);
+    });
+
+    testWidgets('a double click without a preview is not a play target', (
+      tester,
+    ) async {
+      // Nothing is showing, so there is nothing to escalate — and the logo /
+      // error placeholders must not be a way to launch a channel.
+      final played = await pumpLiveTab(
+        tester,
+        size: const Size(1280, 800),
+        visible: [Channel(id: 'c0', name: 'Channel', number: 1)],
+      );
+      expect(find.text('Preview'), findsNothing);
+
+      await tester.tap(previewPicture());
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(previewPicture());
+      await tester.pumpAndSettle();
+
+      expect(played, isEmpty);
+    });
+  });
+
+  group('the number badge that stands in for a missing logo', () {
+    // `debugDisableNetworkChannelLogos` is on for this file, so every row here
+    // draws the badge — the fallback is what these tests look at.
+    //
+    // It used to lay the number out as ordinary text inside a fixed tile: a
+    // four-digit number wrapped and printed as "123" over "4", and at body-text
+    // size it read as a stray caption rather than as the artwork's place.
+    Future<Rect> badgeFor(WidgetTester tester, int number) async {
+      await asAndroid(() async {
+        await pumpLiveTab(
+          tester,
+          size: const Size(1280, 800),
+          visible: [Channel(id: 'c0', name: 'Channel', number: number)],
+        );
+      });
+      final text = find.text('$number');
+      expect(text, findsOneWidget);
+      // The painted rect, not `getSize`: FittedBox scales its child at paint
+      // time, so the layout size is the *unwrapped* text and says nothing about
+      // what the user sees.
+      return tester.getRect(text);
+    }
+
+    Finder tileOf(Finder text) =>
+        find.ancestor(of: text, matching: find.byType(Container)).first;
+
+    testWidgets('a four-digit number stays on one line inside the tile', (
+      tester,
+    ) async {
+      final text = find.text('1234');
+      final painted = await badgeFor(tester, 1234);
+      expect(
+        tester.widget<Text>(text).maxLines,
+        1,
+        reason: 'the number must not wrap into two rows of digits',
+      );
+      final tile = tester.getRect(tileOf(text));
+      expect(painted.width, lessThanOrEqualTo(tile.width + 0.01));
+      expect(painted.height, lessThanOrEqualTo(tile.height + 0.01));
+      // Four digits is the case that *has* to use the width to stay legible.
+      expect(painted.width, closeTo(tile.width, 0.5));
+    });
+
+    testWidgets('a one-digit number reads at badge size, not body size', (
+      tester,
+    ) async {
+      final text = find.text('7');
+      final painted = await badgeFor(tester, 7);
+      final tile = tester.getRect(tileOf(text));
+      expect(
+        painted.height,
+        greaterThan(tile.height * 0.4),
+        reason: 'a number at body-text size looks lost in a logo-sized tile',
+      );
     });
   });
 

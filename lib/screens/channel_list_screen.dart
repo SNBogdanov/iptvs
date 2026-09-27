@@ -15,8 +15,10 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/app_bar_action.dart';
+import '../widgets/channel_number_chip.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
+import '../player/channel_number_entry.dart';
 import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
 import '../player/aspect_mode.dart' show aspectModeIndexOf;
@@ -125,6 +127,29 @@ FullscreenHandoff decideFullscreenHandoff({
   if (!previewPlaying) return FullscreenHandoff.none;
   if (sameChannelPreview) return FullscreenHandoff.pausePreview;
   return FullscreenHandoff.stopPreview;
+}
+
+/// Pure zap cursor: the index [direction] (+1 next / -1 previous) steps to from
+/// the channel whose id is [currentId] in [channels], wrapping at both ends.
+/// A missing current id starts from the ends (next → 0, previous → last), so
+/// the first PgDn/PgUp in a session is never a silent no-op. Returns -1 when
+/// there is nothing to zap to: an empty list, or a single-channel list whose
+/// only channel *is* the current one. Classic `%` wrap is exact here because
+/// the source's own id can occur once at most, and the caller filters the list
+/// down to a single category/query/cross-source view before calling.
+/// Pinned by `test/live_zap_test.dart`.
+int liveZapIndex(List<Channel> channels, String? currentId, int direction) {
+  if (channels.isEmpty) return -1;
+  if (channels.length == 1 &&
+      currentId != null &&
+      channels.first.id == currentId) {
+    return -1;
+  }
+  if (currentId == null) return direction > 0 ? 0 : channels.length - 1;
+  final current = channels.indexWhere((c) => c.id == currentId);
+  if (current < 0) return direction > 0 ? 0 : channels.length - 1;
+  if (channels.length == 1) return -1;
+  return (current + direction + channels.length) % channels.length;
 }
 
 /// What an OK/click on a channel row does on a wide (split-pane) layout, given
@@ -454,6 +479,141 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // focus-driven preview trigger (below), fullscreen playback, and the phone
   // preview sheet, which drive it.
   late LivePreviewController _preview;
+
+  /// A typed channel number was confirmed while the **list** had the D-pad.
+  ///
+  /// Two surfaces can be showing a channel here, and the jump answers both: the
+  /// list itself (the cursor moves, and the group follows if the channel is not
+  /// in the current one) and the preview window (retargeted, because a jump that
+  /// moved the cursor under a still-running preview would leave the two
+  /// disagreeing about what is on screen).
+  ///
+  /// A preview that is *not* running is deliberately left alone — on a wide
+  /// layout the selection change already arms the desktop auto-preview, and on
+  /// a TV remote the preview is deliberate, so a number must not quietly
+  /// unmute one.
+  Future<void> _onNumberCommitted(Channel target) async {
+    if (_resolving) return;
+    _revealChannelInList(target);
+    if (!_preview.hasPreview) return;
+    // Already showing this exact channel: a restart would spend a fresh
+    // `create_link` (Stalker's are single-use) and visibly reload a picture
+    // that was correct, to answer a selection move. The pair-keyed identity is
+    // the whole test — a same-numbered channel in another source is a different
+    // channel and does get retargeted.
+    if (_isPreviewing(target)) return;
+    await _preview.start(
+      target,
+      from: _repoForChannel(target),
+      muted: !_deliberatePreview,
+      bufferPreset: _bufferPresetForChannel(target),
+    );
+  }
+
+  /// Puts [target] where the cursor can sit on it, and puts the cursor there.
+  ///
+  /// The live list is a selection model, so a channel it does not draw cannot be
+  /// selected at all — the jump has to widen the view first, on the ladder in
+  /// `planNumberJumpGroup`. A name search is handled ahead of that and
+  /// separately: it is not a group, it is a question the number has just
+  /// answered, and leaving it up would hide the answer.
+  ///
+  /// [takeFocus] is false when this runs for a fullscreen player: the player
+  /// route owns the D-pad there, and pulling focus into the list underneath it
+  /// would leave the remote with nowhere to send Back.
+  ///
+  /// **The reveal has to be deferred whenever the group changed, and the
+  /// group switch must not schedule its own top-scroll** — two things, one
+  /// cause. This list scrolls by `index * extent` arithmetic, so a reveal into a
+  /// group that is not on screen yet is measured against the *old* content: the
+  /// offset `index * extent` is clamped to the outgoing list's
+  /// `maxScrollExtent` and lands at the top, and `_selectCategory`'s post-frame
+  /// `jumpTo(0)` would override the reveal anyway — the cursor on the right row
+  /// with the viewport parked at the top, which is a jump that looks like it did
+  /// nothing. So the cursor moves synchronously (state, preview, and the row's
+  /// own selection are all correct immediately) and only the *scroll* waits for
+  /// the frame that renders the new group.
+  void _revealChannelInList(Channel target, {bool takeFocus = true}) {
+    // A number jump that matches a channel and then shows nothing is
+    // indistinguishable, from the seat, between "scrolled to the wrong place"
+    // and "no view draws it at all" — the cursor and the group are the only
+    // difference, and neither is visible. So the whole decision is recorded: a
+    // `found=-1` is the loud one, and it is a defect rather than a shrug.
+    final groupBefore = _categoryId;
+    final queryBefore = _query;
+    if (!_draws(target) && _query.trim().isNotEmpty) {
+      _searchController.clear();
+      _setQuery('');
+    }
+    var switchedGroup = false;
+    if (!_draws(target)) {
+      final group = planNumberJumpGroup(
+        currentGroupId: _categoryId,
+        drawsTarget: (id) => _drawnByGroup(target, id),
+        favoritesGroupId: kFavoritesCategoryId,
+      );
+      if (group != _categoryId) {
+        _selectCategory(group, scrollToTop: false);
+        switchedGroup = true;
+      }
+    }
+    final index = _visible.indexWhere((c) => c.id == target.id);
+    DiagnosticsLog.instance.add(
+      'navigation',
+      'number jump channel=${target.id} number=${target.number} '
+      'group=$groupBefore -> $_categoryId query=${queryBefore.isEmpty ? '' : 'set'} '
+      'visible=${_visible.length} index=$index switched=$switchedGroup '
+      'extent=${_liveChannelRowExtent().round()} '
+      'offset=${_scrollController.hasClients ? _scrollController.offset.round() : -1} '
+      'clients=${_scrollController.hasClients}',
+    );
+    if (index < 0) return;
+    // The cursor moves now; the list scrolls after the frame, immediately, in
+    // **both** cases. Post-frame so the arithmetic runs against the `itemExtent`
+    // the rows were just built with, and un-animated so nothing can cancel it
+    // half way — a 140 ms tween across hundreds of rows is a blur, and every
+    // rebuild during it (the preview retarget below, a late EPG) abandons the
+    // scroll wherever it got to, which is precisely "the channel is selected
+    // but off-screen". Logging the settled offset unconditionally is the other
+    // half: the old `settled` line only fired on a group switch, so the common
+    // case (already in "All channels") logged the *pre*-scroll offset and
+    // nothing else, which is why three rounds of guessing could not tell a
+    // failed scroll from a successful one.
+    _focus.selectChannel(index, reveal: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // Whatever the cursor says *now* is what gets revealed, so a second
+      // number typed inside the same frame scrolls to the newer target
+      // instead of undoing it.
+      _focus.revealSelectedChannel(immediate: true);
+      DiagnosticsLog.instance.add(
+        'navigation',
+        'number jump settled index=$index '
+        'extent=${_liveChannelRowExtent().round()} '
+        'offset=${_scrollController.hasClients ? _scrollController.offset.round() : -1} '
+        'max=${_scrollController.hasClients ? _scrollController.position.maxScrollExtent.round() : -1}',
+      );
+    });
+    if (takeFocus) _focus.focusChannels();
+  }
+
+  /// Whether the current view draws [target] at all.
+  bool _draws(Channel target) => _visible.any((c) => c.id == target.id);
+
+  /// Whether the list *would* draw [target] in [groupId], ignoring the name
+  /// search. The predicate `planNumberJumpGroup` ladders over — a
+  /// search-ignoring answer, because the search is cleared independently and
+  /// must not decide the group.
+  bool _drawnByGroup(Channel target, String? groupId) {
+    if (groupId == kFavoritesCategoryId) {
+      return _isFavorite(ContentKind.live, target.id);
+    }
+    if (groupId == null) {
+      return !_hiddenCategories(ContentKind.live).contains(target.categoryId);
+    }
+    return target.categoryId == groupId;
+  }
+
   // Focus-debounce for desktop auto-preview (stays here — it's focus timing).
   Timer? _previewTimer;
 
@@ -479,6 +639,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       scrollController: _scrollController,
       categoryScrollController: _categoryScrollController,
       visibleChannels: () => _visible,
+      allChannels: () => _numberSearchSpace,
       orderedCategoryIds: () => [
         null,
         for (final category in _liveCategoriesForUi) category.id,
@@ -492,6 +653,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       onPlayChannel: _play,
       onToggleFavorite: (channel) =>
           unawaited(_toggleFavorite(ContentKind.live, channel.id)),
+      onNumberCommitted: (channel) => unawaited(_onNumberCommitted(channel)),
       onFocusTabs: _focusTabs,
       // The coordinator has no `BuildContext`, so it can't reach `appMotion`
       // itself — this callback is how the list reveal honours "remove
@@ -1134,6 +1296,46 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     return _visibleCache = _computeVisible();
   }
 
+  /// The channels a typed number resolves against: **every** channel of the
+  /// browsing context, with the category filter, the hidden categories and the
+  /// search query all deliberately ignored.
+  ///
+  /// A number is a jump, not a search, and the user is explicit that a number
+  /// reaches the whole list: matching against `_visible` would make the same
+  /// digits resolve to different channels depending on which group (or search
+  /// text) happened to be active, and would put every channel outside the
+  /// current group out of reach of the keyboard entirely.
+  ///
+  /// So the space is **every channel some view can draw**, which is the union of
+  /// the groups: the catalog minus the categories the user has disabled, plus
+  /// the favorites — a favorite is shown from a disabled category on purpose, so
+  /// it is reachable and therefore matchable. A channel no view can draw is
+  /// deliberately *not* in the space: the chip would name it as the destination
+  /// and then select nothing, and re-enabling a category the user turned off in
+  /// source settings is not something a keystroke may do.
+  ///
+  /// The cross-source Favorites view is the one context where "all channels"
+  /// means something other than the active source's catalog — its rows *are* the
+  /// cache read across sources — so it answers with those rows rather than with
+  /// the active source's channels, which it does not draw.
+  List<Channel> get _numberSearchSpace {
+    if (_categoryId == kAllSourcesFavoritesCategoryId) {
+      return [for (final item in _globalFavorites.items) item.channel];
+    }
+    final hidden = _hiddenCategories(ContentKind.live);
+    final favs = _favoriteIds(ContentKind.live);
+    final space = <Channel>[];
+    final seen = <String>{};
+    for (final channel in _live.channels) {
+      if (!seen.add(channel.id)) continue;
+      if (!favs.contains(channel.id) && hidden.contains(channel.categoryId)) {
+        continue;
+      }
+      space.add(channel);
+    }
+    return space;
+  }
+
   List<Channel> _computeVisible() {
     final q = _query.trim().toLowerCase();
     // The cross-source view is not a filter over the loaded catalog — its rows
@@ -1581,9 +1783,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           PageRouteBuilder(
             transitionDuration: Duration.zero,
             reverseTransitionDuration: Duration.zero,
-            pageBuilder: (_, _, _) => PlayerScreen(
-              title: channel.name,
-              stream: stream,
+                pageBuilder: (_, _, _) => PlayerScreen(
+                  title: _channelTitleLabel(channel, null),
+                  stream: stream,
               sourceName: repo.source.name,
               zap: zap,
               bufferPreset: _bufferPresetForChannel(channel),
@@ -1845,7 +2047,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // Context-independent on purpose — nothing in the player derives from
       // the route builder's element.
       Widget buildPlayer() => PlayerScreen(
-        title: channel.name,
+        title: _channelTitleLabel(channel, null),
         stream: playbackStream,
         sourceName: playRepo.source.name,
         // Live zapping: from here on the *controller* answers "which channel
@@ -2246,7 +2448,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       await navigator.push(
         MaterialPageRoute(
           builder: (_) => PlayerScreen(
-            title: '${channel.name} · ${programme.title}',
+            title: _channelTitleLabel(channel, programme.title),
             stream: stream,
             sourceName: playRepo.source.name,
             bufferPreset: bufferPresetFromName(playConfig.bufferPresetName),
@@ -2656,12 +2858,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// dropdown. The channel cursor restarts at the top of the new list. The
   /// focus coordinator moves OK activation into a non-empty channel list;
   /// pointer/dropdown callers retain their natural focus behavior.
-  void _selectCategory(String? categoryId) {
+  /// [scrollToTop] is false only for a reveal that names its own row (a typed
+  /// channel number): the caller scrolls to that row, and a deferred
+  /// `jumpTo(0)` landing after it would throw the reveal away.
+  void _selectCategory(String? categoryId, {bool scrollToTop = true}) {
     setState(() => _categoryId = categoryId);
     _focus.syncCategorySelection(categoryId);
     _focus.resetChannelSelection();
     _focus.clampSelection();
-    _scrollToTop();
+    if (scrollToTop) _scrollToTop();
   }
 
   /// Double-Back exit confirmation: the first Back at the top of the ladder
@@ -3105,8 +3310,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           );
   }
 
-  /// Overlays the digit-entry "Ch 123" chip while the user is typing a
-  /// channel number on the remote (see [LiveFocusCoordinator.digitBuffer]).
+  /// Overlays the digit-entry chip while the user types a channel number (see
+  /// [LiveFocusCoordinator.numberEntry]). The chip is the shared
+  /// [ChannelNumberChip] the fullscreen player draws too — the digits on one
+  /// line, the channel they resolve to on the second, `No Data Found` when
+  /// nothing does.
   ///
   /// [body] is passed through as the builder's `child`, so typing digits
   /// repaints the chip only — never the channel list underneath it.
@@ -3115,34 +3323,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       listenable: _focus.digitEntry,
       child: body,
       builder: (context, child) {
-        if (_focus.digitBuffer.isEmpty) return child!;
+        if (!_focus.numberEntry.isActive) return child!;
         return Stack(
           children: [
             child!,
             Positioned(
               top: 8,
               right: 16,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: AppColors.panel.withValues(alpha: 0.95),
-                  borderRadius: BorderRadius.circular(AppRadius.tile),
-                  border: Border.all(color: AppColors.accent, width: 2),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 8,
-                  ),
-                  child: Text(
-                    'Ch ${_focus.digitBuffer}',
-                    style: const TextStyle(
-                      color: AppColors.textHi,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                ),
+              child: ChannelNumberChip(
+                digits: _focus.digitBuffer,
+                matchLabel: _focus.digitMatchLabel,
+                matched: _focus.digitMatch != null,
               ),
             ),
           ],
@@ -3439,3 +3630,14 @@ class _ChannelListZapCatalog implements ZapCatalog {
 /// [_ChannelListZapCatalog], and only for a range that has no provider
 /// categories at all.
 const String _kZapSourcePrefix = 'zapsrc:';
+/// Window title composed like the channel-list rows: a provider-assigned
+/// channel number first when one exists, then the name (and an optional
+/// programme title suffix for catch-up entries).
+String _channelTitleLabel(Channel channel, [String? suffix]) {
+  final base = channel.number == null
+      ? channel.name
+      : '${channel.number} - ${channel.name}';
+  return (suffix == null || suffix.isEmpty)
+      ? base
+      : '$base · $suffix';
+}

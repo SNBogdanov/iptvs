@@ -65,6 +65,7 @@ void main() {
       scrollController: controller,
       categoryScrollController: ScrollController(),
       visibleChannels: () => channels,
+      allChannels: () => channels,
       orderedCategoryIds: () => const [null],
       channelRowExtent: () => extent,
       categoryRowExtent: () => 48,
@@ -74,6 +75,7 @@ void main() {
       onCategoryActivated: (_) {},
       onPlayChannel: (_) {},
       onToggleFavorite: (_) {},
+      onNumberCommitted: (_) {},
       onFocusTabs: () {},
     );
     addTearDown(focus.dispose);
@@ -126,6 +128,7 @@ void main() {
       scrollController: controller,
       categoryScrollController: ScrollController(),
       visibleChannels: () => channels,
+      allChannels: () => channels,
       orderedCategoryIds: () => const [null],
       channelRowExtent: () => _epgExtent,
       categoryRowExtent: () => 48,
@@ -135,6 +138,7 @@ void main() {
       onCategoryActivated: (_) {},
       onPlayChannel: (_) {},
       onToggleFavorite: (_) {},
+      onNumberCommitted: (_) {},
       onFocusTabs: () {},
     );
     addTearDown(focus.dispose);
@@ -159,6 +163,7 @@ void main() {
       scrollController: controller,
       categoryScrollController: ScrollController(),
       visibleChannels: () => const <Channel>[],
+      allChannels: () => const <Channel>[],
       orderedCategoryIds: () => const [null],
       channelRowExtent: () => _epgExtent,
       categoryRowExtent: () => 48,
@@ -168,6 +173,7 @@ void main() {
       onCategoryActivated: (_) {},
       onPlayChannel: (_) {},
       onToggleFavorite: (_) {},
+      onNumberCommitted: (_) {},
       onFocusTabs: () {},
     );
     addTearDown(focus.dispose);

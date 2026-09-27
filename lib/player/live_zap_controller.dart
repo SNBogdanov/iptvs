@@ -20,6 +20,7 @@ import 'package:flutter/foundation.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import 'buffer_preset.dart';
+import 'channel_number_entry.dart';
 import 'zap_command.dart';
 import 'zap_quick_list.dart';
 
@@ -182,9 +183,14 @@ class LiveZapController extends ChangeNotifier {
   final ZapCatalog catalog;
   final Duration settleDelay;
 
-  /// Idle time before a typed channel number commits itself. Defaults to the
-  /// value the live tab's own digit entry uses — they must agree — and is
-  /// injectable only so tests don't have to wait it out.
+  /// Idle time before a typed channel number commits itself.
+  ///
+  /// Defaults to — and is handed to — [numberEntry], which owns the timing for
+  /// both surfaces that accept a number; it is injectable only so tests don't
+  /// have to wait it out. The *full-length* case has its own, shorter pause
+  /// ([ChannelNumberEntry.fullLengthCommitDelay]) and is not routed through
+  /// here, because a number that cannot grow any further is a different
+  /// gesture from a partial one.
   final Duration digitCommitDelay;
   final Duration messageDuration;
 
@@ -214,13 +220,39 @@ class LiveZapController extends ChangeNotifier {
   bool _disposed = false;
 
   final ZapDebounce _settleTimer = ZapDebounce();
-  final ZapDebounce _digitTimer = ZapDebounce();
   Timer? _messageTimer;
-  String _digitBuffer = '';
   String? _message;
   bool _settling = false;
   bool _settleRunning = false;
   bool _resettleWanted = false;
+  List<Channel>? _rangeChannelsCache;
+
+  /// The digit buffer, **the same [ChannelNumberEntry] the live list types
+  /// numbers into** — one implementation, so a number means the same thing in
+  /// both places, down to the commit timing and the exact-then-prefix match.
+  /// The *search space* stays this session's range (see [_rangeChannels]),
+  /// which is the one thing the two surfaces deliberately disagree about: the
+  /// player must not land on a channel its own cursor cannot step away from.
+  ///
+  /// It notifies straight into [_notify], so a keystroke reaches the banner and
+  /// the surfaces' payloads through the same path every other change does — the
+  /// digit readout is not a second, quieter notification system.
+  late final ChannelNumberEntry numberEntry = ChannelNumberEntry(
+    channels: _rangeChannels,
+    commitDelay: digitCommitDelay,
+    onCommitted: _onNumberCommitted,
+  )..addListener(_notify);
+
+  /// This session's channels, for [ChannelNumberEntry] to match digits against.
+  ///
+  /// Cached per range, because the chip re-matches on **every keystroke** (that
+  /// live match is the point) and a range can be 250k channels: rebuilding the
+  /// list per digit would put a 250k-element allocation on a keypress path,
+  /// which is the same per-keystroke cost the lazy [zapEntriesOf] range exists
+  /// to avoid. Invalidated where the range is replaced, so a re-range can never
+  /// match a number against rows this session no longer draws.
+  List<Channel> _rangeChannels() =>
+      _rangeChannelsCache ??= [for (final entry in _entries) entry.channel];
 
   /// Single-flight across the zap settle, the reconnect watchdog's re-resolve
   /// and "Go to live" — the Dart mirror of Kotlin's `ResolveGate`, for the
@@ -268,7 +300,15 @@ class LiveZapController extends ChangeNotifier {
   int get zapCount => _zapCount;
   bool get zapped => _zapCount > 0;
 
-  String get digitBuffer => _digitBuffer;
+  /// The digits typed so far, and the channel they currently resolve to.
+  ///
+  /// The match is what the entry chip's second line prints, so a partial number
+  /// shows its destination *before* it commits — a jump the user can see and
+  /// change their mind about, which is the whole reason the buffer became a
+  /// shared object rather than an `int` in a switch.
+  String get digitBuffer => numberEntry.digits;
+  Channel? get digitMatch => numberEntry.match;
+  String get digitMatchLabel => numberEntry.matchLabel;
   String? get message => _message;
 
   /// True while a settled zap is stopping / resolving / opening. The live
@@ -276,7 +316,18 @@ class LiveZapController extends ChangeNotifier {
   /// be reconnecting is one we deliberately stopped.
   bool get settling => _settling;
 
-  bool get hasPendingMove => _settleTimer.pending || _index != _playingIndex;
+  /// Whether the cursor is somewhere the next settle has not caught up with.
+  ///
+  /// A `playEntry` from outside the range ([playingIndex] `-1`) leaves the
+  /// cursor deliberately parked on a row of *this* session's launch snapshot,
+  /// not on the playing channel — nothing is pending there, and an index
+  /// comparison would report a pending move for the rest of the session and
+  /// never stop.
+  bool get hasPendingMove {
+    if (_settleTimer.pending) return true;
+    if (_playingIndex < 0) return false;
+    return _index != _playingIndex;
+  }
 
   int _bannerRevision = 0;
 
@@ -322,7 +373,7 @@ class LiveZapController extends ChangeNotifier {
       'channelName': entry.name,
       'sourceName': entry.sourceName,
       if (entry.channel.logo != null) 'logoUrl': entry.channel.logo,
-      'digits': _digitBuffer,
+      'digits': numberEntry.digits,
       if (_message != null) 'message': _message,
       'settling': _settling || _settleTimer.pending,
       'position': _index + 1,
@@ -370,13 +421,13 @@ class LiveZapController extends ChangeNotifier {
       case ZapCommandKind.activate:
         // OK commits a pending number early; otherwise it is not ours — the
         // surface's own OK (reveal the chrome) still runs.
-        if (_digitBuffer.isEmpty) return false;
+        if (numberEntry.digits.isEmpty) return false;
         commitDigits();
         return true;
       case ZapCommandKind.back:
         // Back clears a half-typed number before it means anything else, the
         // same peel-one-rung shape the live tab's Back ladder uses.
-        if (_digitBuffer.isEmpty) return false;
+        if (numberEntry.digits.isEmpty) return false;
         clearDigits();
         return true;
       case ZapCommandKind.favorite:
@@ -417,7 +468,7 @@ class LiveZapController extends ChangeNotifier {
         moveQuickList(-1);
         return true;
       case ZapCommandKind.activate:
-        if (_digitBuffer.isNotEmpty) {
+        if (numberEntry.digits.isNotEmpty) {
           commitDigits();
           return true;
         }
@@ -427,7 +478,7 @@ class LiveZapController extends ChangeNotifier {
         descendQuickList();
         return true;
       case ZapCommandKind.back:
-        if (_digitBuffer.isNotEmpty) {
+        if (numberEntry.digits.isNotEmpty) {
           clearDigits();
           return true;
         }
@@ -473,73 +524,104 @@ class LiveZapController extends ChangeNotifier {
 
   void appendDigit(int digit) {
     if (digit < 0 || digit > 9) return;
-    if (_digitBuffer.length >= kDigitEntryMaxDigits) return;
-    _digitBuffer += '$digit';
+    // A new digit retires a stale banner note ("Couldn't play …", a failed
+    // zap); the entry knows nothing of the banner, so this is ours to clear.
+    // The notify is the entry's own — it is a ChangeNotifier and listens in.
     _clearMessage();
-    _digitTimer.schedule(digitCommitDelay, commitDigits);
-    _notify();
+    numberEntry.appendDigit(digit);
   }
 
   /// Jumps to the channel whose [Channel.number] matches the buffer.
   ///
+  /// The matching itself — and the pre-commit chip that shows where the digits
+  /// are headed — belongs to [numberEntry], the same object the live list types
+  /// into, so a number means the same thing in both places down to the commit
+  /// timing. What is *this* controller's is what committing means.
+  ///
   /// The search is **the zap range only** — the list Up/Down walks. Falling
   /// back to the whole source would land the player on a channel the cursor
   /// can't then step away from, and a cross-source launch list has no single
-  /// "whole source" to fall back to. A miss says so in the banner and leaves
-  /// playback alone. A number no channel carries (or a duplicate) resolves to
-  /// the first match in list order, exactly as the live tab's own digit entry
-  /// does.
-  void commitDigits() {
-    _digitTimer.cancel();
-    final raw = _digitBuffer;
-    if (raw.isEmpty) return;
-    _digitBuffer = '';
-    final number = int.tryParse(raw);
-    if (number == null) {
+  /// "whole source" to fall back to.
+  void commitDigits() => numberEntry.commit();
+
+  void clearDigits() => numberEntry.clear();
+
+  /// A committed number, resolved to a row of this session's range.
+  ///
+  /// With the quick list open a typed number **moves the cursor**, it does not
+  /// zap: the list is on screen so the user can see and confirm what they
+  /// picked, and jumping playback out from under an open list is the one thing
+  /// the list exists to avoid. Only the channels mode can act on a channel
+  /// number at all; in the other two the commit is simply inert.
+  ///
+  /// A miss never reaches here — [ChannelNumberEntry] clears the buffer and
+  /// fires nothing, leaving the answer to the chip's own `No Data Found`, which
+  /// is what the user has been watching the whole time they typed.
+  void _onNumberCommitted(Channel target) {
+    // Identity, not `channel.id`: the rows here span sources, and two providers
+    // can both call a channel "12". A row that is not *this* object is not a
+    // row this session can play, so fail closed rather than guess a source.
+    final row = _entries.indexWhere((entry) => identical(entry.channel, target));
+    if (row < 0) {
       _notify();
       return;
     }
-    final target = _entries.indexWhere((e) => e.number == number);
-    // With the quick list open a typed number **moves the cursor**, it does
-    // not zap: the list is on screen so the user can see and confirm what
-    // they picked, and jumping playback out from under an open list is the
-    // one thing the list exists to avoid. Only the channels mode can act on a
-    // channel number at all; in the other two the buffer is simply dropped.
     if (_listOpen) {
-      if (_listMode != ZapQuickListMode.channels) {
-        _notify();
-        return;
+      if (_listMode == ZapQuickListMode.channels) {
+        _setQuickListCursor(row);
       }
-      if (target < 0) {
-        _showMessage('No channel $number');
-        return;
-      }
-      _setQuickListCursor(target);
       return;
     }
-    if (target < 0) {
-      _showMessage('No channel $number');
-      return;
-    }
-    if (target == _index) {
+    if (row == _index) {
       _notify();
       return;
     }
     // A typed number is a deliberate, specific destination — there is no scan
     // to coalesce, so it commits at once rather than waiting out the settle.
-    _moveTo(target, immediate: true);
-  }
-
-  void clearDigits() {
-    _digitTimer.cancel();
-    if (_digitBuffer.isEmpty) return;
-    _digitBuffer = '';
-    _notify();
+    _moveTo(row, immediate: true);
   }
 
   /// Commits a pending cursor move now (used by OK and by teardown paths that
   /// must not leave a half-applied zap behind).
   void commitPendingMove() => _settleTimer.flush();
+
+  /// Plays a channel the **host** chose — a number typed in the live list, which
+  /// need not be in this session's range at all (the list is filtered, paged and
+  /// cross-source; the launch snapshot is none of those).
+  ///
+  /// This is the single door for that, and it goes through the settle rather
+  /// than around it on purpose: the stop-before-resolve order that a
+  /// single-connection account enforces, the resolve gate, the settle coalescing
+  /// and the watchdog's stand-down all live there. A host path that called
+  /// `onPlay` itself would skip the first of those — which is exactly the
+  /// double-connection bug the settle exists to prevent — and would leave
+  /// [playing], and with it the banner, the quick list's marker and every native
+  /// surface, describing a different channel than the one on screen.
+  ///
+  /// Inside the range this is a plain zap, so the cursor follows: Up/Down
+  /// continues from the channel the user jumped to rather than from wherever
+  /// it was. Outside it the cursor is left parked — it is this session's launch
+  /// range, not a mirror of the host's list, and claiming a position in it would
+  /// be a lie the next Up key would act on.
+  Future<void> playEntry(ZapEntry entry) async {
+    // `==`, not `identical`: a launch range materialises a fresh ZapEntry per
+    // index (see zapEntriesOf), so identity would never hold even for the
+    // channel on screen — and the pair identity it does compare is exactly the
+    // `(channel.id, config.id)` that keeps two providers' "12" apart.
+    if (_disposed || entry == _playingEntry) return;
+    final index = _indexOfEntry(entry);
+    if (index >= 0) {
+      // Awaited, unlike every other immediate move: the caller named a
+      // destination, so its future must not complete while a stale channel is
+      // still on screen.
+      await _moveTo(index, immediate: true);
+      return;
+    }
+    _hostTarget = entry;
+    _clearMessage();
+    _settleTimer.cancel();
+    await _settle();
+  }
 
   // ── Quick list (Phase 6) ───────────────────────────────────────────────
   //
@@ -768,6 +850,7 @@ class LiveZapController extends ChangeNotifier {
       return;
     }
     _entries = rows;
+    _rangeChannelsCache = null;
     _rangeCatId = category.id;
     _rangeCatLabel = category.title;
     _playingIndex = _indexOfEntry(_playingEntry);
@@ -967,17 +1050,28 @@ class LiveZapController extends ChangeNotifier {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
-  void _moveTo(int target, {bool immediate = false}) {
-    if (_disposed) return;
+  /// A host-driven channel change waiting to be played, set by [playEntry] for
+  /// a row outside this session's range and consumed by the next [_settle].
+  /// Any cursor move supersedes it — a decision the user made with the D-pad
+  /// outranks a number the host asked for a moment earlier.
+  ZapEntry? _hostTarget;
+
+  /// Moves the cursor to [target] and plays it. An **immediate** move returns
+  /// the settle itself, so a caller that has to report a named destination as
+  /// played — [playEntry] — completes only once it is actually on screen; a
+  /// held-key or list move returns null and settles on the timer as before.
+  Future<void>? _moveTo(int target, {bool immediate = false}) {
+    if (_disposed) return null;
+    _hostTarget = null;
     _index = target;
     _clearMessage();
     _notify();
     if (immediate) {
       _settleTimer.cancel();
-      unawaited(_settle());
-    } else {
-      _settleTimer.schedule(settleDelay, () => unawaited(_settle()));
+      return _settle();
     }
+    _settleTimer.schedule(settleDelay, () => unawaited(_settle()));
+    return null;
   }
 
   Future<void> _settle() async {
@@ -994,13 +1088,21 @@ class LiveZapController extends ChangeNotifier {
     try {
       do {
         _resettleWanted = false;
-        final target = _index;
-        if (target == _playingIndex) break;
+        // A host play names its own row, so it is consumed here: the loop below
+        // re-reads the cursor on every pass, and a row that is not in the range
+        // has no index for it to read.
+        final host = _hostTarget;
+        _hostTarget = null;
+        final list = _entries;
+        final target = host == null ? _index : _indexOfEntry(host);
+        final entry = host ?? list[target];
+        // Only the cursor may already be where it is headed: a host play
+        // targets a row the cursor is not on by construction (that is why it
+        // exists), so it must not be short-circuited as "already there".
+        if (host == null && target == _playingIndex) break;
         // The list this index belongs to, captured with it: the quick list
         // can re-range the session while a settle is in flight, and `target`
         // then means a different row (or none) in the new range.
-        final list = _entries;
-        final entry = list[target];
         // A reconnect re-resolve in flight describes the channel we are
         // leaving; discard its outcome rather than let it reload behind us.
         // (The HTTP call itself can't be cancelled — the same tolerance
@@ -1102,13 +1204,18 @@ class LiveZapController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _settleTimer.cancel();
-    _digitTimer.cancel();
     _messageTimer?.cancel();
     _messageTimer = null;
     onStopCurrent = null;
     onPlay = null;
     onChannelChanged = null;
     onExitRequested = null;
+    // The entry is ours (we constructed it), so we dispose it — but the
+    // listener has to go first, or a commit landing in the same tick would
+    // notify a disposed controller.
+    numberEntry
+      ..removeListener(_notify)
+      ..dispose();
     super.dispose();
   }
 }

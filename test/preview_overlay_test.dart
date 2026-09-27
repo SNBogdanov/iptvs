@@ -62,6 +62,7 @@ void main() {
       scrollController: scroll,
       categoryScrollController: categoryScroll,
       visibleChannels: () => channels,
+      allChannels: () => channels,
       orderedCategoryIds: () => const [null],
       channelRowExtent: () => metrics.channelRowExtent(false),
       categoryRowExtent: () => metrics.categoryRowExtent,
@@ -71,6 +72,7 @@ void main() {
       onCategoryActivated: (_) {},
       onPlayChannel: (_) {},
       onToggleFavorite: (_) {},
+      onNumberCommitted: (_) {},
       onFocusTabs: () {},
     );
     addTearDown(() {

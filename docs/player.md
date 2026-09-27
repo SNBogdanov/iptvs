@@ -719,6 +719,39 @@ a normal native open. This covers the cold/fast preview→fullscreen where the a
 colorimetry read missed HDR; the cost is a brief mid-playback switch. VOD/direct opens never set
 `preferWindowsEmbedded`, so they open native immediately.
 
+**A native surface taking over an already-fullscreen window must take over the fullscreen ownership
+in place, never by restoring the window.** The runner cannot read media_kit's saved pre-fullscreen
+rect — `EnterNativeFullscreen` keeps it in `media_kit_video`'s own statics (`utils.cc`), so the
+first version of the handoff had Dart exit the embedded fullscreen (restore through media_kit) and
+re-enter through the runner; the return-to-windowed-and-back was *visible* on the first SDR→HDR
+switch (later switches stayed native-fullscreen, so it only ever flashed once). Now the runner
+learns the genuine windowed placement **before** media_kit strips `WS_OVERLAPPEDWINDOW`:
+`_setEmbeddedWindowFullscreen(true)` calls the new `recordWindowedState` channel method first, and
+the takeover in `_createWindowsNativeHdrSurface` only calls `_setNativeFullscreen(true)` — the
+window is already borderless, so the runner's actual==target shortcut aligns
+`native_window_fullscreen_` and returns without moving the window. The recorded placement (identical
+to media_kit's, same instant) serves the eventual exit, whether through the native button or
+`prepareExit`.
+
+**While the native surface and its GDI overlay are engaged, framework keys must be routed
+explicitly.** Windows focus deliberately stays on the video surface while native playback is active
+("Keep keyboard focus on the native video surface…", `ShowNativeControls`) so D-pad/arrow keys keep
+reaching the native handler — but the engine's keyboard intake is installed on the *Flutter view*
+window, not the top level, so a WM_KEYDOWN that only travels surface→top-level and falls into
+`HandleTopLevelWindowProc` is dropped (that length appeared as F/PgUp/PgDn/M dying on the native HDR
+surface). **Never route those keys by posting raw WM_KEYDOWN to the view**: feeding the engine's
+intake synthetic keystrokes while the surface holds focus trips its fail-fast (a deterministic
+`0xC0000409` in `flutter_windows.dll`, two minidumps at the same RVA — it is not a crash our code
+can trace, it is the engine refusing the delivery). Instead `FlutterWindow::MessageHandler` maps the
+HUD-unclaimed player keys — ESC/Enter/Space/arrows stay native; F→`fullscreen`, M→`miniPlayer`,
+PgDn/PgUp→`zapDown`/`zapUp`, S→`goLive` — to command strings sent over the same
+`kNativeControlCommandMessage`/`nativeControl` channel the native buttons use, so they land in Dart's
+`_handleNativeControlCommand` exactly like a pressed button. That channel reaches Dart without
+touching the engine's keyboard intake, which is what makes it crash-free. The
+GDI OSD's fonts also scale to the display DPI (`UiFont` → `MulDiv(size, dpi, 96)` against the
+controls overlay's DPI): the layered overlay is fixed-px while the Flutter overlay sizes text in dp,
+so unscaled the OSD visibly shrinks the moment an HDR channel escalates to this surface.
+
 **Never ask `_nativePlaybackLaunched` whether this `_player` owns playback — ask
 `_separateEngineOwnsPlayback`.** That flag starts **true** on Windows for every non-preview open
 (`_usesWindowsNativeSurface`), because the happy path deliberately builds no `VideoController`. But
@@ -1678,6 +1711,111 @@ suite executes this script.
 ## Other platforms / fallback
 
 Embedded `media_kit_video` controls, with mpv asked to tone-map HDR into SDR.
+
+## Live zap (PgDn / PgUp)
+
+PgDn / PgUp in the fullscreen live player steps to the **next/previous channel in the
+currently-visible channel list** and keeps playing on the same engine — no exit, no preview
+reconciliation, no VOD session. `PlayerScreen.onZapChannel` is provided by the host
+(`_ChannelListScreenState._resolveZapTarget`) and bound only over the live tab; the constructor
+stays null for VOD, catch-up, and every route that isn't channel-list-borne, so a `null`
+`onZapChannel` is also the "VOD session" guard.
+
+- **The resolver is state-based, never reuse of the route's original widget fields.** The
+  `_current*` mirrors already exist so a single live route survives probes/episodes without a
+  rebuild; the zap target is applied by swapping those mirrors and calling `_player.open(Media(...))`
+  on the *same* engine. Episodes, reconnect/resolve-again, headers, and the favorite closure all
+  follow the zap target, resolved by `lib/screens/channel_list_screen.dart` against the **owning**
+  repository — a zap can cross sources from the cross-source Favorites view, where EPG goes through
+  the pair-keyed `epgFor(sourceId, channelId)` path and the star routes to the foreign source's
+  favorite store exactly as row playback does. The cursor is the pure `liveZapIndex` (wrap at both
+  ends; a session with no current id starts from the ends; single-channel lists no-op), pinned by
+  `test/live_zap_test.dart`.
+- **Guarded off the separate-engine surfaces exactly like every other Dart-side control:**
+  `_separateEngineOwnsPlayback` — the Linux-native mpv window and the Android/iOS native players own
+  both their engine and their input, so a zap there would reopen an idle embedded engine nobody is
+  looking at (on Linux the native window would fight the replays). Windows' GDI overlay is
+  deliberately *not* gated — it forwards unclaimed keys back to Flutter (verified in the runner's
+  top-level message loop), so PgDn/PgUp reach the route on the Windows-native surface too. On iOS
+  the zap works only when the embedded mpv engine was chosen (`_iosEngine` is an init-time decision,
+  so an AVPlayer-routed session cannot be zapped; the AVPlayer controller owns its input).
+- **Audio state survives the swap.** Mute and volume are session-wide (`PlaybackAudioSession`,
+  see below); the reopen re-applies the session, so a muted or lowered stream stays that way across
+  the zap, on the embedded and the Windows-native surfaces alike (Linux-native carries it as a
+  `set_property volume` on session start).
+- **The seamless preview handoff's return leg re-seats the preview's identity, but never
+  restarts it.** When `_openLivePlayer`'s route adopted the shared preview engine and the user
+  zapped while it was up, the engine is playing the *last* zap target when the route pops while the
+  preview controller still describes the pre-zap channel. The pop consumes the pending zap once
+  (`channel_list_screen`'s `_pendingZapTarget`/`_pendingZapRepo` latch — nulled on every other
+  return path) and, only in the seamless-adopted branch, calls
+  `LivePreviewController.repointAdopted`: it replaces only the target channel/stream/owning-repo
+  (`channelId`, `stream`, `previewSourceId`, the buffering preset, the EOF-restart incident
+  bookkeeping) and deliberately does **not** reopen the engine — a restart would reconnect a
+  single-connection portal for a stream that is already connected, and would re-apply the preview's
+  mute over the session state the route owns. `_handleCompleted`'s later EOF-restart then resolves
+  through the repointed channel's own repository.
+
+## Typed channel numbers (full screen)
+
+Digits in the fullscreen live player jump to a channel by number, on the **same engine** as a zap —
+same resolver, same `_current*` mirror swap, same single-flight `_zapping` guard, so a number cannot
+race a PgDn or a reconnect. It is one of the three ways `onSelectChannel` is wired
+(`ChannelListScreen._resolveNumberTarget`), alongside row playback and the zap target; the other two
+routes (VOD, catch-up, every route that is not channel-list-borne) leave it null, exactly as
+`onZapChannel` does.
+
+- **The entry is shared, not reimplemented.** `PlayerScreen` holds its own `ChannelNumberEntry` over
+  the **whole catalog** the host passed in (`allChannels`) and draws the shared
+  `ChannelNumberChip`. The list and the player therefore cannot disagree about what a digit does,
+  what it matches, or when it commits — the whole point of sharing is that there is only one answer
+  to "200" per install. Rules and the reason for each are in
+  [docs/tv-navigation.md](tv-navigation.md#typed-channel-numbers).
+- **A null `onSelectChannel` is a real state, and "live channel" is not a reason to leave it
+  null.** It is the "this route has no live catalog to step through" signal — catch-up and VOD —
+  and the constructor comment says so. Both channel-list-borne live routes pass it: the
+  preview-adopted `_openLivePlayer` and the direct `_openFullscreenDirect` (narrow windows, and
+  cross-source favorites). The second one was missed, and because the gate is a null check rather
+  than a visible error, the symptom was "PgDn works, digits do nothing" on a phone and on every
+  foreign favorite — a feature that was simply absent rather than broken. When adding a live
+  playback route, wiring `onZapChannel` without `onSelectChannel`/`allChannels` is the mistake to
+  look for.
+- **The catalog is the host's, because a number has to cross groups.** The player cannot enumerate
+  channels itself, and a number that only reached the visible group would be unreachable in full
+  screen by definition; the host passes the same space its list searches.
+- **Gated exactly like every other Dart-side control**, off `_separateEngineOwnsPlayback`: the
+  Linux-native mpv window and the Android/iOS native players own their input, so digits typed there
+  would be answered by an embedded engine nobody is looking at. Windows' GDI overlay is deliberately
+  not gated — it forwards unclaimed keys back to Flutter, which is what makes PgDn/PgUp and this
+  work on the Windows-native surface. A digit that arrives on a gated surface is *dropped* rather
+  than half-answered, and it still clears a buffer in progress.
+- **The chip's `isActive` is read inside its own `ListenableBuilder`.** Wrapping the builder in an
+  `if` on the entry's state is a rebuild that never happens: the buffer's changes are what the
+  builder listens *for*, so the chip would only ever appear on a parent rebuild that a keystroke does
+  not cause.
+- **The buffer is disposed with the route**, so a screen torn down inside the 1500 ms window cannot
+  commit into a dead screen.
+
+## Playback audio is a device-wide session
+
+Mute and volume survive **channel changes** (and every surface that writes audio) via a single
+top-level `PlaybackAudioSession` in `player_screen.dart`: `applied` is `0` while muted else
+`volume` (0–100, defaults 100), `apply(player)` is called on every open/reopen — embedded,
+preview-adopted, zap, and the iOS mpv fallback — and a `volume` stream listener plus the Android
+Activity's close relay (`RESULT_VOLUME`, mirrored from the native overlay's own slider) `record()`
+the engine's actual state back. A zero records the deliberate mute; a non-zero records a level and
+an unmute. The app's own unmute restores the level the session remembers (never a hardcoded `100`),
+and every mute toggle — the M key (`_toggleMute`), the native GDI overlay's mute button, the native
+volume slider — `record()`s into the session **explicitly**, never by reading the engine's raw
+`state.volume`: mpv's volume event can lag or never arrive on the native surfaces, so a toggle
+against that stale read would re-mute instead of restoring sound, and a slider level that never
+reached the session would silently revert on the next zap. `apply()` itself never flips the session's
+muted flag (that relies on the volume stream), which is why unmute clears it with its own `record()`
+first. One consequence of the broadcast (`Player.stream`) is load-bearing: media_kit's volume
+is not replayed to late subscribers, so the **by-design**-muted preview engine (`setMuted(true)`
+before the listener attaches, never emitted) cannot poison a session that must instead reflect the
+user's choices. On Android the adopted native Activity opens with `EXTRA_VOLUME` and reports its
+final level back so the session survives the whole native round-trip.
 
 ## Live preview + seamless handoff (Android)
 

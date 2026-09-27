@@ -228,14 +228,15 @@ class LiveLayoutMetrics {
 
   /// Side of the channel logo / number badge.
   ///
-  /// Derived from the row it sits in rather than fixed at 36/40, so it grows
-  /// with the taller EPG row — and with density and text scaling — instead of
-  /// being dwarfed by it. The floor keeps the *plain* row's badge at roughly
-  /// its previous size (that row's content box is only ~48 px, so a
-  /// proportional value there would shrink it), and the ceiling stops the
-  /// badge from ever being what makes a row overflow.
-  double logoSize(bool hasEpg) =>
-      ((channelRowExtent(hasEpg) - _rowChrome(compact)) * 0.62).clamp(
+  /// Read from the **plain** row — the tighter of the two — so a channel looks
+  /// the same whether or not its programme has arrived. Deriving it per row made
+  /// the badge jump from the 36 px floor to ~55 px the moment a source's guide
+  /// showed up (and back for the channels the guide has nothing for), which
+  /// read as the whole list resizing itself. The EPG row is taller because it
+  /// carries three more lines of *text*, not because the badge earned more room.
+  /// Density and text scaling still move it, through the extent it is read from.
+  double get logoSize =>
+      ((channelRowExtentPlain - _rowChrome(compact)) * 0.62).clamp(
         36.0,
         60.0,
       );
@@ -296,6 +297,14 @@ class LiveLayoutMetrics {
 /// rather than passed in as a snapshot: one D-pad press must repaint only the
 /// pane(s) that actually changed, not the whole live body. See
 /// docs/tv-navigation.md.
+/// Finds the preview panel's picture area — the panel's own rect, which is what
+/// answers the double click. Exposed because the picture is a play target, and
+/// a play target is a thing a test has to be able to point at: the running video
+/// inside it is `IgnorePointer` by design, so "tap the video" is not a thing
+/// anyone can do, least of all a test.
+@visibleForTesting
+const previewSurfaceKey = ValueKey('iptvs.previewSurface');
+
 class LiveTabView extends StatelessWidget {
   final bool loading;
   final String? error;
@@ -695,6 +704,7 @@ class LiveTabView extends StatelessWidget {
       favoriteFocusNode: focus.previewFavoriteFocusNode,
       catchupFocusNode: focus.previewCatchupFocusNode,
       onControlKey: focus.handlePreviewControlKey,
+      onOpenFullscreen: () => onPlayChannel(preview),
       metrics: metrics,
     );
   }
@@ -939,7 +949,18 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.catchupFocusNode,
     required this.onControlKey,
     required this.metrics,
+    this.onOpenFullscreen,
   });
+
+  /// Double-click on the picture: go fullscreen on the previewed channel.
+  ///
+  /// The picture is a [IgnorePointer] (the video surface must not take hits), so
+  /// the detector wraps it rather than sitting inside it. It runs the **same**
+  /// `onPlayChannel` path a second OK does, which means the deliberate-preview
+  /// reconciliation applies unchanged — a double click on a preview that is
+  /// still resolving waits for that resolve rather than superseding it, and
+  /// only a preview that is actually running is a target.
+  final VoidCallback? onOpenFullscreen;
 
   /// How this platform's pointer reads in the hints below. `deliberate` is a
   /// *touch/remote* posture (Android today, iOS next), so this is "tap" wherever
@@ -1013,10 +1034,32 @@ class _LivePreviewPanel extends StatelessWidget {
                 border: Border.all(color: AppColors.line),
               ),
               child: ClipRRect(
+                key: previewSurfaceKey,
                 borderRadius: BorderRadius.circular(10),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
+                child: GestureDetector(
+                  // A double click is the pointer path to "watch this now": one
+                  // click on a row already starts a preview, and a second click
+                  // goes fullscreen — the two-press gesture that reads as "I
+                  // want to watch", rather than the row's single-click play that
+                  // a preview panel is not a row.
+                  //
+                  // Null unless something is actually previewing, so the logo /
+                  // error placeholders are not a fullscreen target.
+                  //
+                  // **Opaque**, because the default `deferToChild` is a trap
+                  // here: the running video is deliberately wrapped in
+                  // `IgnorePointer` (the panel's own controls live on top of it),
+                  // so there is nothing under the middle of the picture for a
+                  // deferred detector to hit, and the click would land on the
+                  // background and vanish. The picture is the target, and it is
+                  // the panel's own rect that answers for it.
+                  behavior: HitTestBehavior.opaque,
+                  onDoubleTap: previewActive && !previewLoading
+                      ? onOpenFullscreen
+                      : null,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
                     if (previewActive &&
                         !previewLoading &&
                         previewError == null)
@@ -1140,7 +1183,8 @@ class _LivePreviewPanel extends StatelessWidget {
                           ),
                         ),
                       ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1153,7 +1197,9 @@ class _LivePreviewPanel extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          channel.name,
+                          channel.number == null
+                              ? channel.name
+                              : '${channel.number} - ${channel.name}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -1353,7 +1399,7 @@ class CatchupSheet extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Catch-up · ${channel.name}',
+                      'Catch-up · ${channel.number == null ? channel.name : '${channel.number} - ${channel.name}'}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -1588,7 +1634,9 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
                         children: [
                           Expanded(
                             child: Text(
-                              widget.channel.name,
+                              widget.channel.number == null
+                                  ? widget.channel.name
+                                  : '${widget.channel.number} - ${widget.channel.name}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
@@ -1852,7 +1900,7 @@ class _ChannelTileState extends State<_ChannelTile> {
                   children: [
                     _Logo(
                       channel: channel,
-                      size: metrics.logoSize(widget.now != null),
+                      size: metrics.logoSize,
                     ),
                     SizedBox(width: metrics.compact ? 10 : 12),
                     // **The text column is laid out unconstrained and clipped.**
@@ -1894,7 +1942,9 @@ class _ChannelTileState extends State<_ChannelTile> {
                                 children: [
                                   Flexible(
                                     child: Text(
-                                      channel.name,
+                                      channel.number == null
+                                          ? channel.name
+                                          : '${channel.number} - ${channel.name}',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       // Density-scaled, unlike the theme's fixed
@@ -2118,6 +2168,15 @@ class _LogoState extends State<_Logo> {
   Widget build(BuildContext context) {
     final size = widget.size;
     final cacheSize = imageCacheSize(context, size);
+    // The badge stands in for a logo, so its glyph has to read like one: a
+    // channel number at body-text size looked lost in a tile sized for artwork,
+    // and being laid out as ordinary text in a fixed box it also *wrapped* — a
+    // four-digit number printed as "123" over "4". One line, scaled to fit the
+    // tile, which is what a logo does with an image of any aspect.
+    final label = widget.channel.number?.toString() ??
+        (widget.channel.name.isEmpty
+            ? '?'
+            : widget.channel.name.characters.first);
     final fallback = Container(
       width: size,
       height: size,
@@ -2126,14 +2185,19 @@ class _LogoState extends State<_Logo> {
         color: AppColors.panelHi,
         borderRadius: BorderRadius.circular(10),
       ),
-      child: Text(
-        widget.channel.number?.toString() ??
-            (widget.channel.name.isEmpty
-                ? '?'
-                : widget.channel.name.characters.first),
-        style: const TextStyle(
-          color: AppColors.textLo,
-          fontWeight: FontWeight.w600,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          label,
+          maxLines: 1,
+          softWrap: false,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.textLo,
+            fontSize: size * 0.46,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
         ),
       ),
     );
@@ -2145,24 +2209,30 @@ class _LogoState extends State<_Logo> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),
-      child: Image(
-        image: ScrollAwareImageProvider(
-          context: _scrollContext,
-          imageProvider: ResizeImage.resizeIfNeeded(
-            cacheSize,
-            cacheSize,
-            CachedNetworkImageProvider(logo),
+      child: Container(
+        color: AppColors.panelHi,
+        child: Image(
+          image: ScrollAwareImageProvider(
+            context: _scrollContext,
+            imageProvider: ResizeImage.resizeIfNeeded(
+              cacheSize,
+              null,
+              CachedNetworkImageProvider(logo),
+            ),
           ),
+          width: size,
+          height: size,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.low,
+          errorBuilder: (_, error, _) {
+            logImageFailure(error, logo);
+            return fallback;
+          },
+          frameBuilder: (_, child, frame, wasSynchronouslyLoaded) {
+            if (wasSynchronouslyLoaded || frame != null) return child;
+            return fallback;
+          },
         ),
-        width: size,
-        height: size,
-        fit: BoxFit.cover,
-        filterQuality: FilterQuality.low,
-        errorBuilder: (_, _, _) => fallback,
-        frameBuilder: (_, child, frame, wasSynchronouslyLoaded) {
-          if (wasSynchronouslyLoaded || frame != null) return child;
-          return fallback;
-        },
       ),
     );
   }

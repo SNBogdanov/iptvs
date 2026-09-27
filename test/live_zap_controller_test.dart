@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/buffer_preset.dart';
+import 'package:iptvs/player/channel_number_entry.dart';
 import 'package:iptvs/player/live_zap_controller.dart';
 import 'package:iptvs/player/zap_command.dart';
 import 'package:iptvs/player/zap_quick_list.dart';
@@ -306,7 +307,7 @@ void main() {
       );
     });
 
-    test('a miss says so and leaves playback alone', () async {
+    test('a miss is the chip saying so, and leaves playback alone', () async {
       // The search is the zap range only: a jump outside it would leave
       // Up/Down walking a list the playing channel is not in.
       final catalog = _FakeCatalog();
@@ -315,12 +316,19 @@ void main() {
       _Surface().attach(controller);
       controller.appendDigit(9);
       controller.appendDigit(9);
+      // While the number is being typed the chip is the whole answer: the
+      // digits, and the explicit no-match label under them. No banner, no
+      // transient message, nothing for a surface that has no chip to draw.
+      expect(controller.digitBuffer, '99');
+      expect(controller.digitMatch, isNull);
+      expect(controller.digitMatchLabel, kNoChannelNumberMatch);
+      expect(controller.message, isNull);
       controller.commitDigits();
-      expect(controller.message, 'No channel 99');
+      expect(controller.digitBuffer, isEmpty);
+      expect(controller.message, isNull);
       await Future<void>.delayed(_past);
       expect(catalog.resolved, isEmpty);
       expect(controller.playing.channelId, 'a');
-      expect(controller.message, isNull, reason: 'the note is transient');
     });
 
     test('the buffer is capped, and Back clears it', () {
@@ -551,14 +559,117 @@ void main() {
       expect(controller.epg.now?.title, 'Now on B');
     });
 
-    test('the digit buffer and a miss ride on the banner', () {
+    test('the digit buffer rides on the banner, a miss says nothing', () {
       final controller = _controller();
       addTearDown(controller.dispose);
       controller.appendDigit(1);
       controller.appendDigit(2);
       expect(controller.bannerPayload()['digits'], '12');
       controller.commitDigits();
-      expect(controller.bannerPayload()['message'], 'No channel 12');
+      // A miss is the chip's own label, not a banner note: the player has a chip
+      // and the in-player banner has no room to spell out a "nothing here".
+      expect(controller.bannerPayload()['message'], isNull);
+      expect(controller.digitBuffer, isEmpty);
+    });
+  });
+
+  group('playEntry', () {
+    test('an entry inside the range moves the cursor and plays it', () async {
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+
+      await controller.playEntry(controller.entries[2]);
+
+      // A named destination is a decision, not a scan: no settle delay, and the
+      // cursor lands on it so Up/Down walk from where the player now is.
+      expect(controller.current.channelId, 'c');
+      expect(catalog.resolved, ['src/c']);
+      expect(controller.playing.channelId, 'c');
+      expect(controller.zapped, isTrue);
+    });
+
+    test('the playing entry is not re-resolved', () async {
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+
+      await controller.playEntry(controller.entries[0]);
+
+      expect(catalog.resolved, isEmpty);
+      expect(controller.playing.channelId, 'a');
+    });
+
+    test('an entry outside the range plays without moving the cursor', () async {
+      // The host may name a channel this session's launch snapshot never held
+      // (a search hit, a cross-source favorites row). The pair identity decides
+      // it is not the playing channel, so it plays - and the cursor stays put,
+      // because there is no row here to put it on.
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+      final other = ZapEntry(
+        channel: _channel('z', number: 9),
+        config: _config('src'),
+        sourceName: 'Src',
+      );
+
+      await controller.playEntry(other);
+
+      expect(catalog.resolved, ['src/z']);
+      expect(controller.playing.channelId, 'z');
+      expect(controller.current.channelId, 'a');
+      // Nothing is pending forever: the cursor legitimately differs from the
+      // playing entry, which is not a move in flight.
+      expect(controller.hasPendingMove, isFalse);
+    });
+
+    test('a failed host entry is reverted to the channel on screen', () async {
+      final catalog = _FakeCatalog()..failFor = const {'z'};
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+      final other = ZapEntry(
+        channel: _channel('z', number: 9),
+        config: _config('src'),
+        sourceName: 'Src',
+      );
+
+      await controller.playEntry(other);
+
+      // The failure re-plays what was on screen rather than leaving a dead
+      // cursor pointing at a channel that never started — and the settle's own
+      // future covers both round trips, so the caller sees the restore too.
+      expect(catalog.resolved, ['src/z', 'src/a']);
+      expect(controller.playing.channelId, 'a');
+    });
+
+    test('a cursor move supersedes a host play', () async {
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+      final gate = Completer<void>();
+      catalog.resolveGate = gate;
+
+      final pending = controller.playEntry(
+        ZapEntry(
+          channel: _channel('z', number: 9),
+          config: _config('src'),
+          sourceName: 'Src',
+        ),
+      );
+      // The user reaches for the D-pad while the host's row is still resolving:
+      // the decision they made outranks the one the host asked for.
+      controller.channelDown();
+      gate.complete();
+      await pending;
+      await Future<void>.delayed(_past);
+
+      expect(controller.playing.channelId, isNot('z'));
     });
   });
 
@@ -950,15 +1061,20 @@ void main() {
       expect(controller.zapped, isFalse);
     });
 
-    test('a miss reports, and other modes drop the buffer', () async {
+    test('a miss is the chip label, and other modes drop the buffer', () async {
       final catalog = _FakeCatalog()
         ..categories = const [ZapCategoryRow(id: '', title: 'All channels')];
       final controller = _controller(catalog: catalog);
       addTearDown(controller.dispose);
       controller.openQuickList();
       controller.appendDigit(9);
+      // With the list open the cursor is what a number moves, so an unmatched
+      // one leaves it exactly where it was and prints the no-match label.
+      expect(controller.digitMatchLabel, kNoChannelNumberMatch);
       controller.commitDigits();
-      expect(controller.message, 'No channel 9');
+      expect(controller.quickList.selectedIndex, 0);
+      expect(controller.message, isNull);
+      expect(controller.zapped, isFalse);
 
       controller.quickListBack();
       await Future<void>.delayed(_past);
@@ -968,8 +1084,7 @@ void main() {
       expect(controller.digitBuffer, isEmpty);
     });
 
-    test('a 250k range publishes a bounded window that holds the cursor', () {
-      final config = _config('src');
+    test('a 250k range publishes a bounded window that holds the cursor', () {      final config = _config('src');
       final controller = LiveZapController(
         entries: zapEntriesOf(
           List.generate(250000, (i) => _channel('c$i', number: i + 1)),

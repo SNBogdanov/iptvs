@@ -152,6 +152,7 @@ void main() {
             scrollController: scroll,
             categoryScrollController: categoryScroll,
             visibleChannels: () => channels,
+            allChannels: () => channels,
             orderedCategoryIds: () => const [null, 'news'],
             channelRowExtent: () => rowExtent,
             categoryRowExtent: () => metrics.categoryRowExtent,
@@ -161,6 +162,7 @@ void main() {
             onCategoryActivated: (_) {},
             onPlayChannel: (_) {},
             onToggleFavorite: (_) {},
+            onNumberCommitted: (_) {},
             onFocusTabs: () {},
           );
           addTearDown(() {
@@ -273,6 +275,7 @@ void main() {
             scrollController: scroll,
             categoryScrollController: categoryScroll,
             visibleChannels: () => channels,
+            allChannels: () => channels,
             orderedCategoryIds: () => const [kAllSourcesFavoritesCategoryId],
             channelRowExtent: () => rowExtent,
             categoryRowExtent: () => metrics.categoryRowExtent,
@@ -282,6 +285,7 @@ void main() {
             onCategoryActivated: (_) {},
             onPlayChannel: (_) {},
             onToggleFavorite: (_) {},
+            onNumberCommitted: (_) {},
             onFocusTabs: () {},
           );
           addTearDown(() {

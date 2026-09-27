@@ -1,11 +1,12 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
+    show
+        KeyDownEvent,
+        KeyEvent,
+        KeyRepeatEvent,
+        LogicalKeyboardKey;
 
-import '../player/zap_command.dart'
-    show kDigitEntryCommitDelay, kDigitEntryKeys, kDigitEntryMaxDigits;
+import '../player/channel_number_entry.dart';
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
 
@@ -75,6 +76,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     required this.scrollController,
     required this.categoryScrollController,
     required this.visibleChannels,
+    required this.allChannels,
     required this.orderedCategoryIds,
     required this.channelRowExtent,
     required this.categoryRowExtent,
@@ -84,6 +86,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     required this.onCategoryActivated,
     required this.onPlayChannel,
     required this.onToggleFavorite,
+    required this.onNumberCommitted,
     required this.onFocusTabs,
     this.reduceMotion = _motionOn,
   }) {
@@ -117,6 +120,11 @@ class LiveFocusCoordinator extends ChangeNotifier {
       previewFavoriteFocusNode,
       previewCatchupFocusNode,
     ]);
+    // A digit change is aggregate-visible too, as every other slice is: the
+    // buffer going up and coming back down is a change the Back ladder's reads
+    // and the screen's own wiring have always seen, and dropping it would make
+    // the one pulse invisible to a whole-body listener.
+    numberEntry.addListener(_notify);
   }
 
   // ── Narrow listenables ─────────────────────────────────────────────────────
@@ -125,7 +133,6 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   final _CoordinatorSlice _channelCursor = _CoordinatorSlice();
   final _CoordinatorSlice _categoryCursor = _CoordinatorSlice();
-  final _CoordinatorSlice _digitEntry = _CoordinatorSlice();
 
   /// Fires when the channel cursor moves (index, id reconciliation, intra-row
   /// [ChannelRowColumn]) or the channel pane gains/loses the D-pad.
@@ -138,8 +145,13 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// channel and the preview controls' focus.
   late final Listenable previewRegion;
 
-  /// Fires when the remote's digit-entry buffer changes.
-  Listenable get digitEntry => _digitEntry;
+  /// Fires when the remote's digit-entry buffer changes — the digits, the match
+  /// the chip names, or the buffer's existence.
+  ///
+  /// The entry's own [ChangeNotifier] rather than a slice, because the buffer
+  /// has a real lifecycle (a timer, a match, an async hand-off to the host) and
+  /// duplicating that state in a slice is how the two would drift.
+  Listenable get digitEntry => numberEntry;
 
   void _notifyChannelCursor() {
     _channelCursor.pulse();
@@ -151,11 +163,6 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _notify();
   }
 
-  void _notifyDigitEntry() {
-    _digitEntry.pulse();
-    _notify();
-  }
-
   /// The channel list's scroll controller (owned by the screen).
   final ScrollController scrollController;
 
@@ -164,6 +171,19 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   /// The current filtered channel list (the screen's memoized `_visible`).
   final List<Channel> Function() visibleChannels;
+
+  /// **Every** channel a typed number may resolve against — the host's whole
+  /// loaded catalog, ignoring the category filter, the hidden categories and
+  /// the search query.
+  ///
+  /// Deliberately not [visibleChannels]. A number is a jump, not a search, and
+  /// the user is explicit about where a number lands: resolving against the rows
+  /// the current group happens to draw makes the same digits reach different
+  /// channels depending on where the user was standing, and makes a channel in
+  /// any other group unreachable by number at all. The host keeps the *list*
+  /// consistent afterwards (it moves the cursor, and the group if the channel is
+  /// not in it) — this list only decides *which* channel was meant.
+  final List<Channel> Function() allChannels;
 
   /// The sidebar in display order; index 0 is always `null` = "All channels".
   final List<String?> Function() orderedCategoryIds;
@@ -194,6 +214,12 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// OK on the selected row's favorite column ([ChannelRowColumn.favorite]) —
   /// toggles that channel's favorite state in place.
   final void Function(Channel channel) onToggleFavorite;
+
+  /// A typed number was confirmed (four digits with a match, the commit key, or
+  /// the timeout) and resolved to a channel somewhere in [allChannels]. The host
+  /// owns what committing means: make the row reachable and select it, and
+  /// retarget a running preview if the user is already watching one.
+  final void Function(Channel channel) onNumberCommitted;
 
   /// Escape hatch upward out of the live body (search → the content tabs).
   final VoidCallback onFocusTabs;
@@ -387,21 +413,36 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// height that arrives late leaves an offset computed against the old one —
   /// the cursor is on the right row, and the list is looking somewhere else.
   /// See `_ChannelListScreenState._resyncLiveRowExtent`.
-  void revealSelectedChannel() {
+  ///
+  /// [immediate] skips the 140 ms animation, and is what a typed number wants:
+  /// a jump of several hundred rows animated in 140 ms is a blur rather than a
+  /// transition, and it is the whole reason the jump could land nowhere — any
+  /// rebuild during the animation cancels it mid-flight and the list is left
+  /// wherever it stopped, which reads as "the channel is off-screen". A `jumpTo`
+  /// has no frame in which it can be cancelled.
+  void revealSelectedChannel({bool immediate = false}) {
     final visible = visibleChannels();
     if (visible.isEmpty) return;
-    _revealChannel(_selectedChannelIndex.clamp(0, visible.length - 1));
+    _revealChannel(
+      _selectedChannelIndex.clamp(0, visible.length - 1),
+      immediate: immediate,
+    );
   }
 
-  void _revealChannel(int index) =>
-      _reveal(scrollController, index, channelRowExtent());
+  void _revealChannel(int index, {bool immediate = false}) =>
+      _reveal(scrollController, index, channelRowExtent(), immediate: immediate);
 
-  void _revealCategory(int index) =>
-      _reveal(categoryScrollController, index, categoryRowExtent());
+  void _revealCategory(int index, {bool immediate = false}) =>
+      _reveal(categoryScrollController, index, categoryRowExtent(), immediate: immediate);
 
   /// Scroll [controller] the minimum amount to bring row [index] fully into
   /// view. No focus involved, nothing to build first — pure arithmetic.
-  void _reveal(ScrollController controller, int index, double extent) {
+  void _reveal(
+    ScrollController controller,
+    int index,
+    double extent, {
+    bool immediate = false,
+  }) {
     if (!controller.hasClients || extent <= 0) return;
     final position = controller.position;
     final top = index * extent;
@@ -414,8 +455,13 @@ class LiveFocusCoordinator extends ChangeNotifier {
       target = bottom - viewport;
     }
     if (target == null) return;
+    final clamped = target.clamp(0.0, position.maxScrollExtent);
+    if (immediate) {
+      controller.jumpTo(clamped);
+      return;
+    }
     controller.animateTo(
-      target.clamp(0.0, position.maxScrollExtent),
+      clamped,
       // `animateTo` short-circuits a zero duration into a `jumpTo`, so this is
       // the reveal's own honouring of "remove animations".
       duration: reduceMotion()
@@ -497,22 +543,46 @@ class LiveFocusCoordinator extends ChangeNotifier {
   static bool _isPress(KeyEvent event) =>
       event is KeyDownEvent || event is KeyRepeatEvent;
 
+  static bool _isArrow(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.arrowUp ||
+      key == LogicalKeyboardKey.arrowDown ||
+      key == LogicalKeyboardKey.arrowLeft ||
+      key == LogicalKeyboardKey.arrowRight;
+
   /// The channel list owns the D-pad while it has focus.
   KeyEventResult handleChannelsKey(FocusNode node, KeyEvent event) {
     final key = event.logicalKey;
-    final visible = visibleChannels();
-    if (visible.isEmpty) return KeyEventResult.ignored;
 
-    if (_handleDigit(event)) return KeyEventResult.handled;
+    // Digits, and Enter/Select *while a number is being typed* — the confirm
+    // key means "take this number", not "play the selected row", for as long as
+    // the buffer is up. Only live here, so a search field never loses its
+    // digits.
+    //
+    // Deliberately ahead of the empty-list bail below: a group with no channels
+    // draws no rows and answers nothing, and a typed number is the one way back
+    // out of it. Bailing first left an empty group unreachable by number.
+    if (numberEntry.handleKey(event)) return KeyEventResult.handled;
+
+    final visible = visibleChannels();
+    if (visible.isEmpty) {
+      // A direction key still drops a half-typed number — nothing moves in an
+      // empty group, but the chip must not hang over it until the timeout.
+      if (_isArrow(key)) clearDigitBuffer();
+      return KeyEventResult.ignored;
+    }
 
     if (key == LogicalKeyboardKey.arrowDown) {
       if (!_isPress(event)) return KeyEventResult.handled;
+      // Navigating away from a half-typed number is a decision to stop entering
+      // it; a chip left hanging over a moving cursor reads as a pending jump.
+      clearDigitBuffer();
       // The one infinite motion: Down wraps past the last row to the first.
       selectChannel((_selectedChannelIndex + 1) % visible.length);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
       if (!_isPress(event)) return KeyEventResult.handled;
+      clearDigitBuffer();
       if (_selectedChannelIndex == 0) {
         // Never wrap upward — climb out of the list instead. Leaving the pane
         // parks the intra-row cursor back on the body.
@@ -525,6 +595,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
       if (!_isPress(event)) return KeyEventResult.handled;
+      clearDigitBuffer();
       // Left peels the intra-row cursor off the favorite star first; only a
       // second Left crosses into the sidebar.
       if (_channelColumn == ChannelRowColumn.favorite) {
@@ -536,6 +607,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     }
     if (key == LogicalKeyboardKey.arrowRight) {
       if (!_isPress(event)) return KeyEventResult.handled;
+      clearDigitBuffer();
       // Right enters the row's favorite star; always consumed (already on the
       // star, or an empty list) so geometry traversal never runs.
       if (_channelColumn == ChannelRowColumn.body && selectedChannel != null) {
@@ -614,12 +686,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// and the channel list.
   KeyEventResult handlePreviewControlKey(bool fromCatchup, KeyEvent event) {
     final key = event.logicalKey;
-    final isArrow =
-        key == LogicalKeyboardKey.arrowUp ||
-        key == LogicalKeyboardKey.arrowDown ||
-        key == LogicalKeyboardKey.arrowLeft ||
-        key == LogicalKeyboardKey.arrowRight;
-    if (!isArrow) return KeyEventResult.ignored;
+    if (!_isArrow(key)) return KeyEventResult.ignored;
     if (!_isPress(event)) return KeyEventResult.handled;
 
     if (key == LogicalKeyboardKey.arrowDown) {
@@ -664,55 +731,29 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   // ── Digit-entry channel jump ───────────────────────────────────────────────
 
-  String get digitBuffer => _digitBuffer;
-  String _digitBuffer = '';
-  Timer? _digitTimer;
+  /// The typed-number buffer, shared verbatim with the fullscreen player
+  /// ([ChannelNumberEntry]) so the list and the player cannot disagree about
+  /// what a digit does, what matches, or when it commits.
+  late final ChannelNumberEntry numberEntry = ChannelNumberEntry(
+    channels: allChannels,
+    onCommitted: onNumberCommitted,
+  );
 
-  // The buffer's timing, length cap and key map are shared with the in-player
-  // zap controller (`player/zap_command.dart`): typing a channel number on a
-  // remote is the same gesture in both places, and two copies of the timing
-  // would be two behaviours to learn.
-  static const _digitCommitDelay = kDigitEntryCommitDelay;
-  static const _maxDigits = kDigitEntryMaxDigits;
-  static final Map<LogicalKeyboardKey, int> _digitKeys = kDigitEntryKeys;
+  String get digitBuffer => numberEntry.digits;
 
-  /// Digits typed on the remote jump to a channel number. Only live while the
-  /// channel list holds the D-pad, so a search field never loses its digits.
-  bool _handleDigit(KeyEvent event) {
-    final digit = _digitKeys[event.logicalKey];
-    if (digit == null) return false;
-    if (event is KeyDownEvent) appendDigit(digit);
-    return true; // swallow repeats/ups too, so a held digit can't leak into nav
-  }
+  /// The channel the typed digits currently resolve to, or null. Drawn as the
+  /// chip's second line so a partial number shows its destination before it
+  /// commits.
+  Channel? get digitMatch => numberEntry.match;
 
-  void appendDigit(int digit) {
-    if (_digitBuffer.length >= _maxDigits) return;
-    _digitBuffer += '$digit';
-    _digitTimer?.cancel();
-    _digitTimer = Timer(_digitCommitDelay, commitDigitBuffer);
-    _notifyDigitEntry();
-  }
+  /// The chip's second line — the match's name, or `No Data Found`.
+  String get digitMatchLabel => numberEntry.matchLabel;
 
-  /// Jump the cursor to the visible channel whose [Channel.number] matches.
-  void commitDigitBuffer() {
-    final number = int.tryParse(_digitBuffer);
-    clearDigitBuffer();
-    if (number == null) return;
-    final index = visibleChannels().indexWhere(
-      (channel) => channel.number == number,
-    );
-    if (index < 0) return;
-    selectChannel(index);
-    focusChannels();
-  }
+  void appendDigit(int digit) => numberEntry.appendDigit(digit);
 
-  void clearDigitBuffer() {
-    _digitTimer?.cancel();
-    _digitTimer = null;
-    if (_digitBuffer.isEmpty) return;
-    _digitBuffer = '';
-    _notifyDigitEntry();
-  }
+  void commitDigitBuffer() => numberEntry.commit();
+
+  void clearDigitBuffer() => numberEntry.clear();
 
   void _notify() {
     if (!_disposed) notifyListeners();
@@ -721,10 +762,9 @@ class LiveFocusCoordinator extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _digitTimer?.cancel();
+    numberEntry.dispose();
     _channelCursor.dispose();
     _categoryCursor.dispose();
-    _digitEntry.dispose();
     channelsFocusNode.dispose();
     categoriesFocusNode.dispose();
     searchCellFocusNode.dispose();

@@ -14,6 +14,8 @@ import 'aspect_mode.dart';
 import 'buffer_preset.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
+import '../widgets/channel_number_chip.dart';
+import 'channel_number_entry.dart';
 import 'channel_owner.dart';
 import 'ios_engine.dart';
 import 'live_zap_controller.dart';
@@ -708,6 +710,30 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _lastReconnectMs = 0;
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
+
+  /// Typed channel numbers: **[LiveZapController]'s own entry**, not a second
+  /// one.
+  ///
+  /// The controller is the single authority for the session's channels and for
+  /// playback, so the entry that picks the destination has to be its — a private
+  /// copy here would have to be handed a catalog and an `onCommitted` that
+  /// resolves through the host, which is precisely the host-driven zap path
+  /// this architecture dropped. Sharing the object is also what keeps the two
+  /// chips from drifting: one [ChannelNumberEntry], one match rule, one commit
+  /// delay, and the same `No Data Found` answer.
+  ///
+  /// It is the *search space* that stays this route's own — the zap range, not
+  /// the host's catalog — so a number can never land the player on a channel its
+  /// cursor cannot step away from. That is a deliberate difference from the live
+  /// list, which jumps within a catalog it is already showing.
+  ChannelNumberEntry? get _numberEntry => _zap?.numberEntry;
+
+  /// Whether this route has actually opened a stream yet. `_open`'s adopted
+  /// handoff is allowed to skip the fresh open *only on its first run*: the
+  /// adopted preview player is in sync with [PlayerScreen]s stream only then.
+  /// After a zap (or any Retry) that stream is a different channel and skipping
+  /// would silently resume the old one.
+  bool _hasOpened = false;
 
   /// True while a *native* surface owns playback, so [_playbackSurface] renders
   /// a bare black fill instead of the embedded media_kit surface.
@@ -1424,6 +1450,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       // waste decode/bandwidth (and, if unmuted, double up audio) left
       // running behind it.
       if (widget.existingPlayer != null) unawaited(_player.pause());
+      _hasOpened = true;
       return;
     }
 
@@ -1510,8 +1537,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Windows playback. Off Windows there's no separate surface to switch —
     // the embedded VideoController already adopted the same player/controller.
     final adopting = widget.existingPlayer != null;
-    final canSkipOpen =
-        adopting && (!_usesWindowsNativeSurface || nativeWindowHandle != null);
+    final canSkipOpen = adopting &&
+        !_hasOpened &&
+        (!_usesWindowsNativeSurface || nativeWindowHandle != null);
     if (canSkipOpen && _usesWindowsNativeSurface) _didWindowsHotSwap = true;
     if (!canSkipOpen) {
       await _player.open(
@@ -1528,7 +1556,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (adopting) await _player.setVolume(100);
     if (canSkipOpen) await _player.play();
     _showNativeControls();
-  }
+      _hasOpened = true;
+    }
 
   Future<bool> _tryOpenNativeHdrPlayer() async {
     // Android always tries (engine selection happens inside HdrPlayerActivity).
@@ -1949,7 +1978,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     // Rule 1 of `selectIosEngine`: this content never gets AVPlayer again this
     // session, so a re-entry (zap back, retry) skips straight to mpv instead of
-    // replaying the failure. A null `iosEngineKey` opts out (no-op).
+    // replaying the failure. The memo is keyed by the *route's* engine key, which
+    // is the identity `selectIosEngine` itself was asked about.
     IosEngineMemo.markMpvOnly(widget.iosEngineKey);
     final positionMs = (args['positionMs'] as num?)?.toInt() ?? 0;
     final position = positionMs > 0 ? Duration(milliseconds: positionMs) : null;
@@ -2571,6 +2601,26 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _syncNativeControlState();
       return;
     }
+    if (command.startsWith('digit:')) {
+      // Typed numbers on the native surface. They arrive here rather than as
+      // real key events because the runner *cannot* forward them: while the
+      // video surface holds Windows focus it swallows every key outside its
+      // allowlist, and the one raw-key path that would reach Flutter trips the
+      // engine's keyboard-intake fail-fast. The command channel is the same
+      // route F/PgUp/PgDn/M take, so a number is a first-class player key here
+      // exactly as it is on the embedded surface. No `_showNativeControls()`
+      // here: this branch only ever runs on a native surface, where the runner
+      // has already revealed its HUD on the way in.
+      final digit = int.tryParse(command.substring('digit:'.length));
+      if (digit != null) {
+        // The one command-vocabulary entry point, exactly as the embedded
+        // surface's digit binding uses it — so the controller's own guards
+        // (quick list open, range, settle) decide what a digit means, and a
+        // second route into the entry can't disagree with the first.
+        _handleZapInput(ZapCommand(ZapCommandKind.digit, digit));
+      }
+      return;
+    }
     switch (command) {
       case 'back':
         _back();
@@ -2589,6 +2639,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       case 'muteToggle':
         final volume = _player.state.volume;
         await _player.setVolume(volume > 0 ? 0 : 100);
+        break;
+      case 'miniPlayer':
+        await _toggleNativeMiniPlayer();
         break;
       case 'fullscreen':
         await _toggleNativeFullscreen();
@@ -3295,6 +3348,68 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (mounted) setState(() => _liveSynced = true);
   }
 
+  /// Whether the zap controller can take a number on this route at all.
+  ///
+  /// Read at key time, not bound once: a surface can escalate to a separate
+  /// engine mid-session (the Linux embedded→native switch, the Windows SDR→HDR
+  /// hot swap), and that engine owns its own window and its own keys — so a
+  /// number typed there could never be resolved by this route.
+  bool get _numberEntryLive => _numberEntry != null && _isLive;
+
+  /// Whether a *confirm* can reach this route.
+  ///
+  /// Digits arrive on a separate engine too — the Windows runner forwards them
+  /// as a `digit:N` command because it cannot hand raw keys to Flutter while its
+  /// video surface holds focus (see `_handleCommand`), so the chip is honest
+  /// there — but OK/Enter on such a surface is the native overlay's own. A
+  /// half-typed number there can therefore be shown, not taken.
+  bool get _numberEntryConfirmable =>
+      _numberEntryLive && !_separateEngineOwnsPlayback;
+
+  /// Confirms a half-typed number on the confirm keys. Returns whether it took
+  /// the press, so a caller can fall through to its own meaning for the key
+  /// when there is no number being typed.
+  bool _commitNumberIfActive() {
+    final entry = _numberEntry;
+    if (entry == null || !entry.isActive) return false;
+    if (!_numberEntryConfirmable) {
+      entry.clear();
+      return false;
+    }
+    entry.commit();
+    return true;
+  }
+
+  /// The chip while a number is being typed, or nothing when there is nothing to
+  /// say — which includes "this surface can't act on a number" (see
+  /// [_numberEntryLive]).
+  ///
+  /// The [ListenableBuilder] is mounted **unconditionally** and the
+  /// `isActive` test lives *inside* it, exactly as `_withDigitEntryChip` does
+  /// for the list. Returning `null` from here while inactive put the only
+  /// listener to [entry] behind that same null, so nothing was subscribed when
+  /// the first digit arrived and `appendDigit` had nobody to notify: the chip
+  /// could not appear on this surface at all, however correct the number was.
+  /// The list's chip worked because it never had that shape.
+  Widget _numberEntryChip() {
+    final entry = _numberEntry;
+    if (entry == null || !_numberEntryLive) return const SizedBox.shrink();
+    return Positioned(
+      top: 8,
+      right: 16,
+      child: ListenableBuilder(
+        listenable: entry,
+        builder: (context, _) => entry.isActive
+            ? ChannelNumberChip(
+                digits: entry.digits,
+                matchLabel: entry.matchLabel,
+                matched: entry.match != null,
+              )
+            : const SizedBox.shrink(),
+      ),
+    );
+  }
+
   Future<void> _togglePlayback() async {
     if (_linuxNativeSession != null) {
       final session = _linuxNativeSession!;
@@ -3655,6 +3770,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       backgroundColor: _transparentHandoff ? Colors.transparent : Colors.black,
       body: CallbackShortcuts(
         bindings: {
+          // Typed numbers are **not** bound here: the digits go to
+          // `_handleZapInput` in the shared zap block below, so the controller
+          // — which owns the entry and the quick-list mode — is their only
+          // route. What this surface adds is the *chip* and the confirm keys.
           const SingleActivator(LogicalKeyboardKey.escape): () {
             if (_handleZapInput(const ZapCommand(ZapCommandKind.back))) return;
             // Deliberately **no** `_handlePlaybackInput()` here, unlike every
@@ -3687,6 +3806,9 @@ class _PlayerScreenState extends State<PlayerScreen>
               return;
             }
             _handlePlaybackInput();
+            // While a number is being typed, OK confirms it — it is "take this
+            // channel", not "toggle the channel already playing".
+            if (_commitNumberIfActive()) return;
             unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.enter): () {
@@ -3696,7 +3818,14 @@ class _PlayerScreenState extends State<PlayerScreen>
               return;
             }
             _handlePlaybackInput();
+            if (_commitNumberIfActive()) return;
             unawaited(_togglePlayback());
+          },
+          // A keypad's Enter was unbound before number entry existed, so it only
+          // gains the confirm — no playback side effect is invented for it.
+          const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
+            _handlePlaybackInput();
+            _commitNumberIfActive();
           },
           const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () {
             _handlePlaybackInput();
@@ -3862,8 +3991,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                       message: error,
                       onBack: _back,
                       // A surfaced iOS fallback must retry *the fallback*, not
-                      // `_open`: `_open` would reuse `widget.stream`, whose
-                      // single-use Stalker `play_token` the failed AVPlayer
+                      // `_open`: `_open` would reuse the route's current stream,
+                      // whose single-use Stalker `play_token` the failed AVPlayer
                       // attempt already burned. `_runIosFallbackNow` re-resolves
                       // through `_freshLiveStream` and keeps the VOD resume
                       // position. The tap itself is the visibility proof the
@@ -3880,6 +4009,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                     right: 0,
                     child: const Center(child: PlayerReconnectChip()),
                   ),
+                // The number-entry chip, topmost so it reads over the overlay and
+                // over the native surface's own controls. The same widget the
+                // live list draws — a surface that grew its own copy is how the
+                // two would stop agreeing.
+                _numberEntryChip(),
               ],
             ),
           ),

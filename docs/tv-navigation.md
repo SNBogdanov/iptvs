@@ -164,8 +164,18 @@ out at **~1.41**, not the ~1.21 an earlier comment claimed, *and* the engine rou
 ascent and descent to whole logical pixels on top of that — ~4.3 px per four-line row, which no
 amount of chrome tuning was going to close. `test/layout_overflow_test.dart` pins it with the real
 font loaded, because `flutter_test`'s default font makes every line exactly `1.0 × fontSize` and
-hides the whole class of bug. The channel logo is sized from the row it sits in
-(`LiveLayoutMetrics.logoSize`) for the same reason — bounded so it can never be what overflows.
+hides the whole class of bug. The channel logo is sized from the **plain** row
+(`LiveLayoutMetrics.logoSize`) — one badge for every row, because sizing it from the row it sits in
+made it jump the moment a source's guide arrived (and back for channels the guide has nothing
+for), which read as the list resizing itself — and it is bounded so it can never be what overflows.
+
+A channel with no logo gets a **number badge** in that tile, and it has to behave like the artwork
+it replaces: the number is arbitrary width, so it is laid out as one line (`maxLines: 1`) inside a
+`FittedBox(scaleDown)` at a font size proportional to the tile. As ordinary text it both *wrapped*
+— a four-digit number printing as `123` over `4` inside a 36 px tile — and sat at body size, so it
+read as a stray caption rather than as the logo's place. A badge's glyph is scaled at paint time, so
+a test that reads `getSize` sees the unwrapped text and must read `getRect` to see what the user
+sees; `live_tab_layout_test.dart` pins both the one-line fit and the glyph-to-tile ratio.
 
 `LiveTabView.build` asserts the two agree; the assert is what
 caught `live_tab_layout_test.dart` hard-coding the base constants while the view scaled them.
@@ -201,6 +211,18 @@ tile-width band.
   so the line height — and therefore the extent — is still set by the title alone, and
   `layout_overflow_test.dart` sweeps it with real font metrics at text scales up to 2.0.
 
+- **The preview picture is a play target, and a double click is what reaches it.** A single click on
+  a *row* already means "preview this", and inside a running preview a single click lands on the
+  channel the panel is showing, so it cannot also mean "watch it". The panel's picture area
+  therefore takes a **double click** as fullscreen, and only while something is actually previewing
+  — the logo and error placeholders are not a way to launch a channel. The detector is
+  **`HitTestBehavior.opaque`**, and that is load-bearing rather than tidy: the running video inside
+  the panel is deliberately wrapped in `IgnorePointer` (the panel's own controls live on top of it),
+  so under the default `deferToChild` there is nothing at the middle of the picture for the gesture to
+  hit and the click vanishes into the background. The panel's own rect answers for the picture, and
+  `previewSurfaceKey` names it so a test can aim at it — pointing a finder at the video would only
+  ever warn, since that is the one widget in there that is guaranteed not to be a tap target.
+  Pinned by the `preview picture as a play target` group in `test/live_tab_layout_test.dart`.
 - **Movement rules (deliberately asymmetric).** **Down wraps** at the end of the channel list and
   of the category list — the *only* infinite motion in the tab. **Up never wraps**: at the first
   row it **escapes upward** — categories → the search box; channels → the preview controls
@@ -247,6 +269,91 @@ tile-width band.
 - A fixed row height means the tallest row (name + `Now ·` + progress + `Next ·`) must *fit*
   `kChannelRowExtentWithEpg`, or it overflows. Every source in the tests except `_EpgSource`
   returns an empty EPG, so that one test is the only thing guarding it — keep it.
+
+## Typed channel numbers
+
+Typing digits in the live tab jumps to a channel by number. Two surfaces accept it — the live list
+and the fullscreen player — and they share **one** implementation, `ChannelNumberEntry`
+(`lib/screens/channel_number_entry.dart`): the buffer, the match, the commit rules and the chip's
+second line. A chip is a thing the user learns once; two copies of the entry would be two sets of
+answers to "what does 200 mean", and that is precisely the disagreement this feature cannot afford.
+
+- **The rules, in the order they run.** 1–4 digits (`kMaxChannelNumberDigits`); an **exact** number
+  match anywhere in the catalog beats a prefix match, then the **first prefix match in catalog
+  order**; a match at four digits **commits on the keystroke** (nothing can disambiguate it, so
+  waiting out the timeout is dead time); a shorter or unmatched buffer waits `kChannelNumberCommitDelay`
+  (1500 ms), restarts its clock on every digit, and commits on **Enter, Numpad-Enter or Select** —
+  three buttons for three devices, and Select is the same physical OK the list plays on. A commit
+  with **no** match is a no-op beyond clearing: the chip already said `No Data Found`, and there
+  must be no silent jump to whatever happened to be selected. Exact-before-prefix is the rule that
+  makes `200` reach channel `200` even when `2001` is listed above it, while `200` still lands on
+  `2001` on a source that has no `200` at all.
+- **Digits are handled before the empty-list bail.** `handleChannelsKey` returns `ignored` when the
+  group draws no rows, and that check used to come first — which made the one way *out* of an empty
+  group a number that could not be typed. A direction key still drops a half-typed number there
+  (nothing moves, but the chip must not hang over an empty group until the timeout), and a direction
+  key always drops one: navigating away is a decision to stop entering it, and a chip left over a
+  moving cursor reads as a pending jump about to fire.
+- **The search space is every channel some view can draw** — the catalog minus the categories the
+  user disabled, *plus* the favorites (a favorite is drawn from a disabled category on purpose, so
+  it is reachable and therefore matchable). It is deliberately not `_visible`: matching against the
+  current group would make the same digits resolve to different channels depending on where the
+  user happened to be, and would put everything outside the current group out of the keyboard's
+  reach entirely. A channel no view can draw is *not* in the space, because the chip would name it as
+  the destination and then select nothing, and re-enabling a category the user turned off in source
+  settings is not a keystroke's decision. The cross-source Favorites view answers with its own rows
+  (a cache read across sources, not a filter over the loaded catalog).
+- **The coordinator does not perform the jump — the host does.** `LiveFocusCoordinator` owns the
+  digits and hands the matched `Channel` to `onNumberCommitted`; it used to move its own cursor,
+  which was only correct for a channel already on screen. The live list is a selection model, so a
+  channel it does not draw cannot be selected at all, and widening the view is the host's business
+  (it owns the groups, the search box and the focus nodes). `planNumberJumpGroup` is the pure
+  ladder — current group → "All channels" → Favorites — and the caller supplies a *search-ignoring*
+  "would this group draw it" predicate, because the search is not a group and is handled separately:
+  an active name search is cleared first, the number having just answered the question it was asking.
+- **What committing means, per surface.** *List:* reveal, then select, then take the D-pad.
+  *Window (a running preview):* retarget it, so a jump that moved the cursor under a still-running
+  preview does not leave the two disagreeing about what is on screen — but **not** when the preview
+  is already showing that exact channel (pair-keyed, so a same-numbered channel in another source
+  *does* get retargeted), because a restart would spend a fresh single-use `create_link` and
+  visibly reload a correct picture to answer a selection move. And never *starting* one that is not
+  running: on a wide layout the selection change already arms the desktop auto-preview, and on a TV
+  remote the preview is deliberate, so a number must not quietly unmute one. *Full screen:* the same
+  same-engine swap a zap does, through the same `_resolveLiveTarget` (see
+  [docs/player.md](player.md)); the list behind is realigned to the target but **not** focused, since
+  the player route owns the D-pad and pulling focus under it leaves the remote nowhere to send Back.
+  **Both live player routes carry the entry.** `_openLivePlayer` (the preview-adopted wide path) *and*
+  `_openFullscreenDirect` (the narrow-window path, and the cross-source-favorite path on a wide
+  screen) pass `onSelectChannel` + `allChannels`. The second one originally passed `onZapChannel` and
+  nothing else, so PgDn/PgUp worked there while typed numbers were inert — the whole feature
+  silently missing on a phone and on every foreign favorite. A route that plays a channel from the
+  shared catalog and has a host able to resolve it **must** wire both; the `null` is reserved for
+  catch-up and VOD, which have no live catalog to step through.
+- **Revealing a jumped-to channel is two steps, and the scroll is the deferred one.** After a group
+  switch the cursor moves *synchronously* (state, preview and the row's own selection are all correct
+  at once) but the **scroll waits for the frame that renders the new group**. This list scrolls by
+  `index * extent` arithmetic, so a reveal issued into a group that is not on screen yet is measured
+  against the *outgoing* list: `index * extent` clamps to that list's `maxScrollExtent` and lands at
+  the top, and `_selectCategory`'s post-frame `jumpTo(0)` overrides the reveal regardless — a jump
+  that selects correctly and looks like it did nothing, its row above the viewport. So
+  `_selectCategory` takes `scrollToTop: false` for a reveal that names its own row, and the host
+  calls `selectChannel(index, reveal: false)` then `revealSelectedChannel()` in a post-frame
+  callback, which reads the cursor as it is *then* — so a second number typed inside the same frame
+  scrolls to the newer target instead of undoing the first. Pinned by the `revealing a jumped-to
+  channel` group in `test/live_focus_coordinator_test.dart`, whose second case is the negative
+  control: the same index against the outgoing list, landing the cursor on the wrong channel.
+- **The chip is two lines, and the second is the point.** `ChannelNumberChip`
+  (`lib/widgets/channel_number_chip.dart`) draws `Ch <digits>` over the name the digits currently
+  resolve to, so a partial number is readable as a jump *before* it commits; the no-match case is
+  the explicit `kNoChannelNumberMatch` rather than a blank gap, and it is dimmed. The name is
+  single-line and width-bounded — the digits are the input, the name only confirms them.
+- **Only the list's own buffer is on the coordinator's `digitEntry` slice**, and a digit change still
+  pulses the aggregate `notifyListeners()` like every other slice: a whole-coordinator listener (the
+  Back ladder's reads, the screen's own wiring) has to see the buffer come up and go back down.
+- **Pinned by** `test/channel_number_entry_test.dart` (matcher, timing, the jump ladder),
+  `test/channel_number_chip_test.dart`, and the `number entry` group in
+  `test/live_focus_coordinator_test.dart`. The screen-level wiring is not unit-tested — it needs a
+  real preview player, so `channel_list_focus_test.dart` covers it only where libmpv exists.
 
 ## When the body has no rows
 

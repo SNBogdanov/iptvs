@@ -146,6 +146,31 @@ struct OverlayBackBuffer {
 };
 OverlayBackBuffer g_overlay_back_buffer;
 bool g_native_video_cursor_visible = true;
+// DPI source for the native OSD fonts. The Flutter overlay sizes its text in
+// dp and scales with the devicePixelRatio; the layered GDI overlay is fixed-px
+// by construction, so without this its text renders progressively smaller than
+// the Flutter overlay on any scaled display — visible as the OSD "shrinking"
+// the moment an HDR channel escalates to the native HDR surface. Set when the
+// controls overlay is created; see UiFont/NativeControlsDpi.
+HWND g_native_controls_dpi_window = nullptr;
+
+int NativeControlsDpi() {
+  if (g_native_controls_dpi_window) {
+    const UINT dpi = GetDpiForWindow(g_native_controls_dpi_window);
+    if (dpi != 0) {
+      return static_cast<int>(dpi);
+    }
+  }
+  return 96;
+}
+
+// DPI-scale a geometry value (pixel), the same factor `UiFont` applies to font
+// sizes. Fonts already scale by DPI; every *layout* number the overlay draws
+// with was still fixed-px, so on a >100% display the bars rendered smaller
+// than the Flutter overlay beside the window's own dp, and fixed-width slots
+// (the EPG time column) clipped their now-bigger text. All geometry must go
+// through this so the whole OSD tracks the display, not just its text.
+int NativeScale(int px) { return MulDiv(px, NativeControlsDpi(), 96); }
 // Mini-player mode (see SetNativeWindowMiniPlayer): dragging the video moves
 // the whole window.
 bool g_native_window_mini = false;
@@ -684,6 +709,9 @@ HFONT UiFont(int size, int weight = FW_NORMAL, const wchar_t *family = nullptr) 
       face = L"Inter";
     }
   }
+  // Scale to the display DPI (see NativeControlsDpi): the OSD must match the
+  // Flutter overlay, which sizes in dp and already scales with the display.
+  size = MulDiv(size, NativeControlsDpi(), 96);
   // **Grayscale AA, not ClearType.** This overlay is a per-pixel-alpha layered
   // window (`UpdateLayeredWindowIndirect` over a premultiplied ARGB DIB), and
   // GDI's ClearType is a subpixel filter that writes RGB without ever touching
@@ -1198,7 +1226,7 @@ void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
   const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
   const COLORREF fg = fg_override.value_or(active ? RGB(255, 255, 255)
                                                   : RGB(232, 235, 244));
-  FillRoundRectAA(hdc, rect, radius, bg);
+  FillRoundRectAA(hdc, rect, NativeScale(radius), bg);
   HFONT icon_font = UiFont(icon_size, FW_NORMAL, L"Segoe MDL2 Assets");
   DrawTextWithFont(hdc, icon, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    icon_font, fg);
@@ -1243,8 +1271,9 @@ int MeasureTextChipWidth(const std::wstring &label) {
   SelectObject(screen, old_font);
   DeleteObject(font);
   ReleaseDC(nullptr, screen);
-  const int width = size.cx + kNativeChipPaddingX * 2;
-  const int clamped = width < kNativeButtonWidth ? kNativeButtonWidth : width;
+  const int width = size.cx + NativeScale(kNativeChipPaddingX) * 2;
+  const int clamped =
+      width < NativeScale(kNativeButtonWidth) ? NativeScale(kNativeButtonWidth) : width;
   cache.emplace(label, clamped);
   return clamped;
 }
@@ -1253,7 +1282,7 @@ void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label,
                     bool active = false) {
   const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
   const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
-  FillRoundRectAA(hdc, rect, kNativeButtonRadius, bg);
+  FillRoundRectAA(hdc, rect, NativeScale(kNativeButtonRadius), bg);
   // Bold, matching the badges — a button label is a handful of short words at
   // 13px on top of moving video, and SemiBold left them looking thin next to
   // the badge row drawn a few pixels above.
@@ -1270,7 +1299,7 @@ double RatioFromX(int x, const RECT &rect) {
 }
 
 RECT TopControlsRect(const RECT &rect) {
-  return RectFrom(0, 0, rect.right, kNativeTopControlsHeight);
+  return RectFrom(0, 0, rect.right, NativeScale(kNativeTopControlsHeight));
 }
 
 bool HasLiveEpg() {
@@ -1290,9 +1319,9 @@ int BottomControlsHeight() {
     if (ShowsChannelIdentity()) {
       height += kNativeIdentityRowHeight + kNativeIdentityRowGap;
     }
-    return height;
+    return NativeScale(height);
   }
-  return kNativeBottomControlsHeightVod;
+  return NativeScale(kNativeBottomControlsHeightVod);
 }
 
 RECT BottomControlsRect(const RECT &rect) {
@@ -1361,30 +1390,30 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   const bool live = g_native_control_state.is_live;
   // Control row sits a fixed 40px above the bottom edge in every layout
   // (VOD = scrubber above; live-EPG = programme row above; bare live = single row).
-  const int cy = by + (BottomControlsHeight() - 40);
+  const int cy = by + (BottomControlsHeight() - NativeScale(40));
   l.control_center_y = cy;
-  const int kBtn = kNativeButtonWidth;
-  const int top = cy - kNativeButtonHeight / 2;
-  const int bot = top + kNativeButtonHeight;
+  const int kBtn = NativeScale(kNativeButtonWidth);
+  const int top = cy - NativeScale(kNativeButtonHeight) / 2;
+  const int bot = top + NativeScale(kNativeButtonHeight);
 
-  int x = 16;
+  int x = NativeScale(16);
   l.play = RectFrom(x, top, x + kBtn, bot);
-  x += kBtn + 8;
+  x += kBtn + NativeScale(8);
   l.has_seek = !live;
   if (l.has_seek) {
     l.seek_back = RectFrom(x, top, x + kBtn, bot);
-    x += kBtn + 8;
+    x += kBtn + NativeScale(8);
     l.seek_forward = RectFrom(x, top, x + kBtn, bot);
-    x += kBtn + 14;
+    x += kBtn + NativeScale(14);
   }
   l.mute = RectFrom(x, top, x + kBtn, bot);
-  x += kBtn + 8;
-  l.volume = RectFrom(x, cy - 3, x + 84, cy + 3);
+  x += kBtn + NativeScale(8);
+  l.volume = RectFrom(x, cy - NativeScale(3), x + NativeScale(84), cy + NativeScale(3));
 
-  int rx = right - 16;
+  int rx = right - NativeScale(16);
   const auto place = [&](RECT &out, int w) {
     out = RectFrom(rx - w, top, rx, bot);
-    rx -= w + 8;
+    rx -= w + NativeScale(8);
   };
   place(l.fullscreen, kBtn);
   place(l.info, kBtn);
@@ -1409,7 +1438,7 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
     // Left as a constant: every speed label is within a few pixels of the
     // others ("0.5x" to "1.25x"), so there is no oversized-box problem to
     // solve, and `ShortSpeed` is defined below this function.
-    place(l.speed, 54);
+    place(l.speed, NativeScale(54));
   }
   // The favorite star, between "Go to live" and speed — the slot Android's
   // `RightCluster` puts it in. It used to live in the *top* bar among the
@@ -1424,7 +1453,7 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   // sized a bare "LIVE").
   l.has_go_live = live && !g_native_control_state.live_synced;
   if (l.has_go_live) {
-    place(l.go_live, 92);
+    place(l.go_live, NativeScale(92));
   }
   // The quick-list opener, **immediately left of "Go to live"** — the slot
   // every surface that draws its own chrome puts it in (Android `RightCluster`,
@@ -1443,13 +1472,18 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
 
   l.has_scrubber = !live;
   if (l.has_scrubber) {
-    const int sy = by + 30;
-    const int time_w = 62;
-    l.position_text = RectFrom(16, sy - 12, 16 + time_w, sy + 12);
-    l.duration_text =
-        RectFrom(right - 16 - time_w, sy - 12, right - 16, sy + 12);
-    l.progress =
-        RectFrom(16 + time_w + 12, sy - 3, right - 16 - time_w - 12, sy + 3);
+    const int sy = by + NativeScale(30);
+    const int time_w = NativeScale(62);
+    l.position_text =
+        RectFrom(NativeScale(16), sy - NativeScale(12),
+                 NativeScale(16) + time_w, sy + NativeScale(12));
+    l.duration_text = RectFrom(right - NativeScale(16) - time_w,
+                               sy - NativeScale(12), right - NativeScale(16),
+                               sy + NativeScale(12));
+    l.progress = RectFrom(NativeScale(16) + time_w + NativeScale(12),
+                          sy - NativeScale(3), right - NativeScale(16) - time_w -
+                              NativeScale(12),
+                          sy + NativeScale(3));
   }
 
   // The live block sits in the upper part of the (taller) live bar, well clear
@@ -1464,6 +1498,8 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   }
   l.has_epg = HasLiveEpg();
   if (l.has_epg) {
+    // Upstream's layout: one band, laid out inside by DrawLiveEpgStrip — the
+    // same band the zap banner draws (PaintZapBanner), so the two agree.
     l.epg = RectFrom(16, ey, MaxInt(20, right - 16), ey + kNativeEpgStripHeight);
   }
   return l;
@@ -1654,14 +1690,17 @@ RECT MenuRect(const RECT &rect, int anchor_x) {
   const auto &options = MenuOptions(g_native_control_state.open_menu);
   const int width = RectWidth(rect);
   const int height = RectHeight(rect);
-  const int menu_width = std::min(kNativeMenuWidth, MaxInt(1, width - 24));
+  const int menu_width =
+      std::min(NativeScale(kNativeMenuWidth), MaxInt(1, width - NativeScale(24)));
   const int rows =
       std::clamp(static_cast<int>(options.empty() ? 1 : options.size()), 1,
                  kNativeMenuMaxRows);
-  const int menu_height = kNativeMenuHeaderHeight + rows * kNativeMenuRowHeight +
-                          kNativeMenuPadding;
-  const int menu_left = std::clamp(anchor_x - (menu_width / 2), 12,
-                                   MaxInt(12, width - menu_width - 12));
+  const int menu_height = NativeScale(kNativeMenuHeaderHeight) +
+                          rows * NativeScale(kNativeMenuRowHeight) +
+                          NativeScale(kNativeMenuPadding);
+  const int menu_left =
+      std::clamp(anchor_x - (menu_width / 2), NativeScale(12),
+                 MaxInt(NativeScale(12), width - menu_width - NativeScale(12)));
   const int menu_top =
       MaxInt(8, height - BottomControlsHeight() - menu_height - 8);
   return RectFrom(menu_left, menu_top, menu_left + menu_width,
@@ -1854,27 +1893,31 @@ bool HasInfoPanel() {
 
 RECT InfoPanelRect(const RECT &rect) {
   const int rows = static_cast<int>(InfoRows().size());
-  const int width = 224;
-  const int height = 12 + 22 + rows * 22 + 10;
-  const int left = MaxInt(12, static_cast<int>(rect.right) - 14 - width);
-  const int top = kNativeTopControlsHeight + 10;
+  const int width = NativeScale(224);
+  const int height =
+      NativeScale(12) + NativeScale(28) + rows * NativeScale(22) +
+      NativeScale(10);
+  const int left =
+      MaxInt(NativeScale(12), static_cast<int>(rect.right) - NativeScale(14) -
+                                  width);
+  const int top = NativeScale(kNativeTopControlsHeight) + NativeScale(10);
   return RectFrom(left, top, left + width, top + height);
 }
 
 void DrawSlider(HDC hdc, const RECT &track, double ratio, int thumb_radius) {
   const int cy = (track.top + track.bottom) / 2;
-  FillRoundRectAA(hdc, RectFrom(track.left, cy - 3, track.right, cy + 3), 6,
-                  RGB(39, 43, 58));
+  const int h3 = NativeScale(3);
+  FillRoundRectAA(hdc, RectFrom(track.left, cy - h3, track.right, cy + h3),
+                  NativeScale(6), RGB(39, 43, 58));
   const int fill_x =
       track.left + static_cast<int>(RectWidth(track) * std::clamp(ratio, 0.0,
                                                                   1.0));
-  FillRoundRectAA(hdc, RectFrom(track.left, cy - 3, fill_x, cy + 3), 6,
-                  RGB(123, 108, 246));
+  FillRoundRectAA(hdc, RectFrom(track.left, cy - h3, fill_x, cy + h3),
+                  NativeScale(6), RGB(123, 108, 246));
   // A square of side 2r at radius r is a circle — and now a smooth one.
-  FillRoundRectAA(hdc,
-                  RectFrom(fill_x - thumb_radius, cy - thumb_radius,
-                           fill_x + thumb_radius, cy + thumb_radius),
-                  thumb_radius, RGB(154, 141, 255));
+  const int tr = NativeScale(thumb_radius);
+  FillRoundRectAA(hdc, RectFrom(fill_x - tr, cy - tr, fill_x + tr, cy + tr),
+                  tr, RGB(154, 141, 255));
 }
 
 // Draws a pill badge ending at [right_edge]; returns the horizontal space it
@@ -1892,13 +1935,14 @@ int DrawBadge(HDC hdc, int right_edge, int center_y, const std::wstring &text,
   GetTextExtentPoint32(hdc, text.c_str(), static_cast<int>(text.size()),
                        &size);
   SelectObject(hdc, old_font);
-  const int width = size.cx + 18;
+  const int width = size.cx + NativeScale(18);
   const RECT badge =
-      RectFrom(right_edge - width, center_y - 11, right_edge, center_y + 11);
+      RectFrom(right_edge - width, center_y - NativeScale(11), right_edge,
+               center_y + NativeScale(11));
   if (aa) {
-    FillRoundRectAA(hdc, badge, 7, bg);
+    FillRoundRectAA(hdc, badge, NativeScale(7), bg);
   } else {
-    FillRoundRect(hdc, badge, 7, bg);
+    FillRoundRect(hdc, badge, NativeScale(7), bg);
   }
   DrawTextWithFont(hdc, text, badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    font, fg);
@@ -2229,7 +2273,8 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
   // the accent stroke this used to draw was the only thing of its kind on any
   // of the three. Its corners are rounded for real by
   // [ApplyRoundRectAlphaMask], run after the alpha normalizer.
-  FillRoundRect(hdc, panel, kNativeInfoPanelRadius, RGB(10, 11, 16));
+  FillRoundRect(hdc, panel, NativeScale(kNativeInfoPanelRadius),
+                RGB(10, 11, 16));
   HFONT header_font = UiFont(11, FW_SEMIBOLD);
   DrawTextWithFont(
       hdc, L"STREAM INFO",
@@ -2239,7 +2284,7 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
   DeleteObject(header_font);
   HFONT label_font = UiFont(12, FW_SEMIBOLD);
   HFONT value_font = UiFont(12, FW_BOLD);
-  int y = panel.top + 34;
+  int y = panel.top + NativeScale(34);
   for (const auto &row : rows) {
     const bool hdr = row.first == L"Dynamic range" &&
                      (row.second.find(L"HDR") != std::wstring::npos ||
@@ -2247,15 +2292,19 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
                       row.second.find(L"PQ") != std::wstring::npos ||
                       row.second.find(L"Dolby") != std::wstring::npos);
     DrawTextWithFont(hdc, row.first,
-                     RectFrom(panel.left + 14, y, panel.left + 110, y + 20),
+                     RectFrom(panel.left + NativeScale(14), y,
+                              panel.left + NativeScale(110),
+                              y + NativeScale(20)),
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font,
                      RGB(154, 161, 178));
     DrawTextWithFont(hdc, row.second,
-                     RectFrom(panel.left + 110, y, panel.right - 14, y + 20),
+                     RectFrom(panel.left + NativeScale(110), y,
+                              panel.right - NativeScale(14),
+                              y + NativeScale(20)),
                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                      value_font,
                      hdr ? RGB(154, 141, 255) : RGB(238, 240, 247));
-    y += 22;
+    y += NativeScale(22);
   }
   DeleteObject(label_font);
   DeleteObject(value_font);
@@ -2270,7 +2319,7 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
   const std::string &selected_id = MenuSelectedId(kind);
   const RECT menu = CurrentMenuRect(rect);
   const RECT menu_local = OffsetRectToLocal(menu, menu.left, menu.top);
-  FillRoundRect(hdc, menu, kNativeMenuRadius, RGB(8, 9, 14));
+  FillRoundRect(hdc, menu, NativeScale(kNativeMenuRadius), RGB(8, 9, 14));
   HFONT label_font = UiFont(13, FW_SEMIBOLD);
   DrawTextWithFont(
       hdc, MenuHeader(kind),
@@ -2718,9 +2767,11 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   };
 
   const int top_cy = (top.top + top.bottom) / 2;
-  DrawIconButton(paint_hdc, RectFrom(16, top_cy - 19, 54, top_cy + 19),
-                 L"\xE72B", is_focused(NativeFocusItem::kBack));
-
+  DrawIconButton(paint_hdc,
+                 RectFrom(NativeScale(16), top_cy - NativeScale(19),
+                          NativeScale(54), top_cy + NativeScale(19)),
+                 L"\xE72B",
+                 is_focused(NativeFocusItem::kBack));
   // Top-right badges, stacked leftward: clock, fps, dynamic range, resolution,
   // LIVE, then source name — i.e. left-to-right they read source, LIVE,
   // resolution, HDR, fps, clock, the order Kotlin `TopBadges`, iOS
@@ -2730,7 +2781,7 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   // depending only on whether the stream was HDR.
   const COLORREF kNeutralBg = RGB(30, 33, 45);
   const COLORREF kNeutralFg = RGB(206, 210, 224);
-  int badge_right = rect.right - 16;
+  int badge_right = rect.right - NativeScale(16);
   if (g_native_control_state.reconnecting) {
     badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x21BB Reconnecting\x2026",
                              RGB(150, 102, 24), RGB(255, 236, 196));
@@ -2775,7 +2826,8 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
 
   HFONT title_font = UiFont(22, FW_BOLD);
   DrawTextWithFont(paint_hdc, g_native_control_state.title,
-                   RectFrom(66, top.top, MaxInt(80, badge_right - 12),
+                   RectFrom(NativeScale(66), top.top,
+                            MaxInt(NativeScale(80), badge_right - NativeScale(12)),
                             top.bottom),
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                    title_font, RGB(246, 247, 251));
@@ -2826,6 +2878,8 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   }
   if (l.has_epg) {
     const auto &s = g_native_control_state;
+    // Upstream's shared strip: the bottom bar and the zap banner draw the same
+    // band through this one function, so neither can drift from the other.
     DrawLiveEpgStrip(paint_hdc, static_cast<int>(l.epg.left),
                      static_cast<int>(l.epg.right),
                      static_cast<int>(l.epg.top), s.epg_now_title,
@@ -2920,14 +2974,14 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     NormalizeNativeControlBitmapAlpha(pixels, width, height, menu_rect,
                                        RGB(8, 9, 14), menu_alpha);
     ApplyRoundRectAlphaMask(pixels, width, height, menu_rect,
-                            kNativeMenuRadius);
+                            NativeScale(kNativeMenuRadius));
   }
   if (info_panel_rect.right > info_panel_rect.left &&
       info_panel_rect.bottom > info_panel_rect.top) {
     NormalizeNativeControlBitmapAlpha(pixels, width, height, info_panel_rect,
                                        RGB(10, 11, 16), 0xFF);
     ApplyRoundRectAlphaMask(pixels, width, height, info_panel_rect,
-                            kNativeInfoPanelRadius);
+                            NativeScale(kNativeInfoPanelRadius));
   }
   // Painted *after* the bars' and panels' alpha passes, because it runs its
   // own normalize + corner mask over its rect (PaintQuickList) and a pixel
@@ -2954,7 +3008,9 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   GetClientRect(hwnd, &rect);
   const RECT top = TopControlsRect(rect);
   if (PointInRect(x, y, top)) {
-    if (PointInRect(x, y, RectFrom(12, 8, 60, 56))) {
+    if (PointInRect(x, y,
+                    RectFrom(NativeScale(12), NativeScale(8),
+                             NativeScale(60), NativeScale(56)))) {
       return "back";
     }
     // Favorite star, drawn rightmost in the top bar (see PaintNativeControlBar).
@@ -3656,6 +3712,56 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         return 0;
       }
     }
+    // The native HUD owns ESC/Enter/Space/arrows; route the player keys the
+    // same way the HUD buttons do — a command string over the native-control
+    // channel — never as raw WM_KEYDOWN to the Flutter view. While the *video
+    // surface* — not the view — holds Windows focus, feeding the engine's
+    // keyboard intake synthetic keystrokes trips its fail-fast (0xC0000409)
+    // and, even before that, left F/PgUp/PgDn/M silently dead on the native
+    // HDR surface. The command channel is the path the HUD itself uses and
+    // reaches Dart's `_handleNativeControlCommand` without the engine intake.
+    //
+    // Everything not named below falls through to `return 0` below, i.e. a key
+    // the native surface swallows. Typed channel numbers used to die exactly
+    // there, which is why digits work on the embedded surface and were silently
+    // dead on this one — so they are a command like the rest, not an omission.
+    static const char *const kDigitCommands[10] = {
+        "digit:0", "digit:1", "digit:2", "digit:3", "digit:4",
+        "digit:5", "digit:6", "digit:7", "digit:8", "digit:9"};
+    const char *command = nullptr;
+    if (wparam >= '0' && wparam <= '9') {
+      command = kDigitCommands[static_cast<int>(wparam - '0')];
+    } else if (wparam >= VK_NUMPAD0 && wparam <= VK_NUMPAD9) {
+      command = kDigitCommands[static_cast<int>(wparam - VK_NUMPAD0)];
+    }
+    switch (wparam) {
+    case 'F':       // fullscreen toggle
+    case 'f':
+      command = "fullscreen";
+      break;
+    case 'M':       // mini-player on the native surface, mute elsewhere
+    case 'm':
+      command = "miniPlayer";
+      break;
+    case VK_NEXT:   // PgDn: next live channel
+      command = "zapDown";
+      break;
+    case VK_PRIOR:  // PgUp: previous live channel
+      command = "zapUp";
+      break;
+    case 'S':       // go live
+    case 's':
+      command = "goLive";
+      break;
+    default:
+      break;
+    }
+    if (command != nullptr) {
+      ShowNativeControls(true);
+      NotifyNativeControlCommand(command);
+      return 0;
+    }
+    return 0;
   }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.
@@ -3919,6 +4025,7 @@ void FlutterWindow::CreateNativeControls() {
   if (!parent) {
     return;
   }
+  g_native_controls_dpi_window = parent;
   if (!native_controls_overlay_) {
     native_controls_overlay_ =
         CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -4506,13 +4613,37 @@ void FlutterWindow::ResetZapBanner() {
 
 void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
   HWND hwnd = GetHandle();
-  if (!hwnd || native_window_fullscreen_ == fullscreen) {
+  if (!hwnd) {
     return;
   }
   // Fullscreen and mini-player are mutually exclusive; leave mini first so
-  // the saved windowed placement isn't overwritten with the mini geometry.
+  // the saved windowed placement isn't overwritten with the mini geometry
+  // *and* so the mini's frameless style isn't read as an already-fullscreen
+  // window below. Then derive the *actual* state from the window style rather
+  // than the cached flag. A channel can reach here fullscreen without ever
+  // having gone through this function (the SDR-embedded fullscreen stays as-is
+  // when PQ/HLG escalation puts video on the native HWND, and the embedded path
+  // never told the runner). In that case native_window_fullscreen_ is false
+  // while the window is already borderless — toggling on the stale cache made
+  // the first press *re-enter* fullscreen (capturing the fullscreen rect as
+  // the windowed placement and re-grinding style bits, visually nothing) and
+  // the second press *restore that same fullscreen rect* (visually nothing
+  // again): the button silently refused both directions until an unrelated
+  // window restore. A maximized window (WS_MAXIMIZE) keeps WS_OVERLAPPEDWINDOW
+  // and so is correctly not treated as fullscreen here.
   if (fullscreen && native_window_mini_) {
     SetNativeWindowMiniPlayer(false);
+  }
+  const LONG_PTR actual_style = GetWindowLongPtr(hwnd, GWL_STYLE);
+  const bool actually_fullscreen =
+      (actual_style & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW;
+  if (actually_fullscreen == fullscreen) {
+    // Target already matches the window's real state. Align the cache instead
+    // of no-oping silently: Dart toggles on the cached value, so a stale false
+    // would make the button keep re-entering (and never exiting) a window that
+    // is already fullscreen.
+    native_window_fullscreen_ = fullscreen;
+    return;
   }
 
   if (fullscreen) {
@@ -4536,12 +4667,29 @@ void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
     native_window_fullscreen_ = true;
   } else {
-    SetWindowLongPtr(hwnd, GWL_STYLE, native_windowed_style_);
-    SetWindowLongPtr(hwnd, GWL_EXSTYLE, native_windowed_ex_style_);
-    SetWindowPlacement(hwnd, &native_windowed_placement_);
-    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
-                     SWP_FRAMECHANGED);
+    // Safe restore: only put real geometry back if we ever captured a genuine
+    // windowed state. The Dart takeover in _createWindowsNativeHdrSurface exits
+    // media_kit's fullscreen before the native surface appears, so the runner
+    // always owns a captured placement by the time an exit can be requested —
+    // but if that handoff was ever skipped, `native_windowed_*` remain their
+    // defaults and restoring them would strip the window's chrome entirely.
+    // Degrade to "border back on, keep current geometry" instead.
+    if (native_windowed_placement_.length == sizeof(WINDOWPLACEMENT)) {
+      SetWindowLongPtr(hwnd, GWL_STYLE,
+                       native_windowed_style_ | WS_OVERLAPPEDWINDOW);
+      SetWindowLongPtr(hwnd, GWL_EXSTYLE, native_windowed_ex_style_);
+      SetWindowPlacement(hwnd, &native_windowed_placement_);
+      SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                       SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    } else {
+      const LONG_PTR fallback_style = GetWindowLongPtr(hwnd, GWL_STYLE);
+      SetWindowLongPtr(hwnd, GWL_STYLE,
+                       fallback_style | WS_OVERLAPPEDWINDOW);
+      SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                       SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
     native_window_fullscreen_ = false;
   }
   ResizeNativeVideoSurface();
@@ -4657,6 +4805,34 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
           ShowNativeControls(false);
           if (native_video_surface_) {
             ShowWindow(native_video_surface_, SW_HIDE);
+          }
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "recordWindowedState") {
+          // Dart calls this *before* media_kit's EnterNativeFullscreen puts the
+          // window into embedded fullscreen (the SDR preview→fullscreen handoff
+          // runs on the embedded texture). The runner cannot see media_kit's
+          // saved pre-fullscreen rect, so without this it would have to restore
+          // the window to windowed to learn it — a visible flash on the first
+          // SDR→HDR switch. Record the genuine windowed placement now; when the
+          // native surface later takes over an already-fullscreen window,
+          // SetNativeWindowFullscreen(true) hits the actual==target shortcut and
+          // the recorded placement simply stays put. Only record while the
+          // window really is windowed, so a stray call cannot stash a
+          // fullscreen rect as the windowed placement.
+          HWND record_hwnd = GetHandle();
+          if (record_hwnd) {
+            const LONG_PTR record_style =
+                GetWindowLongPtr(record_hwnd, GWL_STYLE);
+            if ((record_style & WS_OVERLAPPEDWINDOW) == WS_OVERLAPPEDWINDOW) {
+              native_windowed_style_ = record_style;
+              native_windowed_ex_style_ =
+                  GetWindowLongPtr(record_hwnd, GWL_EXSTYLE);
+              native_windowed_placement_.length = sizeof(WINDOWPLACEMENT);
+              GetWindowPlacement(record_hwnd, &native_windowed_placement_);
+            }
           }
           result->Success(flutter::EncodableValue(true));
           return;

@@ -143,7 +143,7 @@ void main() {
         home: ChannelListScreen(repo: repo, config: config, store: store),
       ),
     );
-    await pumpUntil(tester, find.text('Channel 0'));
+    await pumpUntil(tester, find.text('1 - Channel 0'));
   }
 
   /// Let the selection reveal's scroll animation (140ms) land.
@@ -246,12 +246,12 @@ void main() {
     expect(focusLabel(), 'live.channels');
     // NB: "Channel 0" also appears in the preview panel, so it can't mark the
     // list's scroll position — row 1 can.
-    expect(find.text('Channel 1'), findsOneWidget);
+    expect(find.text('2 - Channel 1'), findsOneWidget);
 
     // Walk down far enough that the top of the list is scrolled away.
     await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
     expect(
-      find.text('Channel 1').hitTestable(),
+      find.text('2 - Channel 1').hitTestable(),
       findsNothing,
       reason: 'the cursor drove the list past its first rows',
     );
@@ -262,7 +262,7 @@ void main() {
     await press(tester, LogicalKeyboardKey.arrowDown);
     await settle(tester);
     expect(
-      find.text('Channel 1'),
+      find.text('2 - Channel 1'),
       findsOneWidget,
       reason: 'Down past the last channel wraps to the first',
     );
@@ -287,7 +287,7 @@ void main() {
 
       expect(focusLabel(), 'live.preview.favorite');
       expect(
-        find.text('Channel 1'),
+        find.text('2 - Channel 1'),
         findsOneWidget,
         reason: 'Up must not fling the list to its bottom (no wrap-around)',
       );
@@ -309,7 +309,7 @@ void main() {
       await settle(tester);
 
       expect(focusLabel(), 'live.search.cell');
-      expect(find.text('Channel 0'), findsOneWidget);
+      expect(find.text('1 - Channel 0'), findsOneWidget);
 
       await unmount(tester);
     },
@@ -415,11 +415,11 @@ void main() {
 
     expect(focusLabel(), 'live.channels');
     expect(
-      find.text('Channel 6'),
+      find.text('7 - Channel 6'),
       findsWidgets,
       reason: 'the filtered first channel appears in the row and preview panel',
     );
-    expect(find.text('Channel 0'), findsNothing);
+    expect(find.text('1 - Channel 0'), findsNothing);
 
     await unmount(tester);
   });
@@ -483,13 +483,13 @@ void main() {
 
       // Walk the cursor down the list so the top of the list scrolls away.
       await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
-      expect(find.text('Channel 1').hitTestable(), findsNothing);
+      expect(find.text('2 - Channel 1').hitTestable(), findsNothing);
 
       // Rung 1: Back returns the cursor to the first channel (still in the list).
       await back(tester);
       expect(focusLabel(), 'live.channels');
       expect(
-        find.text('Channel 1'),
+        find.text('2 - Channel 1'),
         findsOneWidget,
         reason: 'the first Back resets the cursor to the first channel',
       );
@@ -555,7 +555,7 @@ void main() {
     }
 
     // The channel list owns the D-pad: its cursor is accented, the sidebar's isn't.
-    expect(borderOf(find.text('Channel 1')), AppColors.accent);
+    expect(borderOf(find.text('2 - Channel 1')), AppColors.accent);
     expect(borderOf(find.text('All channels')), isNot(AppColors.accent));
 
     // Left hands the D-pad to the categories — the accent must move with it.
@@ -564,7 +564,7 @@ void main() {
     expect(focusLabel(), 'live.categories');
     expect(borderOf(find.text('All channels')), AppColors.accent);
     expect(
-      borderOf(find.text('Channel 1')),
+      borderOf(find.text('2 - Channel 1')),
       isNot(AppColors.accent),
       reason:
           'the channel list must not keep the accent once it loses the D-pad',
@@ -794,7 +794,7 @@ void main() {
       await settle(tester);
       expect(focusLabel(), 'live.channels');
 
-      await tester.longPress(find.text('Channel 0'));
+      await tester.longPress(find.text('1 - Channel 0'));
       await tester.pump(const Duration(milliseconds: 350));
       expect(find.text('Play fullscreen'), findsOneWidget);
 
@@ -819,7 +819,7 @@ void main() {
       // Walk the cursor down the list, then onto row 11's star, so both peels
       // are observable (the row cursor must survive the first Back).
       await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
-      expect(find.text('Channel 1').hitTestable(), findsNothing);
+      expect(find.text('2 - Channel 1').hitTestable(), findsNothing);
       await press(tester, LogicalKeyboardKey.arrowRight);
       await settle(tester);
 
@@ -828,7 +828,7 @@ void main() {
       await back(tester);
       expect(focusLabel(), 'live.channels');
       expect(
-        find.text('Channel 1').hitTestable(),
+        find.text('2 - Channel 1').hitTestable(),
         findsNothing,
         reason: 'peeling the star column must not reset the row cursor',
       );
@@ -836,7 +836,7 @@ void main() {
       // Back #2: now the normal first-channel rung runs.
       await back(tester);
       expect(focusLabel(), 'live.channels');
-      expect(find.text('Channel 1'), findsOneWidget);
+      expect(find.text('2 - Channel 1'), findsOneWidget);
 
       await unmount(tester);
     },
@@ -920,7 +920,7 @@ void main() {
   ) async {
     await pumpWideScreenWith(tester, DemoSource(), size: const Size(960, 540));
 
-    final thirdRow = find.text('Tears of Steel (H.264)');
+    final thirdRow = find.text('2 - Tears of Steel (H.264)');
     expect(thirdRow, findsOneWidget);
     expect(
       tester.getRect(thirdRow).bottom,
@@ -967,7 +967,7 @@ void main() {
         home: ChannelListScreen(repo: firstRepo, config: config, store: store),
       ),
     );
-    await pumpUntil(tester, find.text('Big Buck Bunny (H.264)'));
+    await pumpUntil(tester, find.text('1 - Big Buck Bunny (H.264)'));
 
     final replacementRepo = LibraryRepository(source: _ManySource(), db: db);
     await tester.pumpWidget(
@@ -979,10 +979,10 @@ void main() {
         ),
       ),
     );
-    await pumpUntil(tester, find.text('Channel 0'));
+    await pumpUntil(tester, find.text('1 - Channel 0'));
 
-    expect(find.text('Channel 0'), findsOneWidget);
-    expect(find.text('Big Buck Bunny (H.264)'), findsNothing);
+    expect(find.text('1 - Channel 0'), findsOneWidget);
+    expect(find.text('1 - Big Buck Bunny (H.264)'), findsNothing);
     expect(find.text('Many'), findsOneWidget);
 
     await unmount(tester);

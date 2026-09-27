@@ -13,9 +13,11 @@
 //     row's star, Left peels back to the body before crossing panes, OK acts on
 //     the column, and vertical moves always land back on the body.
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/player/channel_number_entry.dart';
 import 'package:iptvs/screens/live_focus_coordinator.dart';
 import 'package:iptvs/sources/source.dart';
 
@@ -29,28 +31,44 @@ void main() {
 
   /// A coordinator over [visible] channels and [categories] (plus the implicit
   /// "All channels" at index 0). [wide] toggles the sidebar/preview layout.
+  ///
+  /// [all] is the catalog number entry searches — the whole list, which is
+  /// deliberately *not* the visible page (see `LiveFocusCoordinator.allChannels`).
+  /// It defaults to [visible] so the navigation tests don't have to restate it.
   ({
     LiveFocusCoordinator focus,
     List<String> played,
     List<String> toggled,
+    List<String> committed,
     List<String?> activated,
     int Function() tabsFocused,
     void Function(List<Channel>) replaceVisible,
+    void Function(List<Channel>) replaceAll,
+    ScrollController channelScroll,
   })
   make({
     List<Channel> visible = const [],
     List<String?> categories = const [null],
     bool wide = true,
+    List<Channel>? all,
   }) {
     final played = <String>[];
     final toggled = <String>[];
+    final committed = <String>[];
     final activated = <String?>[];
     var currentVisible = visible;
+    var currentAll = all ?? visible;
     var tabs = 0;
+    // Held so a test can mount a real list on it: `_reveal` is a no-op without
+    // attached clients, and "the reveal happened" is the whole point of the
+    // deferred-reveal group below.
+    final channelScroll = ScrollController();
+    addTearDown(channelScroll.dispose);
     final focus = LiveFocusCoordinator(
-      scrollController: ScrollController(),
+      scrollController: channelScroll,
       categoryScrollController: ScrollController(),
       visibleChannels: () => currentVisible,
+      allChannels: () => currentAll,
       orderedCategoryIds: () => categories,
       channelRowExtent: () => 100,
       categoryRowExtent: () => 48,
@@ -60,15 +78,19 @@ void main() {
       onCategoryActivated: activated.add,
       onPlayChannel: (c) => played.add(c.id),
       onToggleFavorite: (c) => toggled.add(c.id),
+      onNumberCommitted: (c) => committed.add(c.id),
       onFocusTabs: () => tabs++,
     );
     return (
       focus: focus,
       played: played,
       toggled: toggled,
+      committed: committed,
       activated: activated,
       tabsFocused: () => tabs,
+      channelScroll: channelScroll,
       replaceVisible: (replacement) => currentVisible = replacement,
+      replaceAll: (replacement) => currentAll = replacement,
     );
   }
 
@@ -89,6 +111,8 @@ void main() {
     WidgetTester tester,
     LiveFocusCoordinator focus, {
     bool withPreview = true,
+    ScrollController? channelList,
+    int itemCount = 0,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -112,6 +136,17 @@ void main() {
                 focusNode: focus.channelsFocusNode,
                 child: const SizedBox(width: 10, height: 10),
               ),
+              if (channelList != null)
+                // The real list, at the coordinator's own row extent: the reveal
+                // is `index * extent` arithmetic against this viewport.
+                Expanded(
+                  child: ListView.builder(
+                    controller: channelList,
+                    itemExtent: 100,
+                    itemCount: itemCount,
+                    itemBuilder: (_, i) => SizedBox(height: 100, child: Text('row $i')),
+                  ),
+                ),
             ],
           ),
         ),
@@ -553,6 +588,7 @@ void main() {
         scrollController: ScrollController(),
         categoryScrollController: ScrollController(),
         visibleChannels: () => visible,
+        allChannels: () => visible,
         orderedCategoryIds: () => const [null],
         channelRowExtent: () => 100,
         categoryRowExtent: () => 48,
@@ -562,6 +598,7 @@ void main() {
         onCategoryActivated: (_) {},
         onPlayChannel: (_) {},
         onToggleFavorite: (_) {},
+        onNumberCommitted: (_) {},
         onFocusTabs: () {},
       );
       addTearDown(focus.dispose);
@@ -574,8 +611,16 @@ void main() {
       focus.clampSelection();
       expect(focus.selectedChannelIndex, 0);
     });
+  });
 
-    test('a number jump moves the cursor to that channel number', () {
+  // Number entry is a *jump*, and the coordinator deliberately does not
+  // perform it: resolving a number can require changing the group, clearing a
+  // search, or (outside the list) resolving a stream. So the coordinator owns
+  // the digits and hands the matched channel to the host, which owns the jump.
+  // These pin the half of the contract that lives here — the search space, the
+  // match, and the keys.
+  group('number entry', () {
+    test('a committed number is handed to the host, not resolved here', () {
       final h = make(visible: channels(['a', 'b', 'c'])); // numbers 1..3
       addTearDown(h.focus.dispose);
 
@@ -584,7 +629,11 @@ void main() {
       h.focus.commitDigitBuffer();
 
       expect(h.focus.digitBuffer, isEmpty);
-      expect(h.focus.selectedChannelIndex, 2);
+      expect(h.committed, ['c']);
+      // The cursor is the host's business: it has to change group first when
+      // the number is outside the visible page, so the coordinator must not
+      // have jumped (and possibly to an index that is not there yet).
+      expect(h.focus.selectedChannelIndex, 0);
     });
 
     test('a number with no matching channel just clears the buffer', () {
@@ -592,41 +641,291 @@ void main() {
       addTearDown(h.focus.dispose);
 
       h.focus.appendDigit(9);
+      expect(h.focus.digitMatch, isNull);
       h.focus.commitDigitBuffer();
 
       expect(h.focus.digitBuffer, isEmpty);
+      expect(h.committed, isEmpty, reason: 'nothing to jump to');
       expect(h.focus.selectedChannelIndex, 0);
+    });
+
+    test('a number matches the whole catalog, not the visible page', () {
+      // The visible page is one category; the number space is everything. A
+      // number that names a channel the current group does not draw still has
+      // to resolve, or the same digits would mean different channels
+      // depending on where the user happened to be.
+      final h = make(
+        visible: channels(['a', 'b']),
+        all: channels(['a', 'b', 'c', 'd']),
+      );
+      addTearDown(h.focus.dispose);
+
+      h.focus.appendDigit(4);
+
+      expect(h.focus.digitMatch?.id, 'd');
+      h.focus.commitDigitBuffer();
+      expect(h.committed, ['d']);
+    });
+
+    test('digits switch on their own once the number is unambiguous', () {
+      // Four digits with a match need no disambiguation — but the switch is
+      // also what takes the chip down, so it holds for a beat first and the
+      // coordinator must not have forgotten the digits in the meantime.
+      fakeAsync((async) {
+        final h = make(visible: channels(['x', 'y', 'z']), all: [
+          ...channels(['a', 'b', 'c']),
+          for (final n in [1000, 1234]) Channel(id: '$n', name: 'Ch $n', number: n),
+        ]);
+        addTearDown(h.focus.dispose);
+
+        for (final d in [1, 2, 3, 4]) {
+          h.focus.appendDigit(d);
+        }
+
+        expect(h.committed, isEmpty, reason: 'not on the keystroke');
+        expect(h.focus.digitBuffer, '1234', reason: 'still readable');
+
+        async.elapse(kChannelNumberFullLengthCommitDelay);
+        expect(h.committed, ['1234']);
+        expect(h.focus.digitBuffer, isEmpty);
+      });
+    });
+
+    test('a number can be entered when the visible page is empty', () {
+      // A group with no channels draws no rows, and the key handler used to
+      // return before it looked at digits — so the one way *out* of an empty
+      // group was a number that could not be typed.
+      final h = make(visible: const [], all: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+
+      h.focus.handleChannelsKey(h.focus.channelsFocusNode, keyDown(LogicalKeyboardKey.digit2));
+
+      expect(h.focus.digitBuffer, '2');
+      h.focus.commitDigitBuffer();
+      expect(h.committed, ['b']);
+    });
+
+    test('Enter confirms a half-typed number, and only then', () {
+      final h = make(visible: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+
+      // Nothing typed: Enter is the activate key, so it plays the row.
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.enter),
+      );
+      expect(h.committed, isEmpty);
+      expect(h.played, ['a']);
+
+      h.focus.appendDigit(2);
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.enter),
+      );
+      expect(h.committed, ['b']);
+      expect(h.played, ['a'], reason: 'the number took the press instead');
+    });
+
+    test('a direction key drops a half-typed number', () {
+      // Navigating away is a decision to stop entering it; leaving the chip up
+      // over a moving cursor reads as a pending jump that is about to fire.
+      for (final key in [
+        LogicalKeyboardKey.arrowUp,
+        LogicalKeyboardKey.arrowDown,
+        LogicalKeyboardKey.arrowLeft,
+        LogicalKeyboardKey.arrowRight,
+      ]) {
+        final h = make(visible: channels(['a', 'b', 'c']));
+        addTearDown(h.focus.dispose);
+        h.focus.appendDigit(2);
+        expect(h.focus.digitBuffer, '2');
+
+        h.focus.handleChannelsKey(h.focus.channelsFocusNode, keyDown(key));
+
+        expect(h.focus.digitBuffer, isEmpty, reason: 'for $key');
+      }
+    });
+
+    test('the chip names the match, and the no-match case explicitly', () {
+      final h = make(visible: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+
+      h.focus.appendDigit(2);
+      expect(h.focus.digitMatchLabel, 'Ch b');
+
+      h.focus.appendDigit(9);
+      expect(h.focus.digitMatch, isNull);
+      expect(h.focus.digitMatchLabel, kNoChannelNumberMatch);
+    });
+
+    test('a pending number cannot commit after the coordinator is gone', () {
+      // The host hand-off is async, and a screen can be torn down inside the
+      // 1.5s window. An undisposed entry would still fire into a dead screen.
+      fakeAsync((async) {
+        final h = make(visible: channels(['a', 'b']));
+        h.focus.appendDigit(2);
+
+        h.focus.dispose();
+        async.elapse(kChannelNumberCommitDelay * 2);
+
+        expect(h.committed, isEmpty);
     });
   });
 
-  // The live body used to rebuild in full on every D-pad press *and* every focus
-  // change, which was the dominant per-frame cost under key auto-repeat on weak
-  // Android TV hardware. The panes now subscribe to narrow slices. These pin the
-  // split so it can't silently collapse back into one notifier.
-  group('notification granularity', () {
-    /// Counts pulses on each slice plus the aggregate.
-    ({
-      int Function() channel,
-      int Function() category,
-      int Function() digits,
-      int Function() preview,
-      int Function() aggregate,
-    })
-    watch(LiveFocusCoordinator focus) {
-      var channel = 0, category = 0, digits = 0, preview = 0, aggregate = 0;
-      focus.channelSelection.addListener(() => channel++);
-      focus.categorySelection.addListener(() => category++);
-      focus.digitEntry.addListener(() => digits++);
-      focus.previewRegion.addListener(() => preview++);
-      focus.addListener(() => aggregate++);
-      return (
-        channel: () => channel,
-        category: () => category,
-        digits: () => digits,
-        preview: () => preview,
-        aggregate: () => aggregate,
+  // The half of the jump that is *not* pure: getting the row on screen. A
+  // number can select a channel perfectly and still look like nothing happened,
+  // which is exactly the bug this pins — the reveal is `index * extent`
+  // arithmetic, so issued before the frame that renders the group it is jumping
+  // into, it is measured against the outgoing list and clamps to the top.
+  group('revealing a jumped-to channel', () {
+    testWidgets('a deferred reveal lands on the row in the NEW list', (
+      tester,
+    ) async {
+      // Start in a short group; the target is row 40 of a long one.
+      final h = make(visible: channels(List.generate(4, (i) => 'c$i')));
+      addTearDown(h.focus.dispose);
+      await host(
+        tester,
+        h.focus,
+        channelList: h.channelScroll,
+        itemCount: 4,
       );
-    }
+
+      // The group switch: a different, longer list arrives and the widget tree
+      // grows with it.
+      h.replaceVisible(channels(List.generate(60, (i) => 'c$i')));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ListView.builder(
+              controller: h.channelScroll,
+              itemExtent: 100,
+              itemCount: 60,
+              itemBuilder: (_, i) => SizedBox(height: 100, child: Text('row $i')),
+            ),
+          ),
+        ),
+      );
+
+      // What the host does after a group switch: move the cursor now, scroll
+      // after the frame.
+      h.focus.selectChannel(40, reveal: false);
+      expect(h.focus.selectedChannelId, 'c40');
+      expect(h.channelScroll.offset, 0, reason: 'the scroll waits for the frame');
+      h.focus.revealSelectedChannel();
+      // The reveal is an animated scrollTo, so the offset only means something
+      // once it has run.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(h.channelScroll.offset, greaterThan(0));
+
+      // The row is inside the viewport, not merely somewhere in the list.
+      final position = h.channelScroll.position;
+      expect(position.pixels, lessThanOrEqualTo(40 * 100));
+      expect(position.pixels + position.viewportDimension, greaterThan(40 * 100));
+    });
+
+    testWidgets('a reveal issued before the new list exists addresses a row '
+        'that is not there', (tester) async {
+      // The negative control for the test above: same target index, but measured
+      // against the 4-row list that is on screen right now — so the index meant
+      // for the incoming list is consumed by the outgoing one and the cursor
+      // lands on the wrong channel entirely.
+      final h = make(visible: channels(List.generate(4, (i) => 'c$i')));
+      addTearDown(h.focus.dispose);
+      await host(
+        tester,
+        h.focus,
+        channelList: h.channelScroll,
+        itemCount: 4,
+      );
+
+      h.focus.selectChannel(40);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(h.focus.selectedChannelId, 'c3', reason: 'index clamped to 4 rows');
+      expect(h.focus.selectedChannelId, isNot('c40'));
+    });
+
+    testWidgets('a number jump lands without a frame in which it can be '
+        'cancelled', (tester) async {
+      // The reported failure: the number resolved, the cursor moved, the preview
+      // retargeted to the right channel — and the row was still off-screen. The
+      // reveal was a 140 ms `animateTo` across hundreds of rows, so any rebuild
+      // during it (the preview retarget, a late guide) abandoned the scroll
+      // wherever it had got to, and a half-finished animation is indistinguishable
+      // from no scroll at all.
+      //
+      // So the number's reveal is immediate. `jumpTo` has no frame in which it
+      // can be interrupted, and a several-hundred-row jump animated in 140 ms
+      // was a blur rather than a transition in the first place.
+      final h = make(visible: channels(List.generate(600, (i) => 'c$i')));
+      addTearDown(h.focus.dispose);
+      await host(
+        tester,
+        h.focus,
+        channelList: h.channelScroll,
+        itemCount: 600,
+      );
+
+      // What the host does on a number commit: cursor now, scroll after the
+      // frame, un-animated.
+      h.focus.selectChannel(512, reveal: false);
+      expect(h.channelScroll.offset, 0, reason: 'the scroll waits for the frame');
+      h.focus.revealSelectedChannel(immediate: true);
+
+      // A single frame. No settling pump, no 200 ms of curve — the offset must
+      // already be final, because a real screen has no guarantee of another one
+      // arriving before the user looks.
+      await tester.pump();
+      final landed = h.channelScroll.offset;
+      expect(landed, greaterThan(0));
+
+      // And it is the *right* row, not merely a scrolled list: the revealed
+      // window has to contain the selected channel.
+      final position = h.channelScroll.position;
+      expect(
+        512 * 100,
+        inInclusiveRange(
+          position.pixels.round(),
+          (position.pixels + position.viewportDimension).round(),
+        ),
+        reason: 'row 512 must be on screen, not just somewhere in the list',
+      );
+    });
+  });
+});
+
+// The live body used to rebuild in full on every D-pad press *and* every focus
+// change, which was the dominant per-frame cost under key auto-repeat on weak
+// Android TV hardware. The panes now subscribe to narrow slices. These pin the
+// split so it can't silently collapse back into one notifier.
+group('notification granularity', () {
+  /// Counts pulses on each slice plus the aggregate.
+  ({
+    int Function() channel,
+    int Function() category,
+    int Function() digits,
+    int Function() preview,
+    int Function() aggregate,
+  })
+  watch(LiveFocusCoordinator focus) {
+    var channel = 0, category = 0, digits = 0, preview = 0, aggregate = 0;
+    focus.channelSelection.addListener(() => channel++);
+    focus.categorySelection.addListener(() => category++);
+    focus.digitEntry.addListener(() => digits++);
+    focus.previewRegion.addListener(() => preview++);
+    focus.addListener(() => aggregate++);
+    return (
+      channel: () => channel,
+      category: () => category,
+      digits: () => digits,
+      preview: () => preview,
+      aggregate: () => aggregate,
+    );
+  }
 
     test('moving the channel cursor leaves the category sidebar alone', () {
       final h = make(visible: channels(['a', 'b', 'c']));
