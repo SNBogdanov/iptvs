@@ -78,8 +78,8 @@ void main() {
             programme('tvg.two', title: 'Two'),
       );
       final progs = await parseXmltv(bytes, {
-        'tvg.one': 'ch1',
-        'tvg.two': 'ch2',
+        'tvg.one': ['ch1'],
+        'tvg.two': ['ch2'],
       });
 
       expect(progs.map((p) => p.channelId), ['ch1', 'ch2']);
@@ -102,7 +102,9 @@ void main() {
       final bytes = xmltv(many.toString());
       expect(bytes.length, greaterThan(64 * 1024));
 
-      final progs = await parseXmltv(bytes, {'tvg.one': 'ch1'});
+      final progs = await parseXmltv(bytes, {
+        'tvg.one': ['ch1'],
+      });
 
       expect(progs, hasLength(750)); // even indices only
       expect(progs.every((p) => p.channelId == 'ch1'), isTrue);
@@ -130,7 +132,9 @@ void main() {
       // Comfortably several chunks, so boundaries fall mid-title repeatedly.
       expect(bytes.length, greaterThan(3 * 256 * 1024));
 
-      final progs = await parseXmltv(bytes, {'tvg.one': 'ch1'});
+      final progs = await parseXmltv(bytes, {
+        'tvg.one': ['ch1'],
+      });
 
       expect(progs, hasLength(count));
       for (var i = 0; i < progs.length; i++) {

@@ -55,7 +55,7 @@ void main() {
         );
         fixtureWatch.stop();
         final channelMap = {
-          for (var i = 0; i < channelCount; i++) 'channel.$i': 'id-$i',
+          for (var i = 0; i < channelCount; i++) 'channel.$i': ['id-$i'],
         };
         final parseWatch = Stopwatch()..start();
         final programmes = await parseXmltv(bytes, channelMap);
@@ -200,7 +200,7 @@ void main() {
           gzip: true,
         );
         final channelMap = {
-          for (var i = 0; i < channelCount; i++) 'channel.$i': 'id-$i',
+          for (var i = 0; i < channelCount; i++) 'channel.$i': ['id-$i'],
         };
 
         final watch = Stopwatch()..start();

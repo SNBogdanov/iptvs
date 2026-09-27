@@ -64,7 +64,7 @@ Stream<String> _decodeChunked(Uint8List data) {
 /// Omitting it leaves exact `tvg-id` matching only.
 Future<List<Programme>> parseXmltv(
   Uint8List bytes,
-  Map<String, String> tvgIdToChannelId, {
+  Map<String, List<String>> tvgIdToChannelId, {
   Map<String, List<String>> nameToChannelIds = const {},
 }) {
   final args = (bytes, tvgIdToChannelId, nameToChannelIds);
@@ -110,10 +110,10 @@ Iterable<Programme> _handleNode(XmlNode node, XmltvChannelResolver resolver) {
 }
 
 /// Top-level worker so it can run under [compute]. Takes a record of the raw
-/// [Uint8List] bytes and the tvg-id → channel-id map (both sendable across the
+/// [Uint8List] bytes and the tvg-id → channel-ids map (both sendable across the
 /// isolate boundary), returns the mapped [Programme]s.
 Future<List<Programme>> _parseXmltvBytes(
-  (Uint8List, Map<String, String>, Map<String, List<String>>) args,
+  (Uint8List, Map<String, List<String>>, Map<String, List<String>>) args,
 ) async {
   final (bytes, tvgIdToChannelId, nameToChannelIds) = args;
   final resolver = XmltvChannelResolver(
@@ -208,7 +208,7 @@ const _defaultEpgBatchSize = 1000;
 /// unblocked gracefully.
 Stream<List<Programme>> parseXmltvBatched(
   Uint8List bytes,
-  Map<String, String> tvgIdToChannelId, {
+  Map<String, List<String>> tvgIdToChannelId, {
   Map<String, List<String>> nameToChannelIds = const {},
   int batchSize = _defaultEpgBatchSize,
   LoadToken? token,
@@ -279,7 +279,13 @@ Stream<List<Programme>> parseXmltvBatched(
 /// before parsing on. `await for` (rather than the single-list path's
 /// `forEach`) is what makes that mid-loop await possible.
 void _parseXmltvBatchedWorker(
-  (SendPort, Uint8List, Map<String, String>, Map<String, List<String>>, int)
+  (
+    SendPort,
+    Uint8List,
+    Map<String, List<String>>,
+    Map<String, List<String>>,
+    int,
+  )
   args,
 ) async {
   final (sendPort, bytes, tvgIdToChannelId, nameToChannelIds, batchSize) = args;

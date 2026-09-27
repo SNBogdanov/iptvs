@@ -54,9 +54,33 @@ void main() {
       );
     });
 
+    test('keeps letters of every script, not just Latin', () {
+      // The separator class used to be `[^a-z0-9]`, so a Cyrillic name had no
+      // token characters at all and normalised to '' — unmatchable, which on
+      // Stalker (no `tvg-id`, so names are the only path) meant a third-party
+      // guide contributed nothing for a Russian portal.
+      expect(normalizeChannelName('Первый канал'), 'первыйканал');
+      // Quality markers still drop, so the UHD and FHD feeds of one channel are
+      // the same key.
+      expect(normalizeChannelName('Первый канал UHD'), 'первыйканал');
+      expect(normalizeChannelName('Первый канал FHD'), 'первыйканал');
+      // Still a real identity, not a catch-all.
+      expect(
+        normalizeChannelName('Первый канал'),
+        isNot(normalizeChannelName('Второй канал')),
+      );
+      // Unicode punctuation and spacing split just like ASCII ones; the NBSP is
+      // written as an escape so the test says which code point it means.
+      expect(normalizeChannelName('Первый-канал'), 'первыйканал');
+      expect(normalizeChannelName('Первый\u00A0канал'), 'первыйканал');
+      // Cyrillic ё folds onto е, like the Romanian forms above.
+      expect(normalizeChannelName('Щёлкать'), normalizeChannelName('Щелкать'));
+    });
+
     test('returns empty when nothing identifying survives', () {
       expect(normalizeChannelName('---'), '');
       expect(normalizeChannelName('HD'), '');
+      expect(normalizeChannelName('   '), '');
       expect(normalizeChannelName(''), '');
     });
   });
@@ -75,6 +99,41 @@ void main() {
     test('skips channels whose name normalises to nothing', () {
       expect(buildChannelNameIndex([_ch('a', '***')]), isEmpty);
     });
+
+    test('drops a key more of our channels share than the cap allows', () {
+      final index = buildChannelNameIndex([
+        for (var i = 0; i <= kMaxMatchGroup; i++) _ch('c$i', 'Generic Label'),
+      ]);
+      expect(index, isEmpty);
+    });
+  });
+
+  group('buildTvgIdIndex', () {
+    test('one id claims every feed carrying it, not just the last', () {
+      // The Xtream Codes shape, verbatim: a panel gives every feed of one
+      // channel the same `epg_channel_id`, and the guide has one entry for it.
+      // `map[tvg] = c.id` kept only the last row, so one feed of the pair was
+      // unreachable through the id path with no other path available to it.
+      final index = buildTvgIdIndex([
+        _ch('1', 'Первый канал UHD', tvgId: '146'),
+        _ch('2', 'Первый канал FHD', tvgId: '146'),
+        _ch('3', 'Другой канал', tvgId: '147'),
+      ]);
+      expect(index['146'], ['1', '2']);
+      expect(index['147'], ['3']);
+    });
+
+    test('skips channels with no tvg-id, and drops an over-cap id', () {
+      expect(
+        buildTvgIdIndex([_ch('a', 'No Id'), _ch('b', 'Blank', tvgId: '')]),
+        isEmpty,
+      );
+      final overCap = buildTvgIdIndex([
+        for (var i = 0; i <= kMaxMatchGroup; i++)
+          _ch('c$i', 'Feed $i', tvgId: 'shared'),
+      ]);
+      expect(overCap, isEmpty);
+    });
   });
 
   group('XmltvChannelResolver', () {
@@ -86,6 +145,45 @@ void main() {
       );
       expect(r.resolve('protv.ro'), ['a']);
       expect(r.resolve('unknown.id'), isEmpty);
+    });
+
+    test('an id shared by two feeds claims both, declared or not', () {
+      final channels = [
+        _ch('1', 'Первый канал UHD', tvgId: '146'),
+        _ch('2', 'Первый канал FHD', tvgId: '146'),
+      ];
+      // Declared: rule 1, the panel's own guide path — name matching is off
+      // there, so this is the *only* way either feed can be claimed.
+      final declared = XmltvChannelResolver(
+        tvgIdToChannelId: buildTvgIdIndex(channels),
+      )..declareChannel('146', const ['Первый канал UHD', 'Первый канал FHD']);
+      expect(declared.resolve('146'), ['1', '2']);
+
+      // Undeclared: the historical declaration-less path fans out identically.
+      final undeclared = XmltvChannelResolver(
+        tvgIdToChannelId: buildTvgIdIndex(channels),
+      );
+      expect(undeclared.resolve('146'), ['1', '2']);
+    });
+
+    test('a name claim is still not overridden by an undeclared shared id', () {
+      // The overlap guard, with the fan-out: a channel taken by rule 2 stays
+      // out of the exact answer, while its unclaimed feed-mates on that same id
+      // still come in.
+      final channels = [
+        _ch('1', 'Pro TV'),
+        _ch('2', 'Pro TV HD', tvgId: 'protv.ro'),
+        _ch('3', 'Alt Feed', tvgId: 'protv.ro'),
+      ];
+      final r = XmltvChannelResolver(
+        tvgIdToChannelId: buildTvgIdIndex(channels),
+        nameToChannelIds: buildChannelNameIndex(channels),
+      )..declareChannel('ProTV.ro', const ['Pro TV']);
+      // The guide claims 'Pro TV' by name, which covers channels 1 and 2 ('HD'
+      // is a quality token, so both normalise alike).
+      expect(r.resolve('ProTV.ro'), ['1', '2']);
+      // An undeclared guide id of ours then adds only what is still free.
+      expect(r.resolve('protv.ro'), ['3']);
     });
 
     test('an exact id claims its channel', () {
@@ -229,7 +327,10 @@ void main() {
         normalizeChannelName('WWE Raw'),
         isNot(normalizeChannelName('WWE')),
       );
-      expect(normalizeChannelName('WWE Raw HD'), normalizeChannelName('WWE Raw'));
+      expect(
+        normalizeChannelName('WWE Raw HD'),
+        normalizeChannelName('WWE Raw'),
+      );
     });
 
     test('a backup feed still folds onto its channel', () {

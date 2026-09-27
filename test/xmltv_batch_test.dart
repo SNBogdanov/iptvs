@@ -14,8 +14,8 @@ import 'package:iptvs/sources/xmltv.dart';
 import 'support/workload_fixtures.dart';
 
 void main() {
-  Map<String, String> channelMap(int channelCount) => {
-    for (var i = 0; i < channelCount; i++) 'channel.$i': 'ch$i',
+  Map<String, List<String>> channelMap(int channelCount) => {
+    for (var i = 0; i < channelCount; i++) 'channel.$i': ['ch$i'],
   };
 
   group('parseXmltvBatched', () {
@@ -101,7 +101,9 @@ void main() {
             good('tvg.unknown', title: 'Unmapped') +
             good('tvg.one', title: 'Two'),
       );
-      final map = {'tvg.one': 'ch1'};
+      final map = {
+        'tvg.one': ['ch1'],
+      };
 
       final inline = await parseXmltv(bytes, map);
       final batched = await parseXmltvBatched(
@@ -119,7 +121,9 @@ void main() {
       final bytes = Uint8List.fromList(
         utf8.encode('<?xml version="1.0"?><tv><programme channel="tvg.one"'),
       );
-      final map = {'tvg.one': 'ch1'};
+      final map = {
+        'tvg.one': ['ch1'],
+      };
 
       await expectLater(parseXmltv(bytes, map), throwsA(anything));
       await expectLater(

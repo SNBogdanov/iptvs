@@ -36,7 +36,7 @@ void main() {
         );
         expect(bytes.length, greaterThan(64 * 1024));
         final map = {
-          for (var i = 0; i < channelCount; i++) 'channel.$i': 'ch$i',
+          for (var i = 0; i < channelCount; i++) 'channel.$i': ['ch$i'],
         };
         final token = LoadToken();
 
@@ -137,37 +137,34 @@ void main() {
 
     String dbPath() => '${tempDir.path}/iptv.db';
 
-    test(
-      'a token cancelled between the fetch and the cache write does not '
-      'clobber an existing cache',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        // The seed is the load-bearing part of this test: a superseded load is
-        // only barred from writing because there is already something to lose.
-        await db.replaceLibrary(
-          'fake',
-          'Fake',
-          const [Category(id: 'test', title: 'Test streams')],
-          const [Channel(id: 'old', name: 'Old', categoryId: 'test')],
-        );
+    test('a token cancelled between the fetch and the cache write does not '
+        'clobber an existing cache', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      // The seed is the load-bearing part of this test: a superseded load is
+      // only barred from writing because there is already something to lose.
+      await db.replaceLibrary(
+        'fake',
+        'Fake',
+        const [Category(id: 'test', title: 'Test streams')],
+        const [Channel(id: 'old', name: 'Old', categoryId: 'test')],
+      );
 
-        final token = LoadToken();
-        // channels() cancels the token as a side effect, simulating a newer
-        // load superseding this one while the fetch was still in flight.
-        final source = _CancelingSource(tokenToCancel: token);
-        final repo = LibraryRepository(source: source, db: db);
-        repo.loadToken = token;
+      final token = LoadToken();
+      // channels() cancels the token as a side effect, simulating a newer
+      // load superseding this one while the fetch was still in flight.
+      final source = _CancelingSource(tokenToCancel: token);
+      final repo = LibraryRepository(source: source, db: db);
+      repo.loadToken = token;
 
-        final snapshot = await repo.load(forceRefresh: true);
+      final snapshot = await repo.load(forceRefresh: true);
 
-        // The returned snapshot reflects what the source fetched — matches
-        // "the controller already discarded this by generation" semantics —
-        // but the cache write itself was skipped.
-        expect(snapshot.channels.map((c) => c.id), ['new']);
-        expect((await db.readChannels('fake')).map((c) => c.id), ['old']);
-        await db.close();
-      },
-    );
+      // The returned snapshot reflects what the source fetched — matches
+      // "the controller already discarded this by generation" semantics —
+      // but the cache write itself was skipped.
+      expect(snapshot.channels.map((c) => c.id), ['new']);
+      expect((await db.readChannels('fake')).map((c) => c.id), ['old']);
+      await db.close();
+    });
 
     test(
       'a token cancelled before anything is cached still seeds the empty cache',
@@ -190,25 +187,22 @@ void main() {
       },
     );
 
-    test(
-      'a superseded load schedules no EPG refresh',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        final token = LoadToken();
-        final source = _CancelingSource(tokenToCancel: token);
-        final repo = LibraryRepository(source: source, db: db);
-        repo.loadToken = token;
+    test('a superseded load schedules no EPG refresh', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final token = LoadToken();
+      final source = _CancelingSource(tokenToCancel: token);
+      final repo = LibraryRepository(source: source, db: db);
+      repo.loadToken = token;
 
-        await repo.load(forceRefresh: true);
+      await repo.load(forceRefresh: true);
 
-        // The load that cancelled this one schedules its own, and the ingest
-        // coordinator is last-start-wins — a late refresh from here would take
-        // the slot from the correct one.
-        expect(repo.pendingEpgRefresh, isNull);
-        expect(await db.lastEpgSynced('fake'), isNull);
-        await db.close();
-      },
-    );
+      // The load that cancelled this one schedules its own, and the ingest
+      // coordinator is last-start-wins — a late refresh from here would take
+      // the slot from the correct one.
+      expect(repo.pendingEpgRefresh, isNull);
+      expect(await db.lastEpgSynced('fake'), isNull);
+      await db.close();
+    });
 
     test(
       'a cancelled EPG batch stream is swallowed, not surfaced as a load error',

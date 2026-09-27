@@ -48,7 +48,7 @@ void main() {
 
   test('generated XMLTV fixture parses in plain and gzip forms', () async {
     final channelMap = {
-      for (var i = 0; i < 4; i++) 'channel.$i': 'channel-id-$i',
+      for (var i = 0; i < 4; i++) 'channel.$i': ['channel-id-$i'],
     };
 
     for (final gzip in [false, true]) {

@@ -21,6 +21,16 @@ library;
 
 import 'source.dart';
 
+/// The most of our channels one guide key may claim, on **either** index.
+///
+/// A guide entry is one channel to the guide, so it can legitimately be several
+/// channels to us — every feed of one channel, which a panel expresses as one
+/// shared `epg_channel_id` and a playlist as HD/SD/UHD rows. Claiming them all
+/// is correct, and bounded rather than arbitrary: a key reaching more than this
+/// is a panel or playlist that has lost the plot, and it matches nothing, which
+/// is the same answer an ambiguous name gets.
+const int kMaxMatchGroup = 8;
+
 /// Whole-word tokens dropped from a channel name before comparing.
 ///
 /// Stream-quality and packaging markers only — they distinguish two *feeds of
@@ -55,37 +65,107 @@ const Set<String> _qualityTokens = {
   '60fps',
 };
 
-/// Accent folding for the Latin ranges an IPTV playlist actually carries.
+/// Accent folding for the ranges an IPTV playlist actually carries.
 ///
 /// Romanian (`ă â î ș ț`) matters here in particular: the same channel is
 /// routinely spelled with and without diacritics across a playlist and a guide,
 /// and with the comma-below vs cedilla variants of `ș`/`ț` — which are distinct
 /// code points, so `Digi Sport` vs `Digi Șport` would otherwise never match.
+/// Cyrillic `ё` is the same class of disagreement, and is folded for the same
+/// reason; the key is already lowercased by the time it is looked up, so only
+/// the lowercase form is needed.
 const Map<String, String> _foldings = {
-  'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'ä': 'a', 'å': 'a', 'ă': 'a',
-  'ā': 'a', 'ą': 'a',
-  'ç': 'c', 'ć': 'c', 'č': 'c',
-  'ď': 'd', 'đ': 'd',
-  'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ě': 'e', 'ę': 'e', 'ē': 'e',
-  'ì': 'i', 'í': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i', 'į': 'i',
-  'ł': 'l', 'ĺ': 'l', 'ľ': 'l',
-  'ñ': 'n', 'ń': 'n', 'ň': 'n',
-  'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o', 'ő': 'o', 'ø': 'o',
-  'ř': 'r', 'ŕ': 'r',
-  'ś': 's', 'š': 's', 'ş': 's', 'ș': 's',
-  'ť': 't', 'ţ': 't', 'ț': 't',
-  'ù': 'u', 'ú': 'u', 'û': 'u', 'ü': 'u', 'ű': 'u', 'ū': 'u', 'ů': 'u',
-  'ý': 'y', 'ÿ': 'y',
-  'ź': 'z', 'ż': 'z', 'ž': 'z',
-  'ß': 'ss', 'æ': 'ae', 'œ': 'oe',
+  'à': 'a',
+  'á': 'a',
+  'â': 'a',
+  'ã': 'a',
+  'ä': 'a',
+  'å': 'a',
+  'ă': 'a',
+  'ā': 'a',
+  'ą': 'a',
+  'ç': 'c',
+  'ć': 'c',
+  'č': 'c',
+  'ď': 'd',
+  'đ': 'd',
+  'è': 'e',
+  'é': 'e',
+  'ê': 'e',
+  'ë': 'e',
+  'ě': 'e',
+  'ę': 'e',
+  'ē': 'e',
+  'ì': 'i',
+  'í': 'i',
+  'î': 'i',
+  'ï': 'i',
+  'ī': 'i',
+  'į': 'i',
+  'ł': 'l',
+  'ĺ': 'l',
+  'ľ': 'l',
+  'ñ': 'n',
+  'ń': 'n',
+  'ň': 'n',
+  'ò': 'o',
+  'ó': 'o',
+  'ô': 'o',
+  'õ': 'o',
+  'ö': 'o',
+  'ő': 'o',
+  'ø': 'o',
+  'ř': 'r',
+  'ŕ': 'r',
+  'ś': 's',
+  'š': 's',
+  'ş': 's',
+  'ș': 's',
+  'ť': 't',
+  'ţ': 't',
+  'ț': 't',
+  'ù': 'u',
+  'ú': 'u',
+  'û': 'u',
+  'ü': 'u',
+  'ű': 'u',
+  'ū': 'u',
+  'ů': 'u',
+  'ý': 'y',
+  'ÿ': 'y',
+  'ź': 'z',
+  'ż': 'z',
+  'ž': 'z',
+  'ß': 'ss',
+  'æ': 'ae',
+  'œ': 'oe',
+  'ё': 'е',
 };
 
-/// Separator run between name tokens.
+/// Separator run between name tokens: whitespace and punctuation, **never a
+/// letter**.
+///
+/// The obvious spelling of this is `[^a-z0-9]`, and it was: it counts every
+/// non-Latin letter as a separator, so a Cyrillic name normalised to the empty
+/// string and was unmatchable. Name matching was therefore dead for a Russian
+/// portal, and it is the *only* path for a channel whose ids miss — the case on
+/// Stalker, whose channels carry no `tvg-id` at all, and on an Xtream Codes
+/// panel for any feed the panel gave no `epg_channel_id` to. The report that
+/// pinned it was the latter: two feeds of one channel, `Первый канал UHD` and
+/// `Первый канал FHD`, one guide entry declaring both names under id `146`, and
+/// only the feed that had that id showing a programme.
+///
+/// Unicode punctuation is listed explicitly rather than as a property class, so
+/// the pattern behaves the same on every Dart compilation target; `unicode` is
+/// there for `\s` to cover NBSP and the other Unicode spaces XMLTV is full of.
 ///
 /// Hoisted because [normalizeChannelName] runs once per channel and a large
 /// portal carries 250k of them — building this pattern inside the function
 /// allocated and compiled a `RegExp` per channel, on the main isolate.
-final RegExp _nameSeparators = RegExp(r'[^a-z0-9]+');
+final RegExp _nameSeparators = RegExp(
+  r'[\s!-/:-@\[-`{-~¡§«°·»–—‘’“”•…‹›№]+',
+  unicode: true,
+);
 
 /// A leading country/language tag: `RO: Digi Sport`, `UK | Sky Sports`,
 /// `|FR| TF1`. Ubiquitous in IPTV playlists, absent from every real guide, so
@@ -98,6 +178,10 @@ final RegExp _leadingCountryTag = RegExp(r'^\s*\|?\s*([a-z]{2,3})\s*[:|]\s*');
 /// Collapse a channel name to a comparison key, or `''` when nothing
 /// identifying survives (an all-punctuation or quality-token-only name), which
 /// callers must treat as unmatchable rather than as a key.
+///
+/// Script-agnostic: every script's letters and digits are token characters, so
+/// a Cyrillic or Greek name compares exactly like a Latin one instead of
+/// collapsing to nothing.
 ///
 /// Parenthesised and bracketed content is deliberately **kept**: it is where
 /// playlists put the disambiguator (`HBO (RO)` vs `HBO (HU)`), and dropping it
@@ -126,23 +210,20 @@ String normalizeChannelName(String raw) {
 /// A key maps to **every** channel that normalises to it, not to one: a
 /// playlist routinely carries the same channel as separate HD and SD entries,
 /// and both rows should show the schedule the one guide entry describes.
-/// A name shared by more than this many of our channels is treated as
-/// ambiguous and matches nothing.
 ///
-/// Two costs meet here. A name that dozens of rows share is not a channel
-/// identity but a generic label, and claiming all of them is more likely wrong
-/// than right. And every claim *multiplies* the guide: programmes are stored
-/// per `channel_id`, so one guide channel claiming N of ours writes N copies of
-/// its schedule — on a 960k-programme guide (docs/validation-baseline.md) an
-/// uncapped fan-out is a multi-million-row ingest.
+/// The cap — [kMaxMatchGroup] — bounds the same thing it bounds on the exact
+/// `tvg-id` path, and for the same reason: every claim *multiplies* the guide,
+/// because programmes are stored per `channel_id`, so one guide channel claiming
+/// N of ours writes N copies of its schedule — on a 960k-programme guide
+/// (docs/validation-baseline.md) an uncapped fan-out is a multi-million-row
+/// ingest. A name that dozens of rows share is also not a channel identity but a
+/// generic label, so claiming all of them is more likely wrong than right.
 ///
-/// Dropping the whole group rather than keeping the first few is deliberate:
-/// there is no principled way to pick which variants win, and rule 3 already
-/// says an ambiguous match goes to nobody. Name matching is purely additive
-/// over the exact `tvg-id` path, so the cap only ever limits what it *adds* —
-/// it can never take a guide away from a channel that had one.
-const int kMaxNameMatchGroup = 8;
-
+/// Dropping the whole group rather than keeping the first few is deliberate for
+/// names: there is no principled way to pick which variants win, and rule 3
+/// already says an ambiguous match goes to nobody. Name matching is purely
+/// additive over the exact `tvg-id` path, so the cap only ever limits what it
+/// *adds* — it can never take a guide away from a channel that had one.
 Map<String, List<String>> buildChannelNameIndex(List<Channel> channels) {
   final index = <String, List<String>>{};
   for (final c in channels) {
@@ -150,7 +231,7 @@ Map<String, List<String>> buildChannelNameIndex(List<Channel> channels) {
     if (key.isEmpty) continue;
     (index[key] ??= <String>[]).add(c.id);
   }
-  index.removeWhere((_, ids) => ids.length > kMaxNameMatchGroup);
+  index.removeWhere((_, ids) => ids.length > kMaxMatchGroup);
   return index;
 }
 
@@ -183,13 +264,28 @@ Map<String, List<String>> epgNameIndexFor(
 
 /// Our channels' `tvg-id`s, for the exact-match pass. Shared by every source
 /// that parses XMLTV.
-Map<String, String> buildTvgIdIndex(List<Channel> channels) {
-  final map = <String, String>{};
+///
+/// A `tvg-id` maps to **every** channel carrying it, not to one. A panel states
+/// the identity itself: on Xtream Codes every feed of one channel gets the same
+/// `epg_channel_id` — `146` on both the `Первый канал UHD` and the
+/// `Первый канал FHD` row — and the guide has one entry for it, because it is
+/// one channel there. This used to be `map[tvg] = c.id`, i.e. *last row wins*,
+/// and that silently dropped every other feed: the panel's own guide is
+/// id-only ([epgNameIndexFor]), so the loser had no second path and stayed
+/// permanently bare with nothing to indicate why. The report that pinned it was
+/// exactly that pair — one guide entry, both rows on id `146`, and one of the two
+/// showing a programme.
+///
+/// Fanning out is strictly additive: every channel that used to win still wins,
+/// and the ones that used to lose could not have been matched by this id at all.
+Map<String, List<String>> buildTvgIdIndex(List<Channel> channels) {
+  final index = <String, List<String>>{};
   for (final c in channels) {
     final tvg = c.extra['tvgId']?.toString();
-    if (tvg != null && tvg.isNotEmpty) map[tvg] = c.id;
+    if (tvg != null && tvg.isNotEmpty) (index[tvg] ??= <String>[]).add(c.id);
   }
-  return map;
+  index.removeWhere((_, ids) => ids.length > kMaxMatchGroup);
+  return index;
 }
 
 /// Resolves a guide's channel ids onto ours, over one streaming parse.
@@ -203,14 +299,14 @@ Map<String, String> buildTvgIdIndex(List<Channel> channels) {
 ///
 /// Claim rules, in order:
 ///
-///  1. **A guide channel whose id is one of our `tvg-id`s claims that channel.**
-///     Exact, and it beats every name claim — but only among the channels the
-///     guide actually *declares*. A malformed guide that emits a programme for
-///     an id it never declared cannot beat a name claim, because by then the
-///     claims are frozen and that channel's rows are already written: honouring
-///     it would stack a second schedule on the channel rather than replace the
-///     first, which is the overlap all of this exists to prevent. See
-///     [resolve].
+///  1. **A guide channel whose id is one of our `tvg-id`s claims every channel
+///     carrying that id.** Exact, and it beats every name claim — but only
+///     among the channels the guide actually *declares*. A malformed guide that
+///     emits a programme for an id it never declared cannot beat a name claim,
+///     because by then the claims are frozen and that channel's rows are already
+///     written: honouring it would stack a second schedule on the channel rather
+///     than replace the first, which is the overlap all of this exists to
+///     prevent. See [resolve].
 ///  2. **A guide channel whose *name* normalises onto ours claims it, but only
 ///     if step 1 left it unclaimed.** So a playlist whose `tvg-id`s are
 ///     provider-specific junk still gets a guide, while a channel the guide
@@ -228,7 +324,7 @@ class XmltvChannelResolver {
   });
 
   /// Our channels' `tvg-id`s (rule 1). Never mutated.
-  final Map<String, String> tvgIdToChannelId;
+  final Map<String, List<String>> tvgIdToChannelId;
 
   /// Our channels by normalised name (rule 2); empty disables name matching.
   final Map<String, List<String>> nameToChannelIds;
@@ -263,11 +359,16 @@ class XmltvChannelResolver {
     if (declared != null) return declared;
     return _undeclared.putIfAbsent(guideId, () {
       final exact = tvgIdToChannelId[guideId];
+      if (exact == null) return const [];
       // A channel a *name* already claimed is not re-claimed by an undeclared
       // id — that would be the same overlap rule 3 exists to prevent, arriving
-      // through the back door.
-      if (exact == null || _nameClaimed.contains(exact)) return const [];
-      return [exact];
+      // through the back door. Every other channel on that id is a feed of the
+      // same channel, so it is claimed here too, not just the first.
+      if (exact.length == 1) {
+        return _nameClaimed.contains(exact.single) ? const [] : exact;
+      }
+      final free = exact.where((id) => !_nameClaimed.contains(id)).toList();
+      return free;
     });
   }
 
@@ -303,14 +404,18 @@ class XmltvChannelResolver {
     }
 
     // Rule 1 — exact ids. Iterates the *guide's* declarations, not our
-    // `tvg-id` map: the latter runs to one entry per channel (250k on a large
+    // `tvg-id` map: the latter has an entry per distinct id (250k on a large
     // portal), and walking it here would build a second map that size for no
     // gain. An id the guide declares but we don't carry simply misses, and one
     // we carry but the guide never declares is answered by [resolve]'s
-    // fallback.
+    // fallback. Every channel on that id is claimed — the panel says they are
+    // one channel, and the guide has one schedule for them.
     for (final guideId in _declared.keys) {
-      final channelId = tvgIdToChannelId[guideId];
-      if (channelId != null) claim(guideId, channelId);
+      final ours = tvgIdToChannelId[guideId];
+      if (ours == null) continue;
+      for (final channelId in ours) {
+        claim(guideId, channelId);
+      }
     }
     final exactlyClaimed = Set<String>.of(claimedBy.keys);
 

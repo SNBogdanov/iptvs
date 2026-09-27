@@ -175,7 +175,8 @@ DTD fixes document order as `(channel*, programme*)`: every `<channel>` declarat
 before the first `<programme>`, so the resolver can freeze a *globally* correct mapping on the
 first `resolve` call rather than re-reading a multi-hundred-MB guide. Rules, in order:
 
-1. A guide channel whose id is one of our `tvg-id`s claims that channel, outright.
+1. A guide channel whose id is one of our `tvg-id`s claims **every** channel carrying that id,
+   outright.
 2. A guide channel whose *name* normalises onto one of ours claims it — but only if rule 1 left
    it unclaimed, so a channel the guide already covers properly is never second-guessed.
 3. A channel contested by two guide channels goes to **neither**. Two names that normalise alike
@@ -188,19 +189,47 @@ guess.
 
 Normalisation (`normalizeChannelName`) folds case, punctuation and diacritics — including the
 Romanian comma-below vs cedilla forms of `ș`/`ț`, which are distinct code points a playlist and
-a guide routinely disagree on — drops stream-quality tokens as whole words (`hd`, `fhd`, `4k`,
-`backup`, …, so `HDNet` and `Sharjah` survive intact), and strips a leading `RO:`/`UK |` country
-tag, which is ubiquitous in playlists and absent from every real guide. Parenthesised content is
-deliberately **kept**: `HBO (RO)` and `HBO (HU)` must not collapse into one key.
+a guide routinely disagree on, and Cyrillic `ё`/`е` — drops stream-quality tokens as whole words
+(`hd`, `fhd`, `4k`, `backup`, …, so `HDNet` and `Sharjah` survive intact), and strips a leading
+`RO:`/`UK |` country tag, which is ubiquitous in playlists and absent from every real guide.
+Parenthesised content is deliberately **kept**: `HBO (RO)` and `HBO (HU)` must not collapse into
+one key.
 
-One guide channel can claim **several** of ours — a playlist routinely carries the same channel
-as separate HD and SD entries, which share a schedule — but no more than `kMaxNameMatchGroup`
-(8). Beyond that a name is a generic label rather than a channel identity, and since programmes
-are stored per `channel_id`, an uncapped fan-out multiplies a ~10^6-programme guide into a
-multi-million-row ingest. The whole group is dropped rather than the first few kept: there is no
-principled way to pick the winners, and rule 3 already says an ambiguous match goes to nobody.
-Name matching is purely additive over the exact path, so the cap only ever limits what it
-*adds* — it can never take a guide away from a channel that had one.
+**Tokenisation is script-agnostic: every script's letters and digits are token characters, and only
+whitespace and punctuation split.** It used to be `[^a-z0-9]`, which counts every non-Latin letter
+as a separator — so a Cyrillic name reduced to the *empty* key and matched nothing. That kills name
+matching outright for a Russian portal, and names are the only path for any channel whose ids miss:
+on Stalker (no `tvg-id` at all) and on an Xtream Codes panel for every feed the panel gave no
+`epg_channel_id` to. The same report is what exposed the single-valued id map above (both feeds on
+id `146`), so both fixes shipped together: a third-party link the user specified in the source's EPG
+settings, one guide entry declaring `Первый канал UHD` and `Первый канал FHD` under `146`, and one
+of the two rows showing a programme. Pinned by `epg_matching_test.dart` ("keeps letters of every
+script, not just Latin") and the non-Latin fan-out case in `xmltv_name_matching_test.dart`.
+
+**One guide channel can claim several of ours — and that is not a fallback, it is the normal case.**
+A channel is one channel to the guide and often several rows to us: a panel gives every feed of it
+the same `epg_channel_id` (Xtream Codes: both the UHD and the FHD row of `Первый канал` carry
+`146`, because to the panel they are one channel with one schedule), and a playlist does the same
+thing with HD/SD entries. So **both** indexes are many-valued — `tvg-id → every channel carrying
+it`, and name → every channel normalising to it — and one guide entry writes its programme to each
+of them. `tvgIdToChannelId` used to be `tvg-id → one channel` with `map[tvg] = c.id`, i.e. *last
+row wins*: the feeds collided, the last one in catalogue order took the whole guide, and every
+other feed was permanently bare with no second path to it — on the provider's own guide, which is
+id-only, there is no second path at all. The report was exactly that pair, one guide entry, both
+rows on `146`, and one of the two rows showing a programme.
+
+The cap is `kMaxMatchGroup` (8) on both indexes, and it bounds the same thing on each: programmes
+are stored per `channel_id`, so one guide entry claiming N of ours writes N copies of its schedule,
+and on a ~10^6-programme guide an uncapped fan-out is a multi-million-row ingest. Beyond the cap
+the key matches nothing: for a name that is a generic label rather than a channel identity, and for
+an id it is a panel that has lost the plot. The whole group is dropped rather than the first few
+kept — there is no principled way to pick the winners, and rule 3 already says an ambiguous match
+goes to nobody. On the name path the cap can only ever limit what name matching *adds*; on the id
+path it can in principle take a guide away, which is the deliberate trade for never silently
+dropping a feed the panel itself called the same channel. Pinned by `epg_matching_test.dart`
+("`buildTvgIdIndex`: one id claims every feed carrying it") and the three Xtream feed-list cases in
+`xmltv_name_matching_test.dart` — including the panel's own guide lighting both feeds with name
+matching off.
 
 ## Subscription expiry
 

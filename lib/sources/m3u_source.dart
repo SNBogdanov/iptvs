@@ -426,7 +426,7 @@ M3uParsed parseM3uPlaylist(String content) {
   String? headerEpgUrl;
   CatchupCapability capability = CatchupCapability.unsupported;
 
-  String? name, group, logo, tvgId;
+  String? name, group, logo, tvgId, tvgChno;
   String? headerCatchupSource;
   var headerCatchupDays = 0;
   String? catchupSource;
@@ -454,6 +454,7 @@ M3uParsed parseM3uPlaylist(String content) {
     }
     if (line.startsWith('#EXTINF')) {
       tvgId = _attr(line, 'tvg-id');
+      tvgChno = _attr(line, 'tvg-chno');
       logo = _attr(line, 'tvg-logo');
       group = _attr(line, 'group-title');
       name = _name(line);
@@ -493,7 +494,10 @@ M3uParsed parseM3uPlaylist(String content) {
           // tvg-id stays in extra for the XMLTV EPG mapping.
           id: stableM3uChannelId(line),
           name: name,
-          number: channels.length + 1,
+          // tvg-chno is the playlist's own channel number; fall back to the
+          // position when a provider omits it (most do), matching how the
+          // network sources number from their own fields.
+          number: int.tryParse(tvgChno ?? '') ?? channels.length + 1,
           logo: (logo != null && logo.isNotEmpty) ? logo : null,
           categoryId: g,
           archiveDays: catchupSource == null

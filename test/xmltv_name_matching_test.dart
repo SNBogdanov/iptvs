@@ -15,6 +15,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/sources/epg_guides.dart';
 import 'package:iptvs/sources/epg_matching.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/xmltv.dart';
@@ -62,10 +63,10 @@ void main() {
             _programme('DigiSport1.ro', title: 'Fotbal'),
         channels,
       );
-      expect(
-        progs.map((p) => '${p.channelId}:${p.title}'),
-        ['c1:Stirile', 'c2:Fotbal'],
-      );
+      expect(progs.map((p) => '${p.channelId}:${p.title}'), [
+        'c1:Stirile',
+        'c2:Fotbal',
+      ]);
     });
 
     test('an exact tvg-id still wins over a name declared earlier', () async {
@@ -94,6 +95,25 @@ void main() {
       expect(progs.every((p) => p.title == 'Fotbal'), isTrue);
     });
 
+    test('a non-Latin guide reaches every feed of the channel', () async {
+      // A Russian portal, as reported: two streams of one channel, both named
+      // for their quality, and one guide entry declaring *both* names under one
+      // id. Non-Latin names used to normalise to the empty key, so nothing
+      // matched at all and the rows that still showed a programme were getting
+      // it from the provider's own feed, not from this guide.
+      final channels = [
+        _ch('uhd', 'Первый канал UHD'),
+        _ch('fhd', 'Первый канал FHD'),
+      ];
+      final progs = await _parse(
+        _channel('146', ['Первый канал UHD', 'Первый канал FHD']) +
+            _programme('146', title: 'Новости'),
+        channels,
+      );
+      expect(progs.map((p) => p.channelId), containsAll(['uhd', 'fhd']));
+      expect(progs.every((p) => p.title == 'Новости'), isTrue);
+    });
+
     test('a contested name yields nothing for either guide channel', () async {
       final channels = [_ch('c1', 'Sport 1')];
       final progs = await _parse(
@@ -106,18 +126,19 @@ void main() {
       expect(progs, isEmpty);
     });
 
-    test('a guide with no <channel> elements behaves exactly as before',
-        () async {
-      final channels = [_ch('c1', 'Pro TV', tvgId: 'protv.ro')];
-      final progs = await _parse(
-        _programme('protv.ro', title: 'Stirile') + _programme('other.ro'),
-        channels,
-      );
-      expect(progs.map((p) => p.channelId), ['c1']);
-    });
+    test(
+      'a guide with no <channel> elements behaves exactly as before',
+      () async {
+        final channels = [_ch('c1', 'Pro TV', tvgId: 'protv.ro')];
+        final progs = await _parse(
+          _programme('protv.ro', title: 'Stirile') + _programme('other.ro'),
+          channels,
+        );
+        expect(progs.map((p) => p.channelId), ['c1']);
+      },
+    );
 
-    test('declarations survive the isolate boundary on a large guide',
-        () async {
+    test('declarations survive the isolate boundary on a large guide', () async {
       // Above _isolateXmltvThreshold the bytes and BOTH index maps are sent to
       // a worker and the resolver is rebuilt there — a path the inline tests
       // never touch.
@@ -144,9 +165,7 @@ void main() {
       final channels = [_ch('c1', 'Pro TV')];
       final batches = <List<Programme>>[];
       await for (final b in parseXmltvBatched(
-        _xmltv(
-          _channel('ProTV.ro', ['Pro TV']) + _programme('ProTV.ro'),
-        ),
+        _xmltv(_channel('ProTV.ro', ['Pro TV']) + _programme('ProTV.ro')),
         buildTvgIdIndex(channels),
         nameToChannelIds: buildChannelNameIndex(channels),
       )) {
@@ -175,6 +194,94 @@ void main() {
         total += b.length;
       }
       expect(total, 1500);
+    });
+  });
+
+  group('XtreamCodes: the panel guide plus a user-specified link', () {
+    // The report as it actually came in: an Xtream Codes panel whose live
+    // entries carry the panel's `epg_channel_id` as their tvg-id, and the guide
+    // fetched from a link the user typed into the source's EPG settings. One
+    // feed of a channel has the id, the other has none — so the id-less feed can
+    // only be matched by name, and only through the user-specified link, because
+    // the panel's own `xmltv.php` is deliberately id-only.
+    // The report as it came in, with the panel payload the user supplied: an
+    // Xtream Codes panel where **both** feeds of one channel carry the same
+    // `epg_channel_id` (146), and the guide — fetched from a link typed into the
+    // source's EPG settings — has a single entry for it, declaring both names.
+    //
+    // `tvgIdToChannelId` used to be `tvg-id → one channel`, so the two feeds
+    // collided and the last one in catalogue order took everything: one of the
+    // pair had a schedule and the other was permanently bare — on the panel's own
+    // guide as much as on the specified link, since that path is id-only.
+    List<Channel> panelChannels() => [
+      _ch('1', 'Первый канал UHD', tvgId: '146'),
+      _ch('2', 'Первый канал FHD', tvgId: '146'),
+    ];
+
+    EpgGuideFeed feedFor(
+      String url,
+      String body,
+      List<Channel> channels, {
+      required bool withNames,
+    }) => xmltvGuideFeed(
+      url: url,
+      download: (_) async => _xmltv(body),
+      tvgIdToChannelId: buildTvgIdIndex(channels),
+      nameToChannelIds: withNames
+          ? epgNameIndexFor(channels, extraCount: 1)
+          : const {},
+    );
+
+    Future<List<Programme>> merge(List<EpgGuideFeed> feeds) async {
+      final out = <Programme>[];
+      await for (final batch in mergeEpgGuides(feeds)) {
+        out.addAll(batch);
+      }
+      return out;
+    }
+
+    test("the panel's own guide lights both feeds of the channel", () async {
+      // No names on this path at all: `epgNameIndexFor` leaves a provider's own
+      // guide id-only by design, so the shared id is the only thing that can
+      // reach the second feed — and it has to reach it.
+      final channels = panelChannels();
+      final panel = feedFor(
+        'http://panel/xmltv.php',
+        _channel('146', ['Первый канал UHD', 'Первый канал FHD']) +
+            _programme('146', title: 'Новости'),
+        channels,
+        withNames: false,
+      );
+      final progs = await merge([panel]);
+      expect(progs.map((p) => p.channelId), containsAll(['1', '2']));
+      expect(progs.every((p) => p.title == 'Новости'), isTrue);
+    });
+
+    test('the specified link lights both feeds too', () async {
+      final channels = panelChannels();
+      final link = feedFor(
+        'http://links/guide.xml',
+        _channel('146', ['Первый канал UHD', 'Первый канал FHD']) +
+            _programme('146', title: 'Новости'),
+        channels,
+        withNames: true,
+      );
+      final progs = await merge([link]);
+      expect(progs.map((p) => p.channelId), containsAll(['1', '2']));
+    });
+
+    test('the panel guide never claims a channel on its name alone', () async {
+      // The counterpart: feed 0 is id-only, so a guide entry whose ids miss
+      // contributes nothing however well its display names line up.
+      final channels = panelChannels();
+      final panel = feedFor(
+        'http://panel/xmltv.php',
+        _channel('p146', ['Первый канал UHD', 'Первый канал FHD']) +
+            _programme('p146', title: 'Панельный'),
+        channels,
+        withNames: false,
+      );
+      expect(await merge([panel]), isEmpty);
     });
   });
 }

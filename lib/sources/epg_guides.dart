@@ -50,7 +50,7 @@ class EpgGuideFeed {
 EpgGuideFeed xmltvGuideFeed({
   required String url,
   required Future<Uint8List> Function(Uri uri) download,
-  required Map<String, String> tvgIdToChannelId,
+  required Map<String, List<String>> tvgIdToChannelId,
   required Map<String, List<String>> nameToChannelIds,
   LoadToken? token,
 }) => EpgGuideFeed(
