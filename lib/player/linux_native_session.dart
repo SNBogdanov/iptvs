@@ -346,6 +346,10 @@ class LinuxNativeSession {
     required String aspectLabel,
     Duration? resumeFrom,
     BufferPreset bufferPreset = BufferPreset.normal,
+    /// Session-wide audio level 0–100 (the Dart [PlaybackAudioSession]). The
+    /// native mpv process owns its own audio state, so it must be told what
+    /// the shared volume/mute is rather than opening at its default 100.
+    required double volume,
   }) async {
     final backend = detectBackend();
     final executable = findExecutable();
@@ -382,6 +386,7 @@ class LinuxNativeSession {
         overlayScript: overlayScript,
         resumeFrom: resumeFrom,
         bufferPreset: bufferPreset,
+        volume: volume,
       );
       return session;
     } catch (error) {
@@ -407,6 +412,7 @@ class LinuxNativeSession {
     required String overlayScript,
     Duration? resumeFrom,
     BufferPreset bufferPreset = BufferPreset.normal,
+    required double volume,
   }) async {
     final temp = Directory.systemTemp;
     _socketPath = p.join(
@@ -497,6 +503,9 @@ class LinuxNativeSession {
     }
     DiagnosticsLog.instance.add('player', 'linux native loadfile (initial)');
     await command(['loadfile', stream.url, 'replace']);
+    // Apply the shared session's level: this process starts at its own 100 and
+    // must not come back loud for a user who muted/lowered elsewhere.
+    await command(['set_property', 'volume', '$volume']);
     for (final subtitle in stream.subtitles) {
       await command([
         'sub-add',

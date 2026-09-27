@@ -455,8 +455,11 @@ class HdrPlayerActivity : ComponentActivity() {
             sharedEngine.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
             sharedEngine.onVideoSizeChanged = null
             setEngine(sharedEngine)
-            // Fullscreen always plays unmuted, and resumes a paused preview.
-            sharedEngine.setVolume(1f)
+            // Start at the session's volume/mute (see EXTRA_VOLUME), not a blind
+            // 1f: a default session is 1f (restoring the old "fullscreen always
+            // plays unmuted" behavior), while a muted/lowered session survives
+            // the handoff instead of coming back loud.
+            sharedEngine.setVolume(initialVolume)
             sharedEngine.play()
             // The surface claim happened inside adoptForFullscreen above, and
             // the frames the preview drew before it are the proof
@@ -507,6 +510,10 @@ class HdrPlayerActivity : ComponentActivity() {
         }
     }
 
+    /** Session-wide start volume (0..1); absent (old callers) = 1f. */
+    private val initialVolume: Float
+        get() = intent.getFloatExtra(EXTRA_VOLUME, 1f).coerceIn(0f, 1f)
+
     private fun startWithExoPlayer() {
         val exo = ExoPlayerEngine(
             context = this,
@@ -522,6 +529,9 @@ class HdrPlayerActivity : ComponentActivity() {
         exo.onDiagnostic = diagnosticSink
         setEngine(exo)
         exo.load(url, subtitles)
+        // Fresh engines open at their own default 1f — apply the session volume
+        // (see EXTRA_VOLUME) so a muted/lowered session survives the open.
+        exo.setVolume(initialVolume)
     }
 
     /** One-way fallback: ExoPlayer couldn't decode the video → switch to libmpv. */
@@ -1219,6 +1229,11 @@ class HdrPlayerActivity : ComponentActivity() {
             // one chosen on a channel.
             result.putExtra(RESULT_ASPECT, uiState.aspect.label)
             hasResult = true
+            // The final audio state: a mute/level chosen inside this Activity
+            // is the input to the next open anywhere (see EXTRA_VOLUME). 0
+            // while muted — the Dart session reads `record(0)` as mute.
+            result.putExtra(RESULT_VOLUME, uiState.volume)
+            hasResult = true
             if (hasResult) setResult(RESULT_OK, result)
         }
         if (enteredPip) restoreMainTaskAfterPip()
@@ -1377,6 +1392,13 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_BUFFER_PRESET = "buffer_preset"
         const val EXTRA_ASPECT = "aspect"
 
+        /**
+         * Session-wide start volume (0..1) — the Dart [PlaybackAudioSession]
+         * riding along. This Activity owns a fresh audio session, so without it
+         * every channel change would come back at full volume.
+         */
+        const val EXTRA_VOLUME = "volume"
+
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
 
@@ -1397,6 +1419,12 @@ class HdrPlayerActivity : ComponentActivity() {
         const val RESULT_DURATION_MS = "duration_ms"
         const val RESULT_FAVORITE = "favorite"
         const val RESULT_ASPECT = "aspect"
+
+        /**
+         * Final audio state (0..1): a mute/level chosen inside this Activity is
+         * the input to the *next* open anywhere (see [EXTRA_VOLUME]).
+         */
+        const val RESULT_VOLUME = "volume"
 
         /**
          * Local decoder rebuilds allowed per handoff. One: a second would be a

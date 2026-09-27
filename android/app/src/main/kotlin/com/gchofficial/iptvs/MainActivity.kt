@@ -202,6 +202,15 @@ class MainActivity : FlutterActivity() {
                             args["bufferPreset"] as? String,
                         )
                         putExtra(HdrPlayerActivity.EXTRA_ASPECT, args["aspect"] as? String)
+                        // Session-wide audio (see Dart PlaybackAudioSession): the
+                        // Activity opens a fresh audio session, so the user's
+                        // volume/mute must ride along or every channel change
+                        // returns to full volume. Absent → 1f (old callers).
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_VOLUME,
+                            ((args["volume"] as? Number)?.toFloat() ?: 1f)
+                                .coerceIn(0f, 1f),
+                        )
                         // VOD resume point (ms), 0 = play from the top.
                         putExtra(
                             HdrPlayerActivity.EXTRA_RESUME_MS,
@@ -554,6 +563,9 @@ class MainActivity : FlutterActivity() {
                 }
                 data?.getStringExtra(HdrPlayerActivity.RESULT_ASPECT)?.let {
                     put("aspect", it)
+                }
+                data?.takeIf { it.hasExtra(HdrPlayerActivity.RESULT_VOLUME) }?.let {
+                    put("volume", it.getFloatExtra(HdrPlayerActivity.RESULT_VOLUME, 1f))
                 }
             }
             nativeHdrChannel.invokeMethod("nativeClosed", if (map.isEmpty()) null else map)
