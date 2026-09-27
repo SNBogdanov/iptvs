@@ -41,6 +41,10 @@ flutter run -d windows
 flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
+**On Windows, a fix is not finished until `build\windows\x64\runner\Release\data\app.so` has been
+rebuilt — see "Verification gate" below. `flutter test` proves the logic, not the artifact the
+user actually runs.**
+
 Lints: `package:flutter_lints`. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)):
 analyze + test + the Lua OSD gate (`luac5.1 -p` and `linux/mpv/overlay_layout_test.lua` — the only
 thing that executes the Linux native overlay outside a Wayland+HDR session) + the panel's
@@ -60,6 +64,53 @@ running AppImage via a detached helper. See `docs/updates.md` before changing re
 The Linux AppImage does **not** bundle mpv (CI installs `mpv`/`libmpv-dev` only for the embedded
 fallback build/link) — native Linux playback runtime-discovers and version-gates the host's mpv
 (>= 0.40 required); see `docs/player.md`.
+
+## Verification gate
+
+**Never hand work to the user — or to another agent — to try out until the artifact they will
+actually run has been rebuilt from the current source. Green tests are not a build.**
+
+```powershell
+# Windows: close the running app FIRST (it locks the output and leaves a stale exe behind)
+& "$env:TEMP\opencode\rebuild3.ps1"
+```
+
+The script prints `FRESH OK`; confirm the change is really in there before handing over:
+
+```powershell
+Select-String -Path build\windows\x64\runner\Release\data\app.so -Pattern '<new literal>' -Encoding Default
+```
+
+**`app.so`'s timestamp is *not* a freshness proof on its own, and treating it as one is actively
+harmful.** Flutter caches the AOT snapshot **by content** and the copy keeps the *original*
+mtime, so an unchanged payload legitimately keeps an old timestamp; a `git rebase`/`checkout`
+rewrites every `lib/*.dart` mtime without changing a byte of content. The script therefore
+compares `app.so`'s SHA-256 against the content-keyed AOT in `.dart_tool\flutter_build\*\app.so`
+and reports `FRESH OK (content-cached AOT, mtime unchanged)` when they are identical — that hash
+match *is* the proof, because the cached snapshot is what Flutter itself reuses. **Never delete
+`iptvs.exe` to "force" a rebuild.** Doing so once left the Release directory with **no executable
+at all**: the mtime check called a current payload stale, the retry loop deleted the exe eight
+times, and only a plain `flutter build windows --release --no-pub` brought it back. If the hash
+does not match, the sources really did change — rebuild, don't delete.
+
+Why this is a hard rule and not a nicety, all of it observed on this repo:
+
+- **A Dart change lands in `data\app.so`, never in `iptvs.exe`.** A Dart-only fix leaves `iptvs.exe`
+  at its old timestamp, which reads as "nothing changed" — so a correct fix gets reported back as
+  not working, and the whole round is spent re-deriving a bug that was already closed. Check
+  `app.so`, not `iptvs.exe`; the exe only moves when `windows/runner` native code changed.
+- **Do not hold the build hostage to an unrelated open question.** The two number-entry fixes sat
+  finished, analysed and fully green, waiting on the user's answer about a video band in a different
+  subsystem — and the user spent a run testing a binary from before them. A fix that needs no
+  decision gets built immediately, in the same breath as the change.
+- **A stale binary produces a log that looks like evidence.** The missing `number jump settled` line
+  was the honest output of code that had never been compiled in, and it cost several rounds of
+  guessing before anyone checked the artifact's payload instead of trusting the log.
+- **Close the app before rebuilding.** A running `iptvs.exe` fails the link; a retried build that
+  reuses the old one reports success and leaves the user on the previous binary.
+
+This applies to the same rule as the rest of this file: report what the artifact contains, not what
+the source says.
 
 ## Orchestration workflow
 
@@ -95,7 +146,12 @@ context lean by delegating rather than doing mechanical work itself.
   freely) and implement from its report in the next.
 - **Handoffs between waves**: pass the design report verbatim, plus two caveats — line numbers
   may be stale (match by function name), and the tree contains uncommitted work from other
-  agents (build on top; never revert unexpected diffs).
+  agents (build on top; never revert unexpected diffs). A handoff that says "done" carries the
+  same obligation as a handoff to the user: **the artifact must be rebuilt first** (see
+  "Verification gate"). An agent that ends with green tests and a stale binary has handed over
+  a bug report waiting to happen, and the next wave inherits the misdiagnosis, not the work.
+- **An agent that changes runnable code rebuilds as its last step, not as a follow-up task.** A
+  deferred build is the one omission nobody catches, because every check still passes.
 - If an agent dies mid-task (rate limit, crash), **resume it via SendMessage** — its context
   (spec, files already read) survives; a fresh spawn re-pays the whole cold start. Stagger heavy
   Opus agents that don't strictly need to run concurrently — parallel Opus waves can hit
@@ -419,11 +475,26 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   dropping the previous guide and advancing `epg_synced_at`. All failing likewise rethrows, since
   `replaceEpgStream` reads a normally-completed empty stream as a successful *empty* guide.
   Matching is `tvg-id` first, then normalised display names for whatever the ids missed
-  (`sources/epg_matching.dart`), and **names are for user-added guides only** (`epgNameIndexFor`)
-  — a provider's guide and its playlist share ids by construction, so enabling names there would
-  change every existing install's EPG on upgrade and put a 250k-channel index build on the main
-  isolate for users who added nothing. On **Stalker**, whose channels carry no `tvg-id` at all,
-  names are the only path; its own guide is not XMLTV, so it joins the merge as a plain feed, and
+  (`sources/epg_matching.dart`), and **both indexes are many-valued — one guide entry claims
+  *every* channel that carries its id or its name** (`kMaxMatchGroup` = 8 on each). That is the
+  normal case, not a fallback: a panel gives every feed of one channel the same `epg_channel_id`
+  (Xtream Codes: both the UHD and the FHD row of `Первый канал` carry `146`, because to the panel
+  they are one channel with one schedule). `tvgIdToChannelId` used to be `tvg-id → one channel`
+  with `map[tvg] = c.id` — *last row wins*, so the feeds collided, the last one took the whole
+  guide, and the others were permanently bare, with no second path to them because a provider's own
+  guide is id-only. **Names are for user-added guides only** (`epgNameIndexFor`) — a provider's
+  guide and its playlist share ids by construction, so enabling names there would change every
+  existing install's EPG on upgrade and put a 250k-channel index build on the main isolate for
+  users who added nothing. On **Stalker**, whose channels carry no `tvg-id` at all, names are the
+  only path — which makes `normalizeChannelName`'s token separator load-bearing rather than
+  cosmetic: it is whitespace and punctuation and **never `[^a-z0-9]`**, because that class counts
+  every non-Latin letter as a separator, so a Cyrillic name once reduced to the empty key and a
+  Russian portal's guide matched nothing at all. Same trap on Xtream Codes for every feed the
+  panel gave no `epg_channel_id` to (`mapLiveChannels`). Both halves are the same report: two
+  feeds of one channel, **both** on `epg_channel_id: 146`, one guide entry declaring both names,
+  fetched from a **link the user specified in the source's EPG settings** — the id map silently
+  dropped one feed, and the name path could not pick it up either. Stalker's own guide is not
+  XMLTV, so it joins the merge as a plain feed, and
   its third-party downloads deliberately bypass the portal transport, which would otherwise send
   the MAC cookie and Bearer token to an arbitrary user-supplied host. Saving the guide list calls
   `AppDatabase.invalidateEpg` (clears `epg_synced_at`, **keeps** the programmes), or the change
@@ -496,6 +567,43 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   tabs' error bodies are now `SourceErrorView` (`widgets/source_error_view.dart`), whose retry
   autofocuses — safe because that body only mounts on a failed load, which replaces the list
   wholesale. Pinned by `test/source_error_view_test.dart`.
+- **Typed channel numbers are one shared entry, and the coordinator does not perform the jump.**
+  `ChannelNumberEntry` (`screens/channel_number_entry.dart`) owns the digits, the match, the commit
+  rules and the chip, and both surfaces that accept a number (the live list and the fullscreen
+  player) use *that* one — a chip is learned once, and two entries would be two answers to "what
+  does 200 mean". 1–4 digits; **exact match anywhere in the catalog beats a prefix match**, then the
+  first prefix match in catalog order; a four-digit match **commits on the keystroke**; a shorter or
+  unmatched buffer waits 1500 ms (clock restarts per digit) or Enter/Numpad-Enter/Select; a
+  no-match commit is a no-op. The **search space is every channel some view can draw** (catalog
+  minus disabled categories, plus favorites — a favorite is drawn from a disabled category on
+  purpose), never `_visible`: matching against the current group would make the same digits mean
+  different channels depending on where the user was. `LiveFocusCoordinator` handles digits **before**
+  the empty-list bail (a number is the way *out* of an empty group) and hands the matched channel to
+  the host's `onNumberCommitted` — it used to move its own cursor, which only worked for a channel
+  already on screen, and the live list is a selection model that cannot select what it does not draw.
+  The host reveals (search cleared first, then the pure `planNumberJumpGroup` ladder: current group →
+  "All channels" → Favorites), selects, and then per surface: retarget a running preview (never
+  restart one already showing that exact `(sourceId, channelId)`, never *start* one that is not
+  running), or in full screen the same same-engine swap a zap does, realigning the list behind
+  without focusing it. **Both live player routes must wire it** — `_openLivePlayer` *and*
+  `_openFullscreenDirect` (narrow windows, cross-source favorites); the second one originally passed
+  `onZapChannel` alone, so digits were inert on a phone and on every foreign favorite, and a null
+  gate fails silently rather than visibly. **The reveal's scroll is deferred, the cursor is not:**
+  after a group switch `selectChannel(index, reveal: false)` runs synchronously and
+  `revealSelectedChannel()` runs in a post-frame callback, because the list scrolls by
+  `index * extent` arithmetic and a reveal issued before the new group is rendered is clamped
+  against the *outgoing* list (and `_selectCategory`'s post-frame `jumpTo(0)` would override it) —
+  a jump that selects correctly and looks like it did nothing, with the row above the viewport.
+  `_selectCategory` takes `scrollToTop: false` for that case. A channel no view can draw is not
+  matchable, because the chip would name it and
+  then select nothing — and re-enabling a category the user disabled is not a keystroke's decision.
+  The preview **picture** takes a double click as fullscreen (a single click is already "preview
+  this"), which requires `HitTestBehavior.opaque` because the running video is `IgnorePointer` and
+  nothing else under the middle of the picture would satisfy a `deferToChild` detector.
+  Pinned by `test/channel_number_entry_test.dart`, `test/channel_number_chip_test.dart`, the
+  `number entry` and `revealing a jumped-to channel` groups in
+  `test/live_focus_coordinator_test.dart` and the preview-picture group in
+  `test/live_tab_layout_test.dart`. Detail: docs/tv-navigation.md "Typed channel numbers".
 - **The Back ladder** (`channel_list_screen` `_handleRootBack`): Back never changes data or
   filters — it peels exactly one rung per press toward the exit (rung list in
   docs/tv-navigation.md); chrome (AppBar/toolbar buttons, route key `''`) sits above the ladder;
@@ -965,6 +1073,44 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   exactly; 16:9/4:3 would need a hand-computed layer transform (docs/ios.md). Android's player
   theme sets `windowLayoutInDisplayCutoutMode=shortEdges` so video reaches into the notch — safe
   only because the Compose overlay insets itself with `safeDrawingPadding()`.
+- **Live zap (PgDn/PgUp) swaps channels inside the fullscreen player on the same engine.**
+  `PlayerScreen.onZapChannel` is a host callback (`channel_list_screen._resolveZapTarget`) over the
+  currently-visible list; the pure cursor is `liveZapIndex` (wrap at both ends, pinned by
+  `test/live_zap_test.dart`). The target is applied by swapping the route's `_current*` mirrors and
+  reopening the same `_player` — resolve-through-owning-repo, EPG through the pair-keyed path, and
+  the favorite closure routed to the owner, because a zap can cross sources from the cross-source
+  Favorites view. It is gated off `_separateEngineOwnsPlayback` exactly like every other Dart-side
+  control (Linux native mpv window, Android/iOS native players own their input; **Windows' GDI
+  overlay is not gated** — it forwards unclaimed keys back to Flutter, so the key works on the
+  Windows-native surface too). When the player route adopted the shared preview engine and the user
+  zapped, the pop re-seats the preview's **identity only** (`LivePreviewController.repointAdopted`:
+  channel/stream/owning-repo/buffer-preset/EOF-restart bookkeeping, never an engine restart — a
+  restart would double-connect a single-connection portal and re-apply the preview's mute), consumed
+  from the once-per-pop `_pendingZapTarget`/`_pendingZapRepo` latch. The buffering preset and aspect
+  choice stay session-level across a zap. docs/player.md "Live zap".
+- **Typed numbers in the fullscreen player are that same swap**, via `onSelectChannel` and the
+  host's `_resolveNumberTarget` — same resolver, same `_current*` mirror swap, same single-flight
+  `_zapping` guard, over the host-passed `allChannels` (the player cannot enumerate channels, and a
+  number that only reached the visible group would be unreachable in full screen by definition). The
+  `ChannelNumberEntry`/`ChannelNumberChip` are the shared ones the list uses, and the entry is gated
+  off `_separateEngineOwnsPlayback` exactly like a zap, except the chip's `isActive` is read *inside*
+  its `ListenableBuilder` — an `if` on the entry's state outside the builder is a rebuild that a
+  keystroke never causes. docs/player.md "Typed channel numbers".
+- **Mute/volume is a device-wide `PlaybackAudioSession`** (top-level in `player_screen.dart`):
+  `applied` is `0` while muted else `volume` (0–100), re-applied at every open/reopen (embedded,
+  preview-adopted, zap, iOS mpv fallback), and mirrored back from the `volume` stream listener and
+  the Android Activity's `RESULT_VOLUME` close relay (`EXTRA_VOLUME` carries it in). A zero records
+  mute, a non-zero a level + unmute; the app's own unmute restores the remembered level rather than
+  forcing `100`. Load-bearing broadcast subtlety: media_kit volume is **not replayed to late
+  subscribers**, so the
+  by-design-muted preview engine (muted before the listener attaches) can't poison the session with
+  a mute the user never made. Every mute toggle — the M key (`_toggleMute`), the native GDI overlay's
+  mute button and volume slider — **`record()`s into the session explicitly, never by reading the
+  engine's raw `state.volume`**: mpv's volume event can lag or never arrive on the native surfaces,
+  so a toggle against that stale read re-mutes instead of restoring sound, and a slider level that
+  never reached the session reverts on the next zap; `apply()` never flips the session's own muted
+  flag (it relies on the volume stream), so unmute clears it with its own `record()` first.
+  docs/player.md "Playback audio is a device-wide session".
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
   ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,
