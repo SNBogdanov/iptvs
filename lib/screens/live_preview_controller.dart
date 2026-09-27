@@ -14,12 +14,14 @@ import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../player/channel_owner.dart';
 import '../player/buffer_preset.dart';
+import '../player/hwdec_policy.dart';
 import '../player/mpv_options.dart';
 import '../player/player_screen.dart'
     show
         IosAudioSessionClaim,
         IosAudioSessionClient,
         kReconnectStallMs,
+        LiveZapTarget,
         reconnectMinGapMs;
 import '../player/resource_counters.dart';
 import '../sources/source.dart';
@@ -172,12 +174,12 @@ class LivePreviewController extends ChangeNotifier {
   // place `hwdec` sticks (media_kit sets it at controller creation, overriding
   // setProperty). On a weak TV box the default `auto-safe` silently drops to
   // software decode, playing 4K HEVC in slow-motion at ~100% CPU. Android-only;
-  // other platforms keep media_kit's default.
+  // every other platform follows `hwdec_policy.dart` (desktop `auto-safe`).
   VideoController get controller => _controller ??= VideoController(
     player,
     configuration: Platform.isAndroid
         ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
-        : const VideoControllerConfiguration(),
+        : VideoControllerConfiguration(hwdec: embeddedHwdec()),
   );
 
   StreamSubscription<VideoParams>? _hwdecProbe;
@@ -211,6 +213,7 @@ class LivePreviewController extends ChangeNotifier {
           ...kLiveMpvOptions,
           ...mpvBufferOptions(_bufferPreset),
           ...embeddedVideoOptionsForPlatform(),
+          ...embeddedMpvOverrides(),
         }),
       );
       // Log the decoder mpv actually engaged once frames start flowing, so the
@@ -220,6 +223,14 @@ class LivePreviewController extends ChangeNotifier {
         if (_loggedHwdec) return;
         unawaited(_logPreviewHwdec(platform));
       });
+      // Unconditional and separate from [_logPreviewHwdec], which goes silent
+      // exactly when an override took effect (it skips a software fallback).
+      // The override line is what makes "did it apply?" answerable from the
+      // export alone.
+      DiagnosticsLog.instance.add(
+        'library',
+        'preview mpv overrides: ${embeddedOverrideSummary()}',
+      );
     }
     // media_kit maps mpv's `eof-reached` to `completed: true` — a clean
     // server-side EOF, distinct from a player error. Nothing else here
@@ -369,6 +380,13 @@ class LivePreviewController extends ChangeNotifier {
   bool isPreviewing(String sourceId, String channelId) =>
       this.channelId == channelId && previewSourceId == sourceId;
 
+  /// Whether a preview is bound to *any* channel — resolving, playing, paused
+  /// or failed. This answers "is the preview window showing something", never
+  /// "is it showing *this* channel": that is [isPreviewing], which is
+  /// pair-keyed on purpose, because the cross-source view can have two
+  /// providers' channels sharing an id.
+  bool get hasPreview => channelId != null;
+
   /// True while the app (not a genuine EOF) has paused the preview around a
   /// fullscreen handoff — an EOF landing in this window is ignored.
   bool _pausedByApp = false;
@@ -399,6 +417,48 @@ class LivePreviewController extends ChangeNotifier {
   int _eofRestartAttempts = 0;
   int _lastEofRestartMs = 0;
   static const int _maxConsecutiveEofRestarts = 3;
+
+  /// Re-seats the preview's *identity* to a channel now playing in the shared
+  /// engine without reopening it — the cross-source (or any) zap return.
+  ///
+  /// When fullscreen adopted this controller's player (the embedded seamless
+  /// handoff, `adoptedByFullscreen`) and the user zapped while the route was
+  /// up, the shared engine plays the *zapped* stream when the route pops, while
+  /// this controller's channel id / stream still describe the pre-zap channel.
+  /// A `start` would reconnect the provider for a stream that is already
+  /// connected (a double-connect on a single-connection portal) and re-apply
+  /// the preview engine's mute over the session state the route owns; replacing
+  /// only the identity leaves the engine untouched.
+  ///
+  /// Mutates exactly what the pane/sheet/EOF-restart read: the target channel,
+  /// its owning repository (so [previewSourceId] and subsequent resolves stay
+  /// with the right provider), the resolved stream, the buffering preset, and
+  /// the incident bookkeeping. The engine itself — stream, volume, EOF listener,
+  /// mute — is deliberately left alone; [isPreviewing] then answers for the
+  /// zapped channel and `_handleCompleted` re-resolves it through [from] if the
+  /// shared engine later EOF-restarts.
+  void repointAdopted(
+    LiveZapTarget target, {
+    required LibraryRepository from,
+    required BufferPreset bufferPreset,
+  }) {
+    if (_disposed) return;
+    _activeChannel = target.channel;
+    _activeRepo = from;
+    _bufferPreset = bufferPreset;
+    _pausedByApp = false;
+    // A repoint is a fresh incident: whatever stall/backoff the pre-zap stream
+    // ran into died with the route, and the engine is mid-playback, not
+    // recovering from an EOF.
+    _eofRestartAttempts = 0;
+    _lastEofRestartMs = 0;
+    _set(() {
+      channelId = target.channel.id;
+      stream = target.stream;
+      loading = false;
+      error = null;
+    });
+  }
 
   StreamSubscription<bool>? _completedSub;
 
