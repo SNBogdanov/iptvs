@@ -154,6 +154,25 @@ class SourceConfig {
     return const {'low', 'normal', 'high'}.contains(value) ? value! : 'normal';
   }
 
+  /// Whether launching into this source puts the cursor back on the channel
+  /// this device was last watching (and starts its preview, where a preview is
+  /// drawn).
+  ///
+  /// **On unless it is explicitly off**, which is the opposite of every other
+  /// toggle in the app and deliberate: a resume feature nobody notices is not a
+  /// feature. It also means an untouched source serializes *exactly* as it did
+  /// before the setting existed — only `false` is ever written — so it adds no
+  /// cloud churn and needs no migration.
+  ///
+  /// Anything a newer build wrote, or a value this one does not recognise,
+  /// reads as on rather than off: the failure mode of a mangled preference
+  /// should be the default behaviour, not a silent loss of the feature.
+  ///
+  /// The *record* of which channel that was is deliberately not here — see
+  /// `LastChannelStore` for why a last-watched channel is device-local and must
+  /// never ride the source row into the cloud.
+  bool get autoResumeLastChannel => settings['autoResumeLastChannel'] != false;
+
   /// Extra XMLTV guide URLs, one per line in `fields['epgUrls']`.
   ///
   /// A newline-separated blob rather than JSON because [fields] is

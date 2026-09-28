@@ -355,6 +355,53 @@ answers to "what does 200 mean", and that is precisely the disagreement this fea
   `test/live_focus_coordinator_test.dart`. The screen-level wiring is not unit-tested — it needs a
   real preview player, so `channel_list_focus_test.dart` covers it only where libmpv exists.
 
+## Starting up on the last channel
+
+The live list comes up on the channel this profile was last watching, with its preview already
+running — the one place the D-pad does not have to be touched, and the one exception to "the preview
+is deliberate": a start-up resume is a deliberate OK the user gave on a previous run.
+
+`ChannelListScreen._maybeResumeLastChannel` runs at the end of the **first** `_loadLive`, after the
+catalog and the cross-source favorites are in (the last is what decides what a view may draw), and
+`_resumeAttempted` keeps it to once per screen — a Reload or a source change does not re-run it.
+`planResumeAction` (`lib/data/last_channel_store.dart`) is a pure function, so the rules are tested
+with no keychain, widget or provider:
+
+| rule | why |
+| --- | --- |
+| the source's `autoResumeLastChannel` allows it | the preference is per source, absent = on |
+| a record exists for the **active profile** | a channel is remembered per profile, not per install |
+| `record.sourceId == active source id` | a channel id is unique only *within* a provider, so a record from another source names a row this list cannot draw |
+| the channel is one a view can draw | same requirement the typed-number jump has |
+| nothing is resolving or previewing already | resolving into a running preview is the double-connect a single-connection portal cannot survive |
+
+Three refusals are load-bearing:
+
+- **Never fullscreen.** A launch that drops the user into a player hides the list they may have
+  wanted, and on a phone it reads as a bug. Selection plus a preview says "this is where you were"
+  while leaving one press from anywhere else.
+- **Never a preview on the narrow layout.** There is no preview panel there, so the engine would
+  spend a provider connection on video nobody can see.
+- **Never unmuted.** Muted on every platform, including Android where a deliberate preview carries
+  audio: unprompted sound at launch is a worse failure than a silent picture.
+
+Two implementation notes that are easy to get wrong:
+
+- It must **not** reuse `_revealAndPreview` — the typed-number helper returns early unless a preview
+  is *already* running, because a selection move must never start one. The resume is the single
+  caller that wants a start, so it reveals and starts the preview itself.
+- The reveal is `_revealChannelInList`'s, so it inherits the deferred scroll: the cursor is placed
+  synchronously and the reveal runs in a post-frame callback (`selectChannel(index, reveal: false)`
+  first) for the same reason the number jump does it — an index→offset reveal issued against the
+  outgoing list is clamped to nothing.
+
+**Pinned by** `test/last_channel_resume_test.dart` — the store (per-profile isolation, malformed
+blob, forgotten profile), `planResumeAction`'s seven cases, and four narrow-layout widget tests
+that the cursor lands on the stored channel and that three near-miss records leave a normal start
+alone. The widget tests run **without libmpv**: `LivePreviewController` creates its media_kit
+player lazily and the narrow layout draws no preview panel, so the whole select-and-reveal path is
+exercised on a plain `flutter test` rather than skipping the way the focus suite does.
+
 ## When the body has no rows
 
 A selection model's rows are not focus targets, which is the whole point — but it means a body

@@ -941,12 +941,41 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   SurfaceView — nothing channel-specific, and any reconnect during a long fullscreen session
   reaches it.
 - On a TV remote the preview is **deliberate and locked**: only OK (or a pointer tap on the row)
-  starts/switches it; D-pad focus movement never does. The preview engine is stopped when the app
-  backgrounds or exits. A second OK **while that same channel's preview is still resolving waits
-  for the in-flight resolve and then goes fullscreen** (`decideChannelPlayAction` →
-  `LivePreviewController.pendingStart`) — it must never fall through to "start a preview", which
+  starts/switches it; D-pad focus movement never does. The one exception is the **start-up resume**
+  (`lib/data/last_channel_store.dart`), which is a deliberate OK the user already gave on a previous
+  run. The preview engine is stopped when the app backgrounds or exits. A second OK **while that
+  same channel's preview is still resolving waits
+  for the in-flight resolve and then goes fullscreen** (`decideChannelPlayAction` 
+  `LivePreviewController.pendingStart`) - it must never fall through to "start a preview", which
   superseded the in-flight `create_link` with a second one and reloaded the running shared engine:
   the visible stream reload behind the Android TV "it reconnects when I go fullscreen" reports.
+- **The start-up resume selects the last live channel once per screen, and starts its preview only
+  on the wide layout.** `ChannelListScreen._maybeResumeLastChannel` runs at the end of the *first*
+  `_loadLive` (guarded by `_resumeAttempted`, so a Reload or a source change inside the same screen
+  does not re-run it) and never opens fullscreen - selection plus a preview says "this is where you
+  were" while leaving one press from anywhere else. The decision is `planResumeAction`, a **pure
+  function**, so the rules are tested without a keychain, a widget or a provider: the record must
+  match the active `sourceId` (a channel id is unique only within a provider), the channel must be
+  one a view can draw, and nothing may be playing already (`_resolving || _preview.hasPreview`) -
+  resolving into a running preview is the double-connect single-connection portals cannot survive.
+  Three things it deliberately does **not** do: never fullscreen, never a preview on the narrow
+  layout (no panel to show it, and the engine would spend the user's one connection on video nobody
+  can see), and never unmute - the preview it starts is muted on every platform including Android,
+  because unprompted sound at launch is a worse failure than a silent picture. It must not go
+  through `_revealAndPreview`, which only ever *retargets* an already-running preview (a selection
+  move must never start one); it reveals and starts the preview itself. The record is
+  **device-local, never `SourceConfig.settings`** - that blob rides the source row into the cloud,
+  so a last-watched channel there would push a rewrite on every channel change, advance
+  `profiles.updated_at` and hand a paired phone the television's channel; the same argument
+  `ExpiryCache` makes, hence keychain and not a table. It is keyed by **profile** (local first, then
+  cloud, then `kNoProfileResumeKey`) while the **preference** is per source
+  (`settings['autoResumeLastChannel']`, `SourceConfig.autoResumeLastChannel`, absent = on and only
+  `false` is ever written) beside `aspectMode` and `bufferPreset`. The record is written by
+  `_notePlayedChannel`, which takes the `sourceId` for the same reason the preview's identity is
+  pair-keyed - keep it that way, and note it now has **five** call sites including the zap quick
+  list, so a zap is remembered as the last channel too. A failure to read it is a log line, never a
+  snackbar: the app is fully usable starting normally. Pinned by `test/last_channel_resume_test.dart`.
+
 - **The live chrome is one layout on every surface that draws its own overlay.** Where the VOD
   scrubber sits, live gets a three-row EPG strip (programme title + `HH:mm – HH:mm`, progress bar,
   `Next · HH:mm – HH:mm · title`); LIVE is a **top-bar badge**, and the badges read source, LIVE,

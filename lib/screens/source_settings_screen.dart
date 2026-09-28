@@ -243,7 +243,6 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     setState(() => _epgControllers.add(TextEditingController()));
   }
 
-
   Future<void> _cycleBufferPreset() async {
     final next = nextBufferPreset(
       bufferPresetFromName(_config.bufferPresetName),
@@ -259,6 +258,24 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     await _save(_config.copyWith(settings: settings));
   }
 
+  /// Turns the start-up resume off, or back on.
+  ///
+  /// Storing only `false` is what makes "on" free: a source nobody touched
+  /// keeps serializing exactly as it did before the setting existed, so it adds
+  /// no cloud churn and needs no migration. A `SwitchListTile` would be the
+  /// obvious widget, and wrong here — this screen is D-pad driven, so the
+  /// control is a focusable card that toggles on activation like the buffer
+  /// tile beside it.
+  Future<void> _toggleResumeOnLaunch() async {
+    final settings = <String, dynamic>{..._config.settings};
+    if (_config.autoResumeLastChannel) {
+      settings['autoResumeLastChannel'] = false;
+    } else {
+      settings.remove('autoResumeLastChannel');
+    }
+    await _save(_config.copyWith(settings: settings));
+  }
+
   Future<void> _saveEpgGuides() async {
     final urls = <String>[];
     for (final controller in _epgControllers) {
@@ -266,8 +283,8 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       if (url.isEmpty) continue; // a blank row is "not filled in yet"
       if (!looksLikeValidUrl(url, requireScheme: true)) {
         setState(
-          () => _epgError =
-              'Enter a valid URL starting with http:// or https://',
+          () =>
+              _epgError = 'Enter a valid URL starting with http:// or https://',
         );
         return;
       }
@@ -302,7 +319,9 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       // Honest about the timing: the running `Source` still holds the old URL
       // list, so the guides take effect when the source is next built — the
       // same "applies on next load" contract the catch-up overrides above have.
-      const SnackBar(content: Text('EPG guides saved — applied on next reload')),
+      const SnackBar(
+        content: Text('EPG guides saved — applied on next reload'),
+      ),
     );
   }
 
@@ -567,6 +586,17 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                                 _config.bufferPresetName,
                               ),
                               onTap: _cycleBufferPreset,
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'On start',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            _ResumeOnLaunchTile(
+                              enabled: _config.autoResumeLastChannel,
+                              onTap: _toggleResumeOnLaunch,
                             ),
                             // Extra XMLTV guides. Here rather than on the
                             // add/edit source form because it is an ongoing
@@ -938,6 +968,59 @@ class _UpgradeToXtreamTile extends StatelessWidget {
 /// `LoadControl` is a build-time argument, and mpv's cache options are applied
 /// when the player is configured. The hint says so rather than leaving the user
 /// to wonder why the current stream did not change.
+class _ResumeOnLaunchTile extends StatelessWidget {
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _ResumeOnLaunchTile({required this.enabled, required this.onTap});
+
+  static const _hint =
+      'When this app starts, put the cursor back on the channel this device was '
+      'last watching and show its preview. Off starts the channel list as usual.';
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      semanticsLabel:
+          'Resume last channel on start: ${enabled ? 'on' : 'off'}. '
+          '$_hint Activate to turn it ${enabled ? 'off' : 'on'}.',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              enabled ? Icons.restore_outlined : Icons.restore,
+              size: 20,
+              color: enabled ? null : AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Resume last channel: ${enabled ? 'On' : 'Off'}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _hint,
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _BufferPresetTile extends StatelessWidget {
   final BufferPreset preset;
   final VoidCallback onTap;

@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 
 import '../data/device_class.dart';
 import '../data/diagnostics_log.dart';
+import '../data/last_channel_store.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../data/source_store.dart';
@@ -468,11 +469,50 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // target. Only meaningful within this screen's lifetime.
   String? _previousPlayedLiveChannelId;
 
-  void _notePlayedChannel(String id) {
+  /// Whether this screen instance has already considered restoring the last
+  /// channel. One shot per instance, so a manual Reload or a background guide
+  /// landing does not yank the cursor back mid-browse.
+  bool _resumeAttempted = false;
+
+  /// Records that a channel started playing: this screen's own zap bookkeeping,
+  /// and — through the device-local [LastChannelStore] — the next launch.
+  ///
+  /// [sourceId] is a required argument rather than read off `widget.repo`
+  /// because a cross-source row is played through *its own* repository. A
+  /// channel id is unique only within a provider, so a record written against
+  /// the wrong source would come back as a different channel that happens to
+  /// share the id.
+  void _notePlayedChannel(String id, {required String sourceId}) {
     if (_lastPlayedLiveChannelId != null && _lastPlayedLiveChannelId != id) {
       _previousPlayedLiveChannelId = _lastPlayedLiveChannelId;
     }
     _lastPlayedLiveChannelId = id;
+    unawaited(_rememberLastChannel(sourceId, id));
+  }
+
+  /// Deliberately fire-and-forget, and deliberately not cached.
+  ///
+  /// A keychain that will not answer must not sit between the user and
+  /// playback — the next launch then simply starts normally, which is a far
+  /// better outcome than a failed play. The profile key is re-read per play
+  /// rather than memoised: plays are user-paced and rare, whereas a cached key
+  /// would go stale under a profile switch that keeps the same active source
+  /// (this screen is keyed on the source id, so such a switch does not
+  /// recreate it and nothing else would refresh the value).
+  Future<void> _rememberLastChannel(String sourceId, String channelId) async {
+    try {
+      final profileKey = await LastChannelStore.activeProfileKey();
+      await LastChannelStore().write(
+        profileKey,
+        LastChannel(sourceId: sourceId, channelId: channelId),
+      );
+    } catch (e) {
+      DiagnosticsLog.instance.add(
+        'resume',
+        'could not record last channel source=$sourceId '
+            'reason=${e.runtimeType}',
+      );
+    }
   }
 
   // Live preview player + its state live in a controller; the screen keeps the
@@ -487,12 +527,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// in the current one) and the preview window (retargeted, because a jump that
   /// moved the cursor under a still-running preview would leave the two
   /// disagreeing about what is on screen).
-  ///
-  /// A preview that is *not* running is deliberately left alone — on a wide
-  /// layout the selection change already arms the desktop auto-preview, and on
-  /// a TV remote the preview is deliberate, so a number must not quietly
-  /// unmute one.
   Future<void> _onNumberCommitted(Channel target) async {
+    // On a TV remote the preview is deliberate, so a number must not quietly
+    // unmute one; at start-up it is the reverse case, and always muted. The
+    // shared body takes the answer as an argument rather than deciding it.
+    await _revealAndPreview(target, muted: !_deliberatePreview);
+  }
+
+  /// Reveals [target] in the list and points the preview at it — the one
+  /// implementation behind both the typed-number jump and the start-up resume,
+  /// so the two cannot drift on the questions they answer the same way.
+  ///
+  /// A preview that is *not* running is left alone: on a wide layout the
+  /// selection change already arms the desktop auto-preview, and on a TV remote
+  /// the preview is deliberate, so a number must not quietly unmute one.
+  Future<void> _revealAndPreview(Channel target, {required bool muted}) async {
     if (_resolving) return;
     _revealChannelInList(target);
     if (!_preview.hasPreview) return;
@@ -505,9 +554,94 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     await _preview.start(
       target,
       from: _repoForChannel(target),
-      muted: !_deliberatePreview,
+      muted: muted,
       bufferPreset: _bufferPresetForChannel(target),
     );
+  }
+
+  /// Puts the cursor back on the channel this device was last watching.
+  ///
+  /// Runs once per screen instance, at the end of the first load, and only when
+  /// the source's `autoResumeLastChannel` preference allows it. Three things it
+  /// deliberately does *not* do:
+  ///
+  /// - **It never opens fullscreen.** A launch that drops the user straight
+  ///   into a player hides the list they may have wanted, and on a phone or a
+  ///   desktop window it looks like a bug. Selection plus a preview says "this
+  ///   is where you were" while leaving one press from anywhere else.
+  /// - **It never starts a preview on the narrow layout.** There is no preview
+  ///   panel there, so the engine would spend a provider connection on video
+  ///   nobody can see — and on a single-connection portal that connection is
+  ///   the user's, not a spare.
+  /// - **It never unmutes.** The preview it starts is muted regardless of
+  ///   platform, including Android where a deliberate preview carries audio:
+  ///   unprompted sound at launch is a worse failure than a silent picture, and
+  ///   OK is one press away.
+  ///
+  /// The decision itself is [planResumeAction] — a pure function, so the rules
+  /// above are tested without a keychain, a widget or a provider. What arrives
+  /// here has already been narrowed to a channel the active source owns, which
+  /// is why the record's `sourceId` is checked there rather than here.
+  Future<void> _maybeResumeLastChannel() async {
+    if (_resumeAttempted) return;
+    _resumeAttempted = true;
+    try {
+      final profileKey = await LastChannelStore.activeProfileKey();
+      final stored = await LastChannelStore().read(profileKey);
+      final channel = stored == null
+          ? null
+          : _findChannelById(stored.channelId);
+      // Guarded before the first `context` use: the keychain reads above are
+      // two awaits, so the screen may be gone by now.
+      if (!mounted) return;
+      final action = planResumeAction(
+        enabled: widget.config.autoResumeLastChannel,
+        activeSourceId: widget.repo.source.id,
+        stored: stored,
+        // A channel the list cannot draw cannot be selected at all, and naming
+        // one the user cannot see is worse than not resuming — the same
+        // requirement the typed-number jump has.
+        drawable: channel != null,
+        previewVisible: isWideLayout(MediaQuery.sizeOf(context)),
+        // Something already playing owns the provider connection; resolving into
+        // it would double-connect, which is exactly what the single-connection
+        // accounts cannot survive.
+        somethingAlreadyPlaying: _resolving || _preview.hasPreview,
+      );
+      if (!mounted) return;
+      DiagnosticsLog.instance.add(
+        'resume',
+        'start resume action=$action stored=${stored == null ? 'none' : stored.channelId} '
+            'found=${channel != null} source=${widget.repo.source.name} '
+            'enabled=${widget.config.autoResumeLastChannel}',
+      );
+      if (action == ResumeAction.none || channel == null) return;
+      // Deliberately *not* `_revealAndPreview`: that helper only ever
+      // retargets an already-running preview, because a selection move must
+      // never start one (see the typed-number jump). The boot resume is the one
+      // caller that wants a start — nothing is playing yet, and a picture of
+      // where you were is the entire point. `somethingAlreadyPlaying` in the
+      // decision above is what guarantees there is nothing to retarget.
+      _revealChannelInList(channel);
+      if (action == ResumeAction.selectAndPreview) {
+        await _preview.start(
+          channel,
+          from: _repoForChannel(channel),
+          muted: true,
+          bufferPreset: _bufferPresetForChannel(channel),
+        );
+      }
+    } catch (e) {
+      // Never let a convenience feature take the channel list down with it, and
+      // never announce it: the app is fully usable starting normally, so a
+      // failed resume is a log line and nothing the user has to act on. A
+      // snackbar here would be the first thing on screen at every launch where
+      // the keychain misbehaved — a worse bug than the one being reported.
+      DiagnosticsLog.instance.add(
+        'resume',
+        'start resume failed reason=${e.runtimeType} message=${redactText('$e')}',
+      );
+    }
   }
 
   /// Puts [target] where the cursor can sit on it, and puts the cursor there.
@@ -561,11 +695,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     DiagnosticsLog.instance.add(
       'navigation',
       'number jump channel=${target.id} number=${target.number} '
-      'group=$groupBefore -> $_categoryId query=${queryBefore.isEmpty ? '' : 'set'} '
-      'visible=${_visible.length} index=$index switched=$switchedGroup '
-      'extent=${_liveChannelRowExtent().round()} '
-      'offset=${_scrollController.hasClients ? _scrollController.offset.round() : -1} '
-      'clients=${_scrollController.hasClients}',
+          'group=$groupBefore -> $_categoryId query=${queryBefore.isEmpty ? '' : 'set'} '
+          'visible=${_visible.length} index=$index switched=$switchedGroup '
+          'extent=${_liveChannelRowExtent().round()} '
+          'offset=${_scrollController.hasClients ? _scrollController.offset.round() : -1} '
+          'clients=${_scrollController.hasClients}',
     );
     if (index < 0) return;
     // The cursor moves now; the list scrolls after the frame, immediately, in
@@ -589,9 +723,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       DiagnosticsLog.instance.add(
         'navigation',
         'number jump settled index=$index '
-        'extent=${_liveChannelRowExtent().round()} '
-        'offset=${_scrollController.hasClients ? _scrollController.offset.round() : -1} '
-        'max=${_scrollController.hasClients ? _scrollController.position.maxScrollExtent.round() : -1}',
+            'extent=${_liveChannelRowExtent().round()} '
+            'offset=${_scrollController.hasClients ? _scrollController.offset.round() : -1} '
+            'max=${_scrollController.hasClients ? _scrollController.position.maxScrollExtent.round() : -1}',
       );
     });
     if (takeFocus) _focus.focusChannels();
@@ -853,6 +987,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // this neither waits on nor blocks the active catalog.
     await _globalFavorites.load();
     if (mounted) _ensureCrossSourceCategoryStillOffered();
+    // After everything the resume needs is in: the catalog, the favorites that
+    // decide what a view may draw, and the cross-source index. Guarded to the
+    // first load by `_resumeAttempted`, so a Reload or a source change inside
+    // this same screen does not re-run it.
+    if (mounted) unawaited(_maybeResumeLastChannel());
   }
 
   @override
@@ -1699,7 +1838,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     )..onChannelChanged = (entry) {
       // Keeps the toolbar's "last channel" target and the post-playback
       // selection restore pointed at the channel the session is really on.
-      if (mounted) _notePlayedChannel(entry.channelId);
+      // The record is keyed by (sourceId, channelId) and a zap can cross
+      // sources from the cross-source Favorites view, so this is the *entry's*
+      // owning source — never the active one.
+      if (mounted) {
+        _notePlayedChannel(entry.channelId, sourceId: entry.sourceId);
+      }
     };
   }
 
@@ -1773,7 +1917,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         );
         final stream = await repo.resolve(channel);
         if (!mounted) return;
-        _notePlayedChannel(channel.id);
+        _notePlayedChannel(channel.id, sourceId: repo.source.id);
         final epg = _epgFor(
           channel,
           foreign: foreign,
@@ -1783,9 +1927,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           PageRouteBuilder(
             transitionDuration: Duration.zero,
             reverseTransitionDuration: Duration.zero,
-                pageBuilder: (_, _, _) => PlayerScreen(
-                  title: _channelTitleLabel(channel, null),
-                  stream: stream,
+            pageBuilder: (_, _, _) => PlayerScreen(
+              title: _channelTitleLabel(channel, null),
+              stream: stream,
               sourceName: repo.source.name,
               zap: zap,
               bufferPreset: _bufferPresetForChannel(channel),
@@ -1904,7 +2048,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         'library',
         'open live fullscreen source=${playRepo.source.name} channel=${channel.name} id=${channel.id}',
       );
-      _notePlayedChannel(channel.id);
+      _notePlayedChannel(channel.id, sourceId: playRepo.source.id);
       // Native discovery can require an external mpv version probe on its
       // first call. The result only matters for a same-channel HDR preview;
       // probing for SDR or a non-adoptable preview added avoidable latency to
@@ -2442,7 +2586,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         'library',
         'open catch-up source=${playRepo.source.name} channel=${channel.name} programme=${programme.title} start=${programme.start.toIso8601String()}',
       );
-      _notePlayedChannel(channel.id);
+      // The owning repository, not the active one: a catch-up row from the
+      // cross-source Favorites view belongs to the provider that published it,
+      // and the record is keyed by that id.
+      _notePlayedChannel(channel.id, sourceId: playRepo.source.id);
       final stream = await playRepo.resolveArchive(channel, programme);
       if (!mounted) return;
       await navigator.push(
@@ -3637,7 +3784,5 @@ String _channelTitleLabel(Channel channel, [String? suffix]) {
   final base = channel.number == null
       ? channel.name
       : '${channel.number} - ${channel.name}';
-  return (suffix == null || suffix.isEmpty)
-      ? base
-      : '$base · $suffix';
+  return (suffix == null || suffix.isEmpty) ? base : '$base · $suffix';
 }
