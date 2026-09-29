@@ -1745,56 +1745,66 @@ stays null for VOD, catch-up, and every route that isn't channel-list-borne, so 
   `set_property volume` on session start).
 - **The seamless preview handoff's return leg re-seats the preview's identity, but never
   restarts it.** When `_openLivePlayer`'s route adopted the shared preview engine and the user
-  zapped while it was up, the engine is playing the *last* zap target when the route pops while the
-  preview controller still describes the pre-zap channel. The pop consumes the pending zap once
-  (`channel_list_screen`'s `_pendingZapTarget`/`_pendingZapRepo` latch — nulled on every other
-  return path) and, only in the seamless-adopted branch, calls
-  `LivePreviewController.repointAdopted`: it replaces only the target channel/stream/owning-repo
-  (`channelId`, `stream`, `previewSourceId`, the buffering preset, the EOF-restart incident
-  bookkeeping) and deliberately does **not** reopen the engine — a restart would reconnect a
-  single-connection portal for a stream that is already connected, and would re-apply the preview's
-  mute over the session state the route owns. `_handleCompleted`'s later EOF-restart then resolves
-  through the repointed channel's own repository.
+  zapped while it was up, the engine is playing the *last* zapped channel when the route pops while
+  the preview controller still describes the pre-zap channel. In the seamless-adopted branch the pop
+  calls `LivePreviewController.repointAdopted(channel, stream, …)`: it replaces only the target
+  channel/stream/owning-repo (`channelId`, `stream`, `previewSourceId`, the buffering preset, the
+  EOF-restart incident bookkeeping) and deliberately does **not** reopen the engine — a restart would
+  reconnect a single-connection portal for a stream that is already connected, and would re-apply the
+  preview's mute over the session state the route owns. `_handleCompleted`'s later EOF-restart then
+  resolves through the repointed channel's own repository.
+  It takes `(Channel, StreamInfo)` rather than a host-built `LiveZapTarget`, because the zap's list,
+  cursor and resolve now belong to `LiveZapController` alone — the host-side zap target type and its
+  resolve/reopen path are gone (see "Live zapping" → Ownership). **Its caller is still outstanding**
+  after that removal: the pop path must hand over the controller's settled `ZapEntry` and its resolved
+  stream. Until it does, the return leg re-seats nothing and the preview still describes the pre-zap
+  channel — a stale label over a correct picture, not a wrong one.
 
 ## Typed channel numbers (full screen)
 
-Digits in the fullscreen live player jump to a channel by number, on the **same engine** as a zap —
-same resolver, same `_current*` mirror swap, same single-flight `_zapping` guard, so a number cannot
-race a PgDn or a reconnect. It is one of the three ways `onSelectChannel` is wired
-(`ChannelListScreen._resolveNumberTarget`), alongside row playback and the zap target; the other two
-routes (VOD, catch-up, every route that is not channel-list-borne) leave it null, exactly as
-`onZapChannel` does.
+A typed number in the fullscreen live player is a **zap**, not a second input system: it moves the
+same cursor `PgDn`/`PgUp` move, in the same range, through the same settle, and therefore through the
+same resolve. `PlayerScreen` owns no entry of its own — it reads the session's
+`LiveZapController.numberEntry` and draws the shared `ChannelNumberChip`. There is exactly one
+`ChannelNumberEntry` in an install, so the list and the player cannot disagree about what a digit
+does, what it matches, or when it commits; the rules and the reason for each are in
+[docs/tv-navigation.md](tv-navigation.md#typed-channel-numbers).
 
-- **The entry is shared, not reimplemented.** `PlayerScreen` holds its own `ChannelNumberEntry` over
-  the **whole catalog** the host passed in (`allChannels`) and draws the shared
-  `ChannelNumberChip`. The list and the player therefore cannot disagree about what a digit does,
-  what it matches, or when it commits — the whole point of sharing is that there is only one answer
-  to "200" per install. Rules and the reason for each are in
-  [docs/tv-navigation.md](tv-navigation.md#typed-channel-numbers).
-- **A null `onSelectChannel` is a real state, and "live channel" is not a reason to leave it
-  null.** It is the "this route has no live catalog to step through" signal — catch-up and VOD —
-  and the constructor comment says so. Both channel-list-borne live routes pass it: the
-  preview-adopted `_openLivePlayer` and the direct `_openFullscreenDirect` (narrow windows, and
-  cross-source favorites). The second one was missed, and because the gate is a null check rather
-  than a visible error, the symptom was "PgDn works, digits do nothing" on a phone and on every
-  foreign favorite — a feature that was simply absent rather than broken. When adding a live
-  playback route, wiring `onZapChannel` without `onSelectChannel`/`allChannels` is the mistake to
-  look for.
-- **The catalog is the host's, because a number has to cross groups.** The player cannot enumerate
-  channels itself, and a number that only reached the visible group would be unreachable in full
-  screen by definition; the host passes the same space its list searches.
+- **The search space is the zap range, deliberately** (`LiveZapController.digitMatch`, over the
+  cached `_rangeChannels`), not the whole catalog the host once passed in. The player cannot
+  enumerate channels, so a "catalog" was always the launch range in disguise — and being explicit
+  makes the two agree by construction instead of by coincidence.
+- **A miss is the chip's business, not the banner's.** While digits are buffered the chip reads
+  `No Data Found`; a commit on no match **clears the entry and changes nothing** — no resolve, no
+  cursor move, no playback, and deliberately **no** `No channel N` banner. The banner slot belongs
+  to the zap cursor (`message`), and a number that matched nothing never became a zap, so printing
+  there would report a channel change that did not happen.
+- **A full-length number commits on the keystroke**, through the shared
+  `kChannelNumberFullLengthCommitDelay`; a shorter buffer still waits its own (injectable) delay or
+  Enter. One length rule, one constant, both surfaces.
+- **While the quick list is open a digit moves the cursor and never plays.** The list is on screen
+  with an unambiguous job, so it claims the digits the way it claims the arrows; the zap banner
+  yields to it. A number is a way to *look* at a channel until the list is closed and OK says play.
+- **`playEntry(ZapEntry)` is the host's activation entry point, and it distinguishes two cases.** An
+  entry inside the range moves the cursor and plays it through the ordinary settle, and its future
+  **completes only once that channel is actually on screen** (`_moveTo(…, immediate: true)` returns
+  the settle for exactly this caller) — a method that returned before the playback it named would
+  make a caller report a destination that never started. An entry outside the range is stashed as
+  `_hostTarget` for the next settle, and a cursor move supersedes it: a D-pad decision outranks a
+  request the host made a moment earlier.
 - **Gated exactly like every other Dart-side control**, off `_separateEngineOwnsPlayback`: the
   Linux-native mpv window and the Android/iOS native players own their input, so digits typed there
-  would be answered by an embedded engine nobody is looking at. Windows' GDI overlay is deliberately
-  not gated — it forwards unclaimed keys back to Flutter, which is what makes PgDn/PgUp and this
-  work on the Windows-native surface. A digit that arrives on a gated surface is *dropped* rather
-  than half-answered, and it still clears a buffer in progress.
+  would be answered by an embedded engine nobody is looking at. A digit that arrives on a gated
+  surface is *dropped* rather than half-answered, and it still clears a buffer in progress. Windows'
+  GDI overlay is deliberately not gated — it forwards unclaimed keys back to Flutter, which is what
+  makes PgDn/PgUp and this work on the Windows-native surface; its `digit:N` command arrives through
+  the same `parseZapCommand` vocabulary as every other surface.
 - **The chip's `isActive` is read inside its own `ListenableBuilder`.** Wrapping the builder in an
   `if` on the entry's state is a rebuild that never happens: the buffer's changes are what the
   builder listens *for*, so the chip would only ever appear on a parent rebuild that a keystroke does
   not cause.
-- **The buffer is disposed with the route**, so a screen torn down inside the 1500 ms window cannot
-  commit into a dead screen.
+- **The entry is disposed with the route** (with the controller), so a screen torn down inside the
+  commit window cannot commit into a dead screen.
 
 ## Playback audio is a device-wide session
 

@@ -1114,15 +1114,28 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   Windows-native surface too). When the player route adopted the shared preview engine and the user
   zapped, the pop re-seats the preview's **identity only** (`LivePreviewController.repointAdopted`:
   channel/stream/owning-repo/buffer-preset/EOF-restart bookkeeping, never an engine restart — a
-  restart would double-connect a single-connection portal and re-apply the preview's mute), consumed
-  from the once-per-pop `_pendingZapTarget`/`_pendingZapRepo` latch. The buffering preset and aspect
-  choice stay session-level across a zap. docs/player.md "Live zap".
-- **Typed numbers in the fullscreen player are that same swap**, via `onSelectChannel` and the
-  host's `_resolveNumberTarget` — same resolver, same `_current*` mirror swap, same single-flight
-  `_zapping` guard, over the host-passed `allChannels` (the player cannot enumerate channels, and a
-  number that only reached the visible group would be unreachable in full screen by definition). The
-  `ChannelNumberEntry`/`ChannelNumberChip` are the shared ones the list uses, and the entry is gated
-  off `_separateEngineOwnsPlayback` exactly like a zap, except the chip's `isActive` is read *inside*
+  restart would double-connect a single-connection portal and re-apply the preview's mute). It takes
+  `(Channel, StreamInfo)`, not a host-built `LiveZapTarget` — the host-side zap target type and its
+  resolve/reopen path are **gone**; the controller owns the list, the cursor and the resolve. Its
+  caller is still outstanding after that removal (docs/player.md "Live zapping" → Ownership). The
+  buffering preset and aspect choice stay session-level across a zap. docs/player.md "Live zap".
+- **A typed number in the fullscreen player is a zap, not a second input system.** `PlayerScreen`
+  owns **no** `ChannelNumberEntry`: it reads the session's `LiveZapController.numberEntry` and draws
+  the shared `ChannelNumberChip`, so a digit moves the same cursor PgDn/PgUp move, in the same range,
+  through the same settle and the same resolve. The search space is the **zap range**
+  (`digitMatch` over the cached `_rangeChannels`), not a host-passed catalog — the player cannot
+  enumerate channels, so a "catalog" was the launch range in disguise. A miss is the **chip's**
+  business: it reads `No Data Found` while buffering, and a commit on no match clears the entry and
+  changes nothing — no resolve, no cursor move, and deliberately **no** `No channel N` banner, which
+  would report a channel change that never happened (the banner slot is the zap cursor's `message`).
+  A full-length number commits on the keystroke via the shared
+  `kChannelNumberFullLengthCommitDelay`, and **while the quick list is open a digit moves the cursor
+  without playing** — the list claims the digits the way it claims the arrows.
+  `LiveZapController.playEntry(ZapEntry)` is the host activation path: inside the range it moves the
+  cursor and plays, and its future **completes only once that channel is on screen**
+  (`_moveTo(…, immediate: true)` returns the settle for that caller); outside the range it stashes
+  `_hostTarget` for the next settle, which any cursor move supersedes. The entry is gated off
+  `_separateEngineOwnsPlayback` exactly like a zap, except the chip's `isActive` is read *inside*
   its `ListenableBuilder` — an `if` on the entry's state outside the builder is a rebuild that a
   keystroke never causes. docs/player.md "Typed channel numbers".
 - **Mute/volume is a device-wide `PlaybackAudioSession`** (top-level in `player_screen.dart`):

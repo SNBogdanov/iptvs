@@ -319,16 +319,19 @@ answers to "what does 200 mean", and that is precisely the disagreement this fea
   visibly reload a correct picture to answer a selection move. And never *starting* one that is not
   running: on a wide layout the selection change already arms the desktop auto-preview, and on a TV
   remote the preview is deliberate, so a number must not quietly unmute one. *Full screen:* the same
-  same-engine swap a zap does, through the same `_resolveLiveTarget` (see
-  [docs/player.md](player.md)); the list behind is realigned to the target but **not** focused, since
-  the player route owns the D-pad and pulling focus under it leaves the remote nowhere to send Back.
-  **Both live player routes carry the entry.** `_openLivePlayer` (the preview-adopted wide path) *and*
-  `_openFullscreenDirect` (the narrow-window path, and the cross-source-favorite path on a wide
-  screen) pass `onSelectChannel` + `allChannels`. The second one originally passed `onZapChannel` and
-  nothing else, so PgDn/PgUp worked there while typed numbers were inert — the whole feature
-  silently missing on a phone and on every foreign favorite. A route that plays a channel from the
-  shared catalog and has a host able to resolve it **must** wire both; the `null` is reserved for
-  catch-up and VOD, which have no live catalog to step through.
+  same-engine swap a zap does, because it **is** a zap there — the player reads the live
+  `LiveZapController`'s `numberEntry` rather than owning one (see
+  [docs/player.md](player.md#typed-channel-numbers-full-screen)); the list behind is realigned to the
+  target but **not** focused, since the player route owns the D-pad and pulling focus under it leaves
+  the remote nowhere to send Back. **Both live player routes build a zap controller**, so both carry
+  the entry for free: `_openLivePlayer` (the preview-adopted wide path) *and* `_openFullscreenDirect`
+  (the narrow-window path, and the cross-source-favorite path on a wide screen). The second one
+  originally passed `onZapChannel` and nothing else, so PgDn/PgUp worked there while typed numbers
+  were inert — the whole feature silently missing on a phone and on every foreign favorite. What
+  made that failure invisible was a *null gate*: it could not fail loudly, and the screen-level
+  wiring is not unit-tested. **Prefer a capability that is present or absent to one that is null** —
+  a route that plays a channel from the shared catalog gets a `LiveZapController`, and the typed
+  entry comes with it; catch-up and VOD legitimately have no live range to step through.
 - **Revealing a jumped-to channel is two steps, and the scroll is the deferred one.** After a group
   switch the cursor moves *synchronously* (state, preview and the row's own selection are all correct
   at once) but the **scroll waits for the frame that renders the new group**. This list scrolls by
