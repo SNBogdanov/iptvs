@@ -360,6 +360,55 @@ class PlaybackContext {
   });
 }
 
+/// Device-wide playback audio state (volume + the user's muted choice), shared
+/// by every [PlayerScreen] and the native player surfaces that route through
+/// them.
+///
+/// **Global by design**: a channel change tears down the previous playback —
+/// each fresh route builds a new media_kit [Player] at default volume 100, and
+/// the native surfaces are opened with whatever the last one ended on. Without
+/// a session, muting and then zapping a channel un-mutes it, which is the one
+/// surprise a user reliably reports as a bug.
+///
+/// **The session is the single authority for *intents*, the engine for
+/// *reality*.** A mute or a level is always `record()`ed here explicitly
+/// rather than read back off the engine: mpv's volume events lag or never
+/// arrive on the native surfaces, so a toggle driven by a stale read re-mutes
+/// instead of restoring sound, and a level set through a native slider that
+/// never reached the session reverts on the next zap.
+class PlaybackAudioSession {
+  /// The user's audible volume, 0–100. 0 is only reached through [muted].
+  double volume = 100;
+
+  /// Whether the user has muted. Kept separate from [volume] so a 0 volume is
+  /// recorded as the deliberate status it is, and so nothing silently undoes a
+  /// mute when a level is re-applied.
+  bool muted = false;
+
+  /// The volume to hand to a player: 0 while muted, else [volume].
+  double get applied => muted ? 0 : volume;
+
+  /// Applies the session's state to [player] (mpv `volume` is 0–100).
+  Future<void> apply(Player player) => player.setVolume(applied);
+
+  /// Mirrors a player's *actual* audible state into the session. Callers are
+  /// the `volume` stream listener (catches every surface that writes straight
+  /// to the player) and the native close relay (the Android Activity's final
+  /// state). A zero is the mute gesture; a non-zero is both a level and an
+  /// unmute.
+  void record(double actual) {
+    if (actual <= 0) {
+      muted = true;
+    } else {
+      volume = actual;
+      muted = false;
+    }
+  }
+}
+
+/// The single device-wide session (see [PlaybackAudioSession]).
+final playbackAudioSession = PlaybackAudioSession();
+
 /// Plays a resolved [StreamInfo] using media_kit (libmpv under the hood, so it
 /// handles HEVC / AC-3 / MPEG-TS that an HTML video element can't). Controls
 /// are media_kit's adaptive set, themed to match the app.
@@ -2239,6 +2288,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       favorite: _favorite,
       liveSynced: _liveSynced,
       aspectLabel: kAspectModes[_aspectModeIndex].label,
+      // The native mpv process owns its own audio — start it at the session's
+      // level (see [PlaybackAudioSession]) so a mute/lowering survives the
+      // embedded→native escalation instead of coming back loud.
+      volume: playbackAudioSession.applied,
       resumeFrom: resumeOverride ?? widget.playback?.resumeFrom,
     );
     if (native == null) return false;

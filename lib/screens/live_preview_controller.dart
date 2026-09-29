@@ -21,7 +21,6 @@ import '../player/player_screen.dart'
         IosAudioSessionClaim,
         IosAudioSessionClient,
         kReconnectStallMs,
-        LiveZapTarget,
         reconnectMinGapMs;
 import '../player/resource_counters.dart';
 import '../sources/source.dart';
@@ -437,13 +436,21 @@ class LivePreviewController extends ChangeNotifier {
   /// mute — is deliberately left alone; [isPreviewing] then answers for the
   /// zapped channel and `_handleCompleted` re-resolves it through [from] if the
   /// shared engine later EOF-restarts.
+  ///
+  /// Takes the two things it actually consumes rather than a host-built zap
+  /// target: the live zap is resolved by [LiveZapController] (the single owner
+  /// of the list, the cursor and the resolve), so the route that pops knows the
+  /// settled channel and its stream and hands those over. The old
+  /// `LiveZapTarget` parameter is deliberately gone with the rest of the
+  /// host-side zap infrastructure.
   void repointAdopted(
-    LiveZapTarget target, {
+    Channel channel,
+    StreamInfo stream, {
     required LibraryRepository from,
     required BufferPreset bufferPreset,
   }) {
     if (_disposed) return;
-    _activeChannel = target.channel;
+    _activeChannel = channel;
     _activeRepo = from;
     _bufferPreset = bufferPreset;
     _pausedByApp = false;
@@ -453,8 +460,8 @@ class LivePreviewController extends ChangeNotifier {
     _eofRestartAttempts = 0;
     _lastEofRestartMs = 0;
     _set(() {
-      channelId = target.channel.id;
-      stream = target.stream;
+      channelId = channel.id;
+      this.stream = stream;
       loading = false;
       error = null;
     });
