@@ -744,7 +744,7 @@ intake synthetic keystrokes while the surface holds focus trips its fail-fast (a
 `0xC0000409` in `flutter_windows.dll`, two minidumps at the same RVA — it is not a crash our code
 can trace, it is the engine refusing the delivery). Instead `FlutterWindow::MessageHandler` maps the
 HUD-unclaimed player keys — ESC/Enter/Space/arrows stay native; F→`fullscreen`, M→`miniPlayer`,
-PgDn/PgUp→`zapDown`/`zapUp`, S→`goLive` — to command strings sent over the same
+PgDn/PgUp→`zap:up`/`zap:down` (Page Down advances, Page Up steps back — see "Live zap"), S→`goLive` — to command strings sent over the same
 `kNativeControlCommandMessage`/`nativeControl` channel the native buttons use, so they land in Dart's
 `_handleNativeControlCommand` exactly like a pressed button. That channel reaches Dart without
 touching the engine's keyboard intake, which is what makes it crash-free. The
@@ -1052,9 +1052,11 @@ decide whether the ordinary reveal-on-input `PostMessage` should fire.
 - **Digits are unambiguous** and act regardless of chrome visibility; a repeat is swallowed
   (`kSwallow`, not `kNone`) rather than let through, since a held digit key must not stack the same
   number four times or leak into the overlay's own key handling.
-- **PGUP/PGDOWN are this surface's `CHANNEL_UP`/`CHANNEL_DOWN` stand-ins** and mean one thing
-  whether the chrome is up or not; repeats pass through (holding scans, and Dart's 600 ms settle
-  collapses that to one `create_link`).
+- **PGUP/PGDOWN are the only channel-change keys on this surface** (there is no Linux
+  `CHANNEL_UP`/`LAST_CHANNEL`) and they mean one thing whether the chrome is up or not; repeats pass
+  through (holding scans, and Dart's 600 ms settle collapses that to one `create_link`). They run
+  **against** the Android/Windows channel keys on purpose — `PGDWN` is "step forward" to a remote,
+  the scrollbar gesture — so `PGDWN` sends `zap:up`, the next channel.
 - **A half-typed number's OK/Back rung sits above the chrome test**: Return/`VK_SELECT` commits it
   (`kActivate`) and Escape/Backspace clears it (`kBack`) while `digits_pending`, before either key's
   ordinary meaning on this screen runs.
@@ -1241,7 +1243,7 @@ press that drives the list still suppresses the reveal-on-input post). The whole
 | Up / Down | `zap:up`/`zap:down` (chrome hidden only) | `zap:move:-1`/`zap:move:1`, repeats allowed |
 | Return / `VK_SELECT` | commits a pending digit buffer, else falls through | `zap:activate` |
 | Escape / Backspace | clears a pending digit buffer, else falls through | `zap:back`, **ahead of the ordinary back branch** |
-| Page Up / Page Down | `zap:up`/`zap:down` | `zap:up`/`zap:down` (list *order*, not cursor direction) |
+| Page Down / Page Up | `zap:up`/`zap:down` | `zap:up`/`zap:down` (list *order*, so the cursor walks **down** the list on Page Down) |
 | Digits, numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor instead of zapping) |
 | `G` | `zap:list` | `zap:close` |
 
@@ -1251,8 +1253,9 @@ press that drives the list still suppresses the reveal-on-input post). The whole
   with the chrome up, because the list's rungs sit *above* the player's chrome ladder
   (docs/tv-navigation.md).
 - **`G` is this surface's `GUIDE`**, because Win32 has no virtual-key code for a remote's guide
-  key at all — the same stand-in relationship Page Up/Page Down have with
-  `CHANNEL_UP`/`CHANNEL_DOWN`. It was chosen against the keys this screen already uses (F
+  key at all - the same kind of stand-in the page keys make for a remote's channel keys, which is
+  also why those run *against* `CHANNEL_UP`/`CHANNEL_DOWN` rather than mirroring them. It was
+  chosen against the keys this screen already uses (F
   fullscreen, M mini-player, I info, S star, plus Dart's own `CallbackShortcuts` map, which binds
   no other letter), and it toggles, since a dedicated key that does nothing the second time reads
   as a dead remote. `kZapVkGuide` is `static_assert`ed against `'G'` beside the `VK_*` mirrors.
@@ -1667,7 +1670,7 @@ Up back to the volume control mid-walk would be two cursors for one press:
 | `LEFT` | `zap:list` when the chrome is hidden (seek otherwise); repeat swallowed | `zap:back`; repeat swallowed |
 | `RIGHT` | `zap:prev` when the chrome is hidden (seek otherwise); repeat swallowed | `zap:descend`; repeat swallowed |
 | `UP` / `DOWN` | `zap:up`/`zap:down` when the chrome is hidden (volume otherwise); repeats pass | `zap:move:-1`/`zap:move:1`; repeats pass |
-| `PGUP` / `PGDWN` | `zap:up`/`zap:down` | unchanged — the dedicated keys still mean "the next channel", which in a list is the next row down (Dart decides that) |
+| `PGDWN` / `PGUP` | `zap:up`/`zap:down` | unchanged — `zap:up` is still "the next channel", so Page Down walks the cursor down the list and Page Up up it (Dart decides that) |
 | `ENTER` / `KP_ENTER` | commits a pending digit buffer | `zap:activate`; repeat swallowed |
 | `ESC` / `BS` | clears a pending digit buffer, else the Back ladder | `zap:back`; repeat swallowed |
 | digits, `KP` digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor instead of zapping) |
@@ -1720,6 +1723,27 @@ reconciliation, no VOD session. `PlayerScreen.onZapChannel` is provided by the h
 (`_ChannelListScreenState._resolveZapTarget`) and bound only over the live tab; the constructor
 stays null for VOD, catch-up, and every route that isn't channel-list-borne, so a `null`
 `onZapChannel` is also the "VOD session" guard.
+
+- **Page Down advances, Page Up steps back — deliberately *against* the channel keys.** The
+  commands are unchanged and remain the authority on what they mean: `zap:up`/`channelUp` is the
+  next channel (`_index + 1`, the next row *down* the launch list) and `zap:down`/`channelDown` is
+  the previous one, both wrapping. What the swap changes is only **which key sends which command**,
+  on all four surfaces: `KEYCODE_PAGE_DOWN`/`VK_NEXT`/`PGDWN`/`pageDown` now send `zap:up`, and
+  `KEYCODE_PAGE_UP`/`VK_PRIOR`/`PGUP`/`pageUp` send `zap:down`. The reason is that on a remote
+  Page Down is the "step forward" gesture — the scrollbar one — and on a desktop keyboard the page
+  pair is the *only* stand-in a PC has for a remote's channel keys, where "up" carries no channel
+  meaning worth preserving. `CHANNEL_UP`/`CHANNEL_DOWN` keep their own direction untouched, so the
+  app now has two keys meaning "next" (`CHANNEL_UP`, Page Down) and two meaning "previous"
+  (`CHANNEL_DOWN`, Page Up); that is a deliberate duplicate, not a half-applied change.
+  The arrows are untouched as well, and still differ: the **closed** arrow keys zap
+  (`channelUp`/`channelDown`), while the **open quick list** turns them into literal cursor moves
+  (`zap:move:-1`/`zap:move:1`) because there Up has to move the highlight the way it looks.
+- **The quick list inherits the new direction for free, and that is the other half of why it
+  reads right.** Its page keys resolve through the *same* `zap:up`/`zap:down` commands into
+  `moveQuickList(±1)`, so Page Down now walks the cursor **down** the list and Page Up up it. Before
+  the swap both page keys moved the highlight against the way the key reads, which was the one
+  place the list contradicted the scrollbar. The four key rings therefore agree without any of them
+  deriving the direction — Dart's command semantics are still the single place it is decided.
 
 - **The resolver is state-based, never reuse of the route's original widget fields.** The
   `_current*` mirrors already exist so a single live route survives probes/episodes without a

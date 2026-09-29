@@ -1,4 +1,4 @@
-# Sources — EPG guides, subscription expiry, the M3U→Xtream upgrade, and Stalker adult genres
+# Sources — EPG guides, subscription expiry, stable source identity, the M3U→Xtream upgrade, and Stalker adult genres
 
 Detail for two provider-layer areas whose rules are summarised in CLAUDE.md: how a subscription
 expiry is obtained per provider, and how an M3U source that is really an Xtream panel gets
@@ -329,6 +329,43 @@ visit *without calling the provider*, so the provider's own "here is why" loggin
 — producing an exported log with a stubbornly unknown badge and, correctly but uselessly, nothing
 at all about it. Nothing else could dislodge it, since an edit that leaves the credentials alone
 keeps the same fingerprint.
+
+## Stable source identity, and the migration that gets you there
+
+A source's cache namespace is `SourceConfig.id`, a stable uuid, not a key derived from the
+credentials — so rotating a password, or the host string being normalized differently, cannot orphan
+a 250k-channel cache. Installs made before that change wrote their rows under
+`SourceConfig.legacyCacheId` (for Xtream, `xtream:<host>|<username>`), and
+`migrateAllSourceIdentities` moves that namespace forward.
+
+It runs from `main()` **before `runApp`**, and the Windows window is shown on the *first Dart frame*
+(`windows/runner/flutter_window.cpp`, `SetNextFrameCallback`). So anything this migration throws
+produces no window at all — the process starts, does nothing visible, and never reaches a frame that
+could report why. Two rules keep that from happening, and both are load-bearing:
+
+- **The destination namespace is not guaranteed empty, and the stable one wins.** The same provider
+  can exist under a legacy key *and* a stable id — a re-added source, or an earlier run that
+  migrated some tables and not others — leaving both holding the same category and channel ids. A
+  plain `UPDATE ... SET source_id` has nowhere to put the duplicate and violates the table's
+  `(source_id, id)` primary key; that is exactly what bricked one install with
+  `UNIQUE constraint failed: categories.source_id, categories.id`. `migrateSourceNamespace` now
+  deletes a legacy row whose key already exists under the destination — it duplicates a row that is
+  already in use — and still moves every legacy row that does not collide. The key columns are read
+  from `PRAGMA table_info` at run time rather than hardcoded, because they differ per table
+  (`(source_id, id)`, `(source_id, kind, item_id)`, `(source_id, kind, parent_id, category_id)`, …)
+  and a drifted key would silently stop protecting the one path that must not throw. `programmes` has
+  no primary key at all, so it is never probed. The same rule applies to the `sources` row itself,
+  whose primary key *is* `id`.
+- **A repair is never a reason to refuse to start.** `migrateAllSourceIdentities` logs (redacted) and
+  skips a source it cannot migrate rather than aborting the loop, and `main()` wraps the call in a
+  last-resort `try`/`catch` — the cache it repairs is rebuilt from the provider anyway, so failing
+  to repair it costs a fetch, not a launch. Do not move this call after `runApp` and do not let it
+  throw out of `main()`.
+
+`favorites_outbox` (schema v14) was missing from the moved-table list and now moves with everything
+else: it is exactly the table the cloud delta push reads, so a source whose id migrated would
+otherwise have had its pending favorite changes sent under an id the profile no longer has. Pinned by
+the `stable identity migration` group in `test/persistence_test.dart`.
 
 ## M3U → Xtream upgrade
 

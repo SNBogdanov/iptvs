@@ -707,8 +707,19 @@ class AppDatabase {
   /// Atomically moves every cache and user-state row from the pre-PR4
   /// credential-derived namespace to the stable [SourceConfig.id] namespace.
   ///
-  /// A destination collision aborts and rolls back the complete transaction;
-  /// callers must run this before publishing or caching rows under [toSourceId].
+  /// **Collision-safe, because the destination is not guaranteed empty.** The
+  /// same provider can exist under a credential-derived legacy key *and* under a
+  /// stable id — a re-added source, or an earlier run that migrated some tables
+  /// and not others — leaving both namespaces holding the same category,
+  /// channel and EPG ids. The plain `UPDATE ... SET source_id` had nowhere to
+  /// put the duplicate and violated the table's `(source_id, id)` primary key,
+  /// and since this runs from `main()` *before* `runApp` the exception aborted
+  /// startup outright: no first frame, so no window and no error on screen at
+  /// all. The rule now is that the **stable namespace wins**: a legacy row whose
+  /// key already exists under [toSourceId] is dropped (it duplicates a row that
+  /// is already in use), and every legacy row that does not collide is still
+  /// moved. The whole move stays one transaction, so a failure anywhere rolls
+  /// back to the pre-migration state.
   Future<void> migrateSourceNamespace(
     String fromSourceId,
     String toSourceId,
@@ -726,8 +737,22 @@ class AppDatabase {
         'media_page_state',
         'external_metadata',
         'favorites',
+        // Pending favorite changes awaiting a cloud push. It was left out of
+        // this list, so a source whose id was migrated kept its outbox under the
+        // dead legacy id — and the delta push reads exactly this table, so it
+        // would have sent favorites for a source the profile no longer has.
+        'favorites_outbox',
         'playback_positions',
       ]) {
+        final keys = await _keyColumnsOtherThanSource(txn, table);
+        if (keys.isNotEmpty) {
+          final match = keys.map((k) => 'd."$k" = "$table"."$k"').join(' AND ');
+          await txn.rawDelete(
+            'DELETE FROM "$table" WHERE source_id = ? AND EXISTS ('
+            'SELECT 1 FROM "$table" AS d WHERE d.source_id = ? AND $match)',
+            [fromSourceId, toSourceId],
+          );
+        }
         await txn.update(
           table,
           {'source_id': toSourceId},
@@ -735,13 +760,52 @@ class AppDatabase {
           whereArgs: [fromSourceId],
         );
       }
-      await txn.update(
+      // `sources.id` is itself the primary key, so the same rule applies one
+      // level up: keep the stable row, drop the legacy duplicate instead of
+      // colliding on it.
+      final targetExists = (await txn.query(
         'sources',
-        {'id': toSourceId},
+        columns: const ['id'],
         where: 'id = ?',
-        whereArgs: [fromSourceId],
-      );
+        whereArgs: [toSourceId],
+        limit: 1,
+      )).isNotEmpty;
+      if (targetExists) {
+        await txn.delete('sources', where: 'id = ?', whereArgs: [fromSourceId]);
+      } else {
+        await txn.update(
+          'sources',
+          {'id': toSourceId},
+          where: 'id = ?',
+          whereArgs: [fromSourceId],
+        );
+      }
     });
+  }
+
+  /// The primary-key columns of [table] other than `source_id`, in key order,
+  /// or an empty list when `source_id` is not part of the key.
+  ///
+  /// Read from the schema rather than hardcoded: the keys differ per table
+  /// (`(source_id, id)`, `(source_id, kind, item_id)`, `(source_id, kind,
+  /// parent_id, category_id)`, …), and a hardcoded key that drifts from the
+  /// schema would silently stop protecting the one path that must not throw. An
+  /// empty result means writing `source_id` cannot collide at all — `programmes`
+  /// has no primary key — so the caller skips the delete entirely.
+  Future<List<String>> _keyColumnsOtherThanSource(
+    DatabaseExecutor txn,
+    String table,
+  ) async {
+    final info = await txn.rawQuery('PRAGMA table_info("$table")');
+    final pk = <Map<String, Object?>>[
+      for (final row in info)
+        if (((row['pk'] as int?) ?? 0) > 0) row,
+    ]..sort((a, b) => (a['pk'] as int).compareTo(b['pk'] as int));
+    if (!pk.any((row) => row['name'] == 'source_id')) return const [];
+    return [
+      for (final row in pk)
+        if (row['name'] != 'source_id') row['name'] as String,
+    ];
   }
 
   /// Rewrites legacy raw-URL M3U channel keys to opaque normalized hashes while

@@ -228,11 +228,13 @@ inline ZapKeyDecision DecideZapKey(
       return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
                        : ZapKeyDecision{ZapKeyAction::kActivate};
     case kZapVkPrior:
-      // The dedicated keys keep their list-*order* meaning: "the next
-      // channel" is the next row down, exactly as it is for playback.
-      return ZapKeyDecision{ZapKeyAction::kChannelUp};
-    case kZapVkNext:
+      // The page keys run against the channel keys, deliberately: Page Down
+      // is "step forward" to a remote, the same gesture as a scrollbar, so it
+      // advances and Page Up steps back. `kChannelUp` still *is* the next
+      // channel, which in a list is the next row down.
       return ZapKeyDecision{ZapKeyAction::kChannelDown};
+    case kZapVkNext:
+      return ZapKeyDecision{ZapKeyAction::kChannelUp};
     case kZapVkGuide:
       // A dedicated key that did nothing the second time reads as a dead
       // remote, so it toggles — the same rule Dart's `guide` binding applies.
@@ -258,13 +260,15 @@ inline ZapKeyDecision DecideZapKey(
 
   // Unambiguous by construction: Page Up/Down are this surface's stand-in for
   // a remote's CHANNEL_UP/CHANNEL_DOWN, and mean one thing whether the chrome
-  // is up or not. Repeats are allowed — holding the key is how a user scans,
-  // and the 600 ms settle in Dart is what keeps that to one `create_link`.
+  // is up or not. They run against those channel keys on purpose — Page Down
+  // steps forward, the scrollbar gesture. Repeats are allowed: holding the key
+  // is how a user scans, and the 600 ms settle in Dart is what keeps that to
+  // one `create_link`.
   if (virtual_key == kZapVkPrior) {
-    return ZapKeyDecision{ZapKeyAction::kChannelUp};
+    return ZapKeyDecision{ZapKeyAction::kChannelDown};
   }
   if (virtual_key == kZapVkNext) {
-    return ZapKeyDecision{ZapKeyAction::kChannelDown};
+    return ZapKeyDecision{ZapKeyAction::kChannelUp};
   }
   if (virtual_key == kZapVkGuide && quick_list_enabled) {
     // Unambiguous like the two above, so it opens the list whether the chrome

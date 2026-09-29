@@ -768,7 +768,7 @@ frozen mapping applies:
 | Up / Down | `zap:up` / `zap:down` (chrome hidden only) | `zap:move:-1` / `zap:move:1` |
 | Return / `VK_SELECT` | a pending digit buffer only | `zap:activate` |
 | Escape / Backspace | a pending digit buffer, else the Back ladder below | `zap:back`, ahead of the ordinary back branch |
-| Page Up / Page Down | `zap:up` / `zap:down` | unchanged — list *order*, not cursor direction |
+| Page Down / Page Up | `zap:up` / `zap:down` | unchanged — list *order*, so the cursor walks **down** on Page Down |
 | Digits / numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor) |
 | `G` | `zap:list` | `zap:close` |
 
@@ -786,7 +786,8 @@ Repeats: the cursor arrows repeat (holding one is how a long list is scanned, an
 clamps rather than wraps); every other list key is **swallowed** on repeat — consumed with no
 command, never let through — so a held key cannot leak into the overlay's own focus ring. `G` is
 this surface's stand-in for a remote's `GUIDE`, which has no Win32 virtual-key code at all: the
-same relationship Page Up/Page Down have with `CHANNEL_UP`/`CHANNEL_DOWN`, chosen against the
+same kind of stand-in the page keys make for a remote's channel keys, which is also why they run
+*against* `CHANNEL_UP`/`CHANNEL_DOWN` instead of mirroring them, chosen against the
 letters this screen already uses (F/M/I/S) and toggling, because a dedicated key that does
 nothing the second time reads as a dead remote.
 
@@ -892,7 +893,7 @@ the policy is consulted per press, so an arrow reverts to seek/volume the instan
 | D-pad Left | Yes | opens the list (`zap:list`); repeat swallowed | one rung up (`zap:back`); repeat swallowed |
 | D-pad Right | Yes | previous channel; repeat swallowed | descend (`zap:descend`); repeat swallowed |
 | D-pad Up / Down | Yes | channel up/down; repeats pass | move the highlight ∓1; repeats pass |
-| `PGUP` / `PGDWN` | No | channel up/down | unchanged — "the next channel" is the next row down |
+| `PGDWN` / `PGUP` | No | next / previous channel (Page Down advances) | unchanged — `zap:up` is the next channel, so Page Down moves the highlight down |
 | Digits, numpad digits | No | number entry | number entry (Dart moves the cursor) |
 | Enter / numpad Enter | No | commits a pending number | activates the selected row |
 | `ESC` / Backspace | No | clears a pending number, else the Back ladder | one rung up, ahead of the ladder |

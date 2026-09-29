@@ -7,6 +7,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'data/app_database.dart';
 import 'data/cloud_config.dart';
 import 'data/device_class.dart';
+import 'data/diagnostics_log.dart';
+import 'data/net.dart' show redactText;
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
@@ -53,7 +55,23 @@ Future<void> main() async {
     detectDeviceClass(),
     _initialiseCloud(),
   ).wait;
-  await migrateAllSourceIdentities(db, sources);
+  // Repairs the pre-PR4 cache namespaces, but it is an optimisation of existing
+  // state, never a prerequisite for the UI: the repository rebuilds and re-keys
+  // rows from the provider on its own. So it must not be able to stop the first
+  // frame, and the window is shown *on* the first Dart frame — the original
+  // version let a single unresolvable legacy collision throw out of `main()`,
+  // so no frame was ever produced and the app looked like it would not start at
+  // all. `migrateAllSourceIdentities` already swallows a per-source failure;
+  // this is the last-resort guard for anything else it might throw.
+  try {
+    await migrateAllSourceIdentities(db, sources);
+  } catch (error) {
+    DiagnosticsLog.instance.addAndPrint(
+      'boot',
+      'source identity migration skipped: ${error.runtimeType}: '
+      '${redactText('$error')}',
+    );
+  }
   runApp(IptvApp(db: db, store: store));
 }
 

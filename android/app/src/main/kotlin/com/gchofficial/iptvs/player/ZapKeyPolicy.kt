@@ -151,9 +151,20 @@ object ZapKeyPolicy {
         when (keyCode) {
             // Unambiguous by construction: a dedicated remote key means one
             // thing whether the chrome is up or not.
-            KEYCODE_CHANNEL_UP, KEYCODE_PAGE_UP ->
+            KEYCODE_CHANNEL_UP ->
                 return ZapKeyDecision(ZapKeyAction.ChannelUp)
-            KEYCODE_CHANNEL_DOWN, KEYCODE_PAGE_DOWN ->
+            KEYCODE_CHANNEL_DOWN ->
+                return ZapKeyDecision(ZapKeyAction.ChannelDown)
+            // The page keys run **against** the channel keys, and deliberately:
+            // Page Down is "step forward" to a remote, the same gesture as a
+            // scrollbar, so it advances the zap cursor while Page Up steps
+            // back. What the command *means* is untouched — `ChannelUp` is
+            // still the next channel — and because this branch sits above the
+            // quick-list one, the open list resolves the same command into a
+            // cursor move that now runs the way the key reads.
+            KEYCODE_PAGE_DOWN ->
+                return ZapKeyDecision(ZapKeyAction.ChannelUp)
+            KEYCODE_PAGE_UP ->
                 return ZapKeyDecision(ZapKeyAction.ChannelDown)
             KEYCODE_LAST_CHANNEL ->
                 // Holding it would toggle back and forth; one press, one swap.

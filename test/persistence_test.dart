@@ -12,7 +12,9 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/secret_locator_vault.dart';
+import 'package:iptvs/data/source_identity_migration.dart';
 import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/sources/source_identity.dart';
 
 import 'support/historical_database_fixtures.dart';
@@ -1619,6 +1621,108 @@ void main() {
       );
       await db.close();
     });
+
+    test('keeps the stable namespace when a legacy row collides', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      const legacy = 'xtream:http://provider.invalid|old-user';
+      const stable = 'stable-source-uuid';
+      final now = DateTime.now();
+
+      // Both namespaces describe the same provider, so they carry the same ids:
+      // legacy `news`/`42` and stable `news`/`42`. Only the stable copy may
+      // survive, and the legacy rows that do not collide (`sports`/`99`) must
+      // still move. This is the shape that used to throw a UNIQUE violation out
+      // of `main()` and stop the app from ever producing a first frame.
+      await db.replaceLibrary(
+        legacy,
+        'Provider',
+        const [
+          Category(id: 'news', title: 'News'),
+          Category(id: 'sports', title: 'Sports'),
+        ],
+        const [
+          Channel(id: '42', name: 'Legacy 42', categoryId: 'news'),
+          Channel(id: '99', name: 'Legacy 99', categoryId: 'sports'),
+        ],
+      );
+      await db.replaceEpg(legacy, [
+        Programme(
+          channelId: '42',
+          start: now.subtract(const Duration(minutes: 5)),
+          stop: now.add(const Duration(minutes: 25)),
+          title: 'Legacy Now',
+        ),
+      ]);
+      await db.setFavorite(legacy, ContentKind.live, '42', true);
+
+      await db.replaceLibrary(
+        stable,
+        'Provider',
+        const [Category(id: 'news', title: 'News')],
+        const [Channel(id: '42', name: 'Stable 42', categoryId: 'news')],
+      );
+
+      await db.migrateSourceNamespace(legacy, stable);
+
+      expect(
+        {for (final c in await db.readChannels(stable)) c.id: c.name},
+        {'42': 'Stable 42', '99': 'Legacy 99'},
+      );
+      expect(await db.readCategories(stable), hasLength(2));
+      expect(await db.readChannels(legacy), isEmpty);
+      expect(await db.readCategories(legacy), isEmpty);
+      expect(await db.readFavoriteIds(stable, ContentKind.live), {'42'});
+      // The outbox rides along (it used to be left behind under the dead id).
+      expect(
+        (await db.readFavoritesOutbox()).map((e) => e.sourceId).toSet(),
+        {stable},
+      );
+      // The collided channel keeps the stable row but the (non-colliding) EPG
+      // moves, so the stable namespace ends up with a working guide.
+      expect((await db.nowNext(stable, now)).now['42']?.title, 'Legacy Now');
+      await db.close();
+    });
+
+    test(
+      'migrateAllSourceIdentities survives a colliding legacy namespace',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        const config = SourceConfig(
+          id: 'stable-uuid',
+          kind: SourceKind.xtream,
+          label: 'Provider',
+          fields: {
+            'host': 'http://provider.invalid',
+            'username': 'old-user',
+            'password': 'p',
+          },
+        );
+        final legacy = config.legacyCacheId;
+        expect(legacy, isNot(config.id));
+        await db.replaceLibrary(
+          legacy,
+          'Provider',
+          const [Category(id: 'news', title: 'News')],
+          const [Channel(id: '42', name: 'Legacy 42', categoryId: 'news')],
+        );
+        await db.replaceLibrary(
+          config.id,
+          'Provider',
+          const [Category(id: 'news', title: 'News')],
+          const [Channel(id: '42', name: 'Stable 42', categoryId: 'news')],
+        );
+
+        // The boot path: must complete rather than throw.
+        await migrateAllSourceIdentities(db, [config]);
+
+        expect(
+          (await db.readChannels(config.id)).map((c) => c.name),
+          contains('Stable 42'),
+        );
+        expect(await db.readChannels(legacy), isEmpty);
+        await db.close();
+      },
+    );
 
     test(
       'rewrites legacy M3U URL keys without losing favorites or EPG',

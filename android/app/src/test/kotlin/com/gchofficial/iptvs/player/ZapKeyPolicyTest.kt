@@ -85,12 +85,14 @@ class ZapKeyPolicyTest {
                 ZapKeyAction.ChannelDown,
                 decide(ZapKeyPolicy.KEYCODE_CHANNEL_DOWN, controlsVisible = visible).action,
             )
+            // The page keys run against the channel keys: Page Down is the
+            // "step forward" gesture, so it advances the zap cursor.
             assertEquals(
-                ZapKeyAction.ChannelUp,
+                ZapKeyAction.ChannelDown,
                 decide(ZapKeyPolicy.KEYCODE_PAGE_UP, controlsVisible = visible).action,
             )
             assertEquals(
-                ZapKeyAction.ChannelDown,
+                ZapKeyAction.ChannelUp,
                 decide(ZapKeyPolicy.KEYCODE_PAGE_DOWN, controlsVisible = visible).action,
             )
             assertEquals(
@@ -351,15 +353,21 @@ class ZapKeyPolicyTest {
     @Test
     fun `the dedicated keys keep their own meaning with the list open`() {
         // `zap:up`/`zap:down` mean "the next channel" in both states; Dart
-        // reads them as one row in list order while the list is up. Digits
-        // likewise stay digits — Dart moves the cursor with them.
+        // reads them as one row in list order while the list is up — so Page
+        // Down, which is the one that sends `zap:up`, walks the cursor *down*
+        // the list and reads the way it looks. Digits likewise stay digits —
+        // Dart moves the cursor with them.
         assertEquals(
             ZapKeyAction.ChannelUp,
             decide(ZapKeyPolicy.KEYCODE_CHANNEL_UP, quickListOpen = true).action,
         )
         assertEquals(
-            ZapKeyAction.ChannelDown,
+            ZapKeyAction.ChannelUp,
             decide(ZapKeyPolicy.KEYCODE_PAGE_DOWN, quickListOpen = true).action,
+        )
+        assertEquals(
+            ZapKeyAction.ChannelDown,
+            decide(ZapKeyPolicy.KEYCODE_PAGE_UP, quickListOpen = true).action,
         )
         assertEquals(
             ZapKeyAction.PreviousChannel,

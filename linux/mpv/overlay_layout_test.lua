@@ -814,10 +814,10 @@ check(key('UP', false, {chromeVisible = true}) == nil,
   'chrome visible: UP stays volume')
 check(key('RIGHT', false, {chromeVisible = true}) == nil,
   'chrome visible: RIGHT stays seek')
-check(key('PGUP', false, {chromeVisible = true}) == 'zap:up',
-  'PGUP zaps whether the chrome is up or not')
-check(key('PGDWN', false, {chromeVisible = true}) == 'zap:down',
-  'PGDWN zaps whether the chrome is up or not')
+check(key('PGUP', false, {chromeVisible = true}) == 'zap:down',
+  'PGUP zaps whether the chrome is up or not, and steps *back*')
+check(key('PGDWN', false, {chromeVisible = true}) == 'zap:up',
+  'PGDWN zaps whether the chrome is up or not, and steps *forward*')
 check(key('UP', true) == 'zap:up', 'a held UP keeps zapping (that is scanning)')
 local _, right_swallow = key('RIGHT', true)
 check(right_swallow == true, 'a held RIGHT is swallowed, not toggled repeatedly')
@@ -883,9 +883,10 @@ check(open_key('KP_ENTER') == 'zap:activate', 'open: the numpad OK too')
 check(open_key('ESC') == 'zap:back',
   'open: Escape peels a list rung ahead of the Back ladder')
 check(open_key('BS') == 'zap:back', 'open: Backspace does the same')
-check(open_key('PGUP') == 'zap:up',
-  'open: the dedicated channel keys still mean "next channel"')
-check(open_key('PGDWN') == 'zap:down', 'open: and the other way')
+check(open_key('PGUP') == 'zap:down',
+  'open: PGUP steps back — the cursor moves up the list, the way the key reads')
+check(open_key('PGDWN') == 'zap:up',
+  'open: PGDWN steps forward, so the cursor moves down the list')
 check(open_key('4') == 'zap:digit:4', 'open: a digit still enters a number')
 check(open_key('KP4') == 'zap:digit:4', 'open: from the numpad as well')
 check(open_key('g') == 'zap:close', 'open: the guide key closes the list')

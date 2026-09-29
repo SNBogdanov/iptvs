@@ -10,7 +10,7 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
 - [docs/ios.md](docs/ios.md) — **player implemented, nothing shipped to users yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). Compiles, `swift test`, and simulator builds are green; on-device validation (real HDR, real provider headers) is still outstanding. The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
-- [docs/sources.md](docs/sources.md) — the provider layer's intricate corners: Stalker adult ("censored") genres that `get_all_channels` omits, multiple EPG guides per source (the claim rules that decide which guide serves a channel, and why a row union would be wrong), how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove.
+- [docs/sources.md](docs/sources.md) — the provider layer's intricate corners: Stalker adult ("censored") genres that `get_all_channels` omits, multiple EPG guides per source (the claim rules that decide which guide serves a channel, and why a row union would be wrong), how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove — plus the stable-identity namespace migration: why the destination may already be populated, why the **stable** namespace wins a collision, and why it can never block the first frame.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
 - [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (implemented, on-device validation pending), the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
@@ -884,6 +884,22 @@ pragma-based schema parity with a fresh install → seeded-data checks → stabl
 that suite green (and extend the fixtures) whenever the schema changes; pre-v8 branches are
 best-effort dev-era repair paths outside the claim.
 
+**A repair migration must never be able to stop the app from starting.** The one migration that
+runs *before* `runApp` is `migrateAllSourceIdentities`, and the Windows window is shown on the
+**first Dart frame** — so a throw there yields a live process with no window, no frame, and nothing
+on screen to explain it. That is a real report, not a hypothetical: one install held the same
+provider under three `sources` rows (two stable ids and a credential-derived legacy key), so
+`migrateSourceNamespace`'s `UPDATE ... SET source_id` hit
+`UNIQUE constraint failed: categories.source_id, categories.id` and the app "did not start". Two
+invariants now hold, both pinned by the `stable identity migration` group in
+`test/persistence_test.dart`: **the stable namespace wins a collision** (a legacy row whose key
+already exists under the destination is deleted, every non-colliding legacy row still moves, and the
+PK columns are read from `PRAGMA table_info` rather than hardcoded because they differ per table),
+and **failure is non-fatal** (`migrateAllSourceIdentities` logs redacted and skips the source,
+`main()` guards the call as a last resort). Don't move that call after `runApp`, don't let it throw
+out of `main()`, and don't add a moved table to the list without checking the delta push and the
+read paths that key on `source_id`. See docs/sources.md.
+
 ## Player (essentials)
 
 `player_screen.dart` plays a resolved `StreamInfo` via `media_kit`, with native-HDR paths on
@@ -1103,6 +1119,22 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   theme sets `windowLayoutInDisplayCutoutMode=shortEdges` so video reaches into the notch — safe
   only because the Compose overlay insets itself with `safeDrawingPadding()`.
 - **Live zap (PgDn/PgUp) swaps channels inside the fullscreen player on the same engine.**
+  **Page Down advances and Page Up steps back, deliberately *against* `CHANNEL_UP`/`CHANNEL_DOWN`**
+  (which keep their own direction — so the app has two keys meaning "next" and two meaning
+  "previous", on purpose). The *commands* are the authority on meaning and are unchanged:
+  `zap:up`/`channelUp` is the next channel (`_index + 1` — the next row *down* the launch list) and
+  `zap:down`/`channelDown` the previous one, both wrapping. Only the **key→command** mapping was
+  swapped, identically on all four surfaces (`player_screen.dart`'s `CallbackShortcuts`,
+  Kotlin's `ZapKeyPolicy`, C++ `zap_key_policy.h`, Lua `zap_key_command`): `pageDown`/`PGDWN`/
+  `VK_NEXT`/`KEYCODE_PAGE_DOWN` → `zap:up`, and `pageUp`/`PGUP`/`VK_PRIOR`/`KEYCODE_PAGE_UP` →
+  `zap:down`. The reason is the remote's own idiom — Page Down is "step forward", the scrollbar
+  gesture — and on a desktop keyboard the page pair is the *only* stand-in for a remote's channel
+  keys, where "up" has no channel meaning to preserve. The arrows are untouched, and still differ
+  between states: closed they zap, open (quick list) they become literal `zap:move:∓1` moves. The
+  quick list's page keys inherit the new direction through the same commands, so Page Down now
+  moves its highlight **down** — before the swap it moved against the way the key reads. Don't
+  "fix" one surface's pair without the other three; the frozen command vocabulary is unchanged, so
+  the direction lives in exactly one place per surface and must agree across all of them.
   `PlayerScreen.onZapChannel` is a host callback (`channel_list_screen._resolveZapTarget`) over the
   currently-visible list; the pure cursor is `liveZapIndex` (wrap at both ends, pinned by
   `test/live_zap_test.dart`). The target is applied by swapping the route's `_current*` mirrors and

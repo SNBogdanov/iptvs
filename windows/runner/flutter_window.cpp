@@ -3743,6 +3743,14 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case 'm':
       command = "miniPlayer";
       break;
+    // Both page keys are normally claimed far above, by `DecideZapKey`, which
+    // returns before this switch is ever reached. These two cases are the
+    // legacy routing and they are **inert**: `zapDown`/`zapUp` are not the
+    // shared vocabulary (`parseZapCommand` reads `zap:up`/`zap:down`), so
+    // Dart acts on neither, which is why the strings can disagree with the key
+    // ring below without anything breaking. The direction is recorded anyway
+    // so nobody re-arms this path the wrong way round: **Page Down advances**
+    // and Page Up steps back, so the next channel is the `zapUp` *string* here.
     case VK_NEXT:   // PgDn: next live channel
       command = "zapDown";
       break;

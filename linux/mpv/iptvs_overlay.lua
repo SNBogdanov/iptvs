@@ -1603,11 +1603,13 @@ local function zap_key_command(key, is_repeat)
             if is_repeat then return nil, true end
             return 'zap:descend', false
         end
-        -- The dedicated channel keys keep meaning "the next channel", which
-        -- in a list is the next row *down* — Dart decides that, the same as
-        -- it decides the arrows mean ∓1 (docs/tv-navigation.md).
-        if key == 'PGUP' then return 'zap:up', false end
-        if key == 'PGDWN' then return 'zap:down', false end
+        -- The page keys run against the channel keys, deliberately: Page Down
+        -- is "step forward" to a remote, the same gesture as a scrollbar, so
+        -- it advances and Page Up steps back. `zap:up` still means the next
+        -- channel — the next row *down* in a list — Dart decides that, the
+        -- same as it decides the arrows mean ∓1 (docs/tv-navigation.md).
+        if key == 'PGDWN' then return 'zap:up', false end
+        if key == 'PGUP' then return 'zap:down', false end
         if key == 'ENTER' or key == 'KP_ENTER' then
             if is_repeat then return nil, true end
             return 'zap:activate', false
@@ -1631,10 +1633,12 @@ local function zap_key_command(key, is_repeat)
     end
 
     -- Unambiguous by construction: a dedicated key means one thing whether
-    -- the chrome is up or not. Repeats are fine — holding is how a user
-    -- scans, and Dart's 600 ms settle keeps that to one `create_link`.
-    if key == 'PGUP' then return 'zap:up', false end
-    if key == 'PGDWN' then return 'zap:down', false end
+    -- the chrome is up or not, and the page keys step forward on Page Down
+    -- and back on Page Up (see the list-open branch above for why). Repeats
+    -- are fine — holding is how a user scans, and Dart's 600 ms settle keeps
+    -- that to one `create_link`.
+    if key == 'PGDWN' then return 'zap:up', false end
+    if key == 'PGUP' then return 'zap:down', false end
     -- Linux's stand-in for the `GUIDE` key Android reads off a remote: a
     -- dedicated key, so like the two above it means one thing whether the
     -- chrome is up or not, and it toggles (the close half is in the

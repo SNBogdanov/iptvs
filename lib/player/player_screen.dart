@@ -3970,8 +3970,10 @@ class _PlayerScreenState extends State<PlayerScreen>
               // Over an open quick list the arrows move the **cursor**, and
               // they move it the way it looks: Up is one row up the list
               // (`zap:move:-1`), not "channel up", which is the next row
-              // *down*. The dedicated CHANNEL_UP/PAGE_UP keys keep their own
-              // list-order meaning — see `_handleQuickListCommand`.
+              // *down*. The dedicated page keys reach the list through the
+              // ordinary commands instead, so Page Down walks the cursor down
+              // — see the `pageDown` binding below and
+              // `_handleQuickListCommand`.
               if (_zapArrowKeysActive &&
                   _handleZapInput(
                     _zapListOpen
@@ -4001,11 +4003,22 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (_zapDirectKeysActive) ...{
             const SingleActivator(LogicalKeyboardKey.channelUp): () =>
                 _handleZapInput(const ZapCommand(ZapCommandKind.channelUp)),
-            const SingleActivator(LogicalKeyboardKey.pageUp): () =>
-                _handleZapInput(const ZapCommand(ZapCommandKind.channelUp)),
             const SingleActivator(LogicalKeyboardKey.channelDown): () =>
                 _handleZapInput(const ZapCommand(ZapCommandKind.channelDown)),
+            // The page keys run **against** the channel keys, and deliberately:
+            // Page Down is "step forward" to a remote, the same gesture as a
+            // scrollbar, so it advances the zap cursor while Page Up steps
+            // back. The two families answer the same question from opposite
+            // ends of the remote, and only the page pair is a stand-in for
+            // CHANNEL_UP/DOWN on a keyboard, where "up" has no channel
+            // meaning to preserve. What the *command* means is untouched —
+            // `channelUp` is still the next channel — and because the open
+            // quick list resolves the same commands through
+            // `moveQuickList(±1)`, its page keys now move the cursor the way
+            // they look, which is the other half of why this reads right.
             const SingleActivator(LogicalKeyboardKey.pageDown): () =>
+                _handleZapInput(const ZapCommand(ZapCommandKind.channelUp)),
+            const SingleActivator(LogicalKeyboardKey.pageUp): () =>
                 _handleZapInput(const ZapCommand(ZapCommandKind.channelDown)),
             const SingleActivator(LogicalKeyboardKey.mediaLast): () =>
                 _handleZapInput(
