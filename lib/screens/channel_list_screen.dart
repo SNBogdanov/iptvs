@@ -334,6 +334,11 @@ enum PreviewReturnAction {
   /// Resume a same-channel preview that was merely paused.
   resumePaused,
 
+  /// The session zapped away from the launch channel: stop the preview (which
+  /// is either the launch channel or an adopted engine in an unknown state)
+  /// and start it fresh on the channel the session **ended** on.
+  restartOnEndedChannel,
+
   /// Nothing to reconcile.
   none,
 }
@@ -346,10 +351,12 @@ enum PreviewReturnAction {
 /// launch channel, **no** resume is correct. Resuming would put the channel
 /// the user navigated away from back in the panel — captioned as if it were
 /// the one they were just watching — and on an adopted engine it is also the
-/// thing still holding a single-connection account's only slot. It outranks
-/// every resume branch, including the cross-engine restart, and is checked
-/// after only the two cases that describe a player which can no longer be
-/// used at all.
+/// thing still holding a single-connection account's only slot. Wherever the
+/// un-zapped session would have brought a preview back, a zapped one
+/// **restarts it on the ended channel** instead (stop first, then resolve, for
+/// the single-connection reason), so backing out looks the same whether or not
+/// the user zapped. It is checked after only the two cases that describe a
+/// player which can no longer be used at all.
 PreviewReturnAction decidePreviewReturn({
   required bool hotSwapped,
   required bool resumePreviewOnReturn,
@@ -360,17 +367,20 @@ PreviewReturnAction decidePreviewReturn({
   if (hotSwapped) return PreviewReturnAction.discardPlayer;
   // Phone sheet handoff: nothing shows the preview after fullscreen.
   if (!resumePreviewOnReturn) return PreviewReturnAction.stop;
-  if (zapped) return PreviewReturnAction.stop;
+  final PreviewReturnAction resume;
   if (decision.stopsAndResolvesFresh) {
-    return PreviewReturnAction.restartSameChannel;
+    resume = PreviewReturnAction.restartSameChannel;
+  } else if (decision.seamless && previewHasStream) {
+    resume = PreviewReturnAction.resumeAdopted;
+  } else if (decision.pausesPreview && previewHasStream) {
+    resume = PreviewReturnAction.resumePaused;
+  } else {
+    resume = PreviewReturnAction.none;
   }
-  if (decision.seamless && previewHasStream) {
-    return PreviewReturnAction.resumeAdopted;
-  }
-  if (decision.pausesPreview && previewHasStream) {
-    return PreviewReturnAction.resumePaused;
-  }
-  return PreviewReturnAction.none;
+  if (!zapped) return resume;
+  return resume == PreviewReturnAction.none
+      ? PreviewReturnAction.stop
+      : PreviewReturnAction.restartOnEndedChannel;
 }
 
 /// Lists a source's channels with in-memory search + category filtering, plus
@@ -2082,6 +2092,26 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       };
   }
 
+  /// A session the quick list re-ranged ends on a channel from the range it
+  /// was re-ranged *to*, which the list it launched from may not contain —
+  /// restoring selection there fell back to the first row. Follow the session
+  /// into its category so the row it ended on is the one selected.
+  ///
+  /// Only an active-source category is followed. The cross-source Favorites
+  /// range re-ranges by *owning source*, which is not a category this list
+  /// has; every row of those sub-ranges is still in the view it launched from.
+  void _followZapRange(LiveZapController zap) {
+    if (!zap.zapped || !zap.reRanged) return;
+    if (_tab != ContentKind.live) return;
+    if (_categoryId == kAllSourcesFavoritesCategoryId) return;
+    final id = zap.rangeCategoryId;
+    if (id.startsWith(_kZapSourcePrefix)) return;
+    final categoryId = id.isEmpty ? null : id;
+    if (categoryId == _categoryId) return;
+    setState(() => _categoryId = categoryId);
+    _focus.syncCategorySelection(categoryId);
+  }
+
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
     final isWide = isWideLayout(MediaQuery.sizeOf(context));
@@ -2541,6 +2571,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           await _preview.discardPlayer();
         case PreviewReturnAction.stop:
           await _preview.stop(clearSelection: true);
+        case PreviewReturnAction.restartOnEndedChannel:
+          // Stop before starting: whatever the preview holds (the launch
+          // channel, or the adopted engine the zap drove) owns the account's
+          // one connection, and the fresh resolve needs it.
+          final ended = zap.playing;
+          await _preview.stop();
+          if (!mounted) break;
+          await _preview.start(
+            ended.channel,
+            muted: previewWasMuted,
+            from: _repoFor(ended.config),
+            bufferPreset: _bufferPresetForChannel(ended.channel),
+          );
         case PreviewReturnAction.restartSameChannel:
           // Same-channel cross-engine stop is the one stop case that restarts:
           // the preview was stopped only to free the connection/token for the
@@ -2571,6 +2614,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // landing in that window restart the channel underneath the restore — and
       // on the `hotSwapped` branch, restart a player about to be discarded.
       _preview.adoptedByFullscreen = false;
+      _followZapRange(zap);
       _restoreListFocusAfterPlayback();
     } catch (e) {
       if (restorePreviewOnFailure) {
