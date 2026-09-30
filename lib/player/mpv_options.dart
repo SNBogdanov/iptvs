@@ -75,11 +75,20 @@ const Map<String, String> kMpvLogFilter = {
 /// than the native HDR Activity.
 ///
 /// Note: `hwdec` is deliberately **not** here — `media_kit_video`'s
-/// [VideoController] sets `hwdec` itself at creation (default `auto-safe`),
-/// overriding any value set via `setProperty`, so decode mode must be chosen on
-/// the `VideoControllerConfiguration` ([kAndroidPreviewHwdec]) instead. Nor is
+/// [VideoController] sets `hwdec` itself at creation, overriding any value set
+/// via `setProperty`, so decode mode must be chosen on the
+/// [VideoControllerConfiguration] ([kAndroidPreviewHwdec], and
+/// `embeddedHwdec()` off-Android) instead. Nor is
 /// `hdr-compute-peak` — its per-frame GPU histogram is expensive and pointless
 /// here (we tone-map to a fixed SDR target anyway).
+///
+/// "The controller default is `auto-safe`" is true of the **Android**
+/// controller and false of the desktop one, which substitutes `auto`
+/// (`native_video_controller/real.dart`). That difference is invisible from this
+/// package and cost a real regression: reading it as a general default is what
+/// left `hwdec: null` on the Windows fullscreen surface, which bought the
+/// permissive zero-copy path and its green bottom band back. Anything leaving
+/// `hwdec` unset on a surface is now a bug until proven otherwise.
 const Map<String, String> kEmbeddedAndroidVideoOptions = {
   'target-prim': 'bt.709',
   'target-trc': 'bt.1886',

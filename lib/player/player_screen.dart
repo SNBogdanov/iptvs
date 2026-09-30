@@ -18,6 +18,7 @@ import '../sources/source.dart';
 import '../widgets/channel_number_chip.dart';
 import 'channel_number_entry.dart';
 import 'channel_owner.dart';
+import 'hwdec_policy.dart';
 import 'ios_engine.dart';
 import 'live_zap_controller.dart';
 import 'mpv_options.dart';
@@ -621,10 +622,18 @@ class _PlayerScreenState extends State<PlayerScreen>
             VideoController(
               _player,
               configuration: VideoControllerConfiguration(
-                // GNU/Linux defaults to `auto`, which can select fragile
-                // zero-copy paths. Match the proven Windows policy: use the
-                // safest available VA-API/VDPAU path and fall back cleanly.
-                hwdec: Platform.isLinux ? 'auto-safe' : null,
+                // `embeddedHwdec()`, not a Linux-only literal. media_kit's
+                // *native* controller substitutes `auto` when this is null
+                // (`native_video_controller/real.dart`: `hwdec:
+                // configuration.hwdec ?? 'auto'`) - `auto-safe` is the Android
+                // controller's default, not the desktop one - so the null this
+                // used to pass on Windows silently bought the permissive
+                // zero-copy path and the green bottom band with it, on the
+                // fullscreen surface only: the preview already went through
+                // this policy. The override file/env still wins, and mobile
+                // still gets null so its own controller keeps deriving the
+                // right value.
+                hwdec: embeddedHwdec(),
               ),
             ));
 

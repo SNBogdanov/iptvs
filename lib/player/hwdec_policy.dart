@@ -40,12 +40,23 @@ import 'dart:io' show File, Platform;
 /// is not a setting: it is a diagnostic, not a preference to persist per source
 /// like `bufferPreset`.
 ///
-/// The file exists because the environment variable is easy to lose: it is
-/// inherited only by a process launched *from* the shell that set it, so a
-/// double-click on the exe runs the default policy and the A/B silently tests
-/// nothing — the failure mode being a "verified" conclusion drawn from a run
-/// that never changed anything. Reading a file the user can create in Explorer
-/// has neither problem.
+/// **Every** embedded [VideoController] must ask through here, and the second
+/// one to be missed is the one that bit: the report above covered the windowed
+/// preview *and* the fullscreen surface, the policy was wired into the preview
+/// first, and the fullscreen controller was left passing `hwdec: null` behind a
+/// comment that promised to "match the proven Windows policy" while not doing so
+/// — `Platform.isLinux ? 'auto-safe' : null` is `null` on the platform the band
+/// was reported on. Null means media_kit's native controller substitutes `auto`
+/// (`auto-safe` is the *Android* controller's default), so the band returned
+/// for the one surface a user watches most. Reach for [embeddedHwdec] rather
+/// than a literal, and treat an unset `hwdec` on any surface as a bug.
+///
+/// The marker file rather than the variable alone because the environment
+/// variable is easy to lose: it is inherited only by a process launched *from*
+/// the shell that set it, so a double-click on the exe runs the default policy
+/// and the A/B silently tests nothing — the failure mode being a "verified"
+/// conclusion drawn from a run that never changed anything. Reading a file the
+/// user can create in Explorer has neither problem.
 String? embeddedHwdec() =>
     _overrides()['hwdec'] ??
     ((Platform.isWindows || Platform.isLinux) ? 'auto-safe' : null);

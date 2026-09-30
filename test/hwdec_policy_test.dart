@@ -1,7 +1,15 @@
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, File, Platform;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/hwdec_policy.dart';
+
+/// Every `.dart` under `lib/`, so the guards below see a whole-surface sweep
+/// rather than the two files this bug was found in.
+List<File> _libSources() => Directory('lib')
+    .listSync(recursive: true)
+    .whereType<File>()
+    .where((f) => f.path.endsWith('.dart'))
+    .toList();
 
 void main() {
   // The policy is a function of the platform, so it can only be asserted for
@@ -23,6 +31,68 @@ void main() {
       if (Platform.isWindows || Platform.isLinux) {
         expect(embeddedHwdec(), isNot('auto'));
       }
+    });
+  });
+
+  // The two tests above were green while the band was on screen. The policy
+  // function was never wrong; the *caller* was, and nothing asserted anything
+  // about callers. These are the assertions that were missing.
+  group('hwdec call sites', () {
+    test('no surface leaves hwdec unset', () {
+      // `null` is not a neutral "no opinion" here: media_kit's native
+      // controller reads it as `auto`, and only the Android controller
+      // substitutes `auto-safe` for it. A null on desktop is the bug.
+      final offenders = <String>[];
+      for (final f in _libSources()) {
+        for (final line in f.readAsLinesSync()) {
+          final t = line.trim();
+          if (t.startsWith('//') || t.startsWith('///')) continue;
+          if (RegExp(r'hwdec:\s*null\b').hasMatch(t)) {
+            offenders.add('${f.path}: $t');
+          }
+        }
+      }
+      expect(
+        offenders,
+        isEmpty,
+        reason: 'hwdec: null means `auto` off-Android. Ask embeddedHwdec().',
+      );
+    });
+
+    test('only the policy branches on platform for hwdec', () {
+      // A platform ternary at a call site is how `Platform.isLinux ? 'auto-safe'
+      // : null` shipped: correct-looking, and null on the platform the band was
+      // reported on. The one place allowed to know the platform is the policy.
+      final offenders = <String>[];
+      for (final f in _libSources()) {
+        if (f.path.endsWith('hwdec_policy.dart')) continue;
+        for (final line in f.readAsLinesSync()) {
+          final t = line.trim();
+          if (t.startsWith('//') || t.startsWith('///')) continue;
+          if (RegExp(r'hwdec:\s*Platform\.').hasMatch(t)) {
+            offenders.add('${f.path}: $t');
+          }
+        }
+      }
+      expect(
+        offenders,
+        isEmpty,
+        reason: 'route it through embeddedHwdec(), which owns the mapping',
+      );
+    });
+
+    test('nothing in lib hardcodes the permissive `auto` for hwdec', () {
+      final offenders = <String>[];
+      for (final f in _libSources()) {
+        for (final line in f.readAsLinesSync()) {
+          final t = line.trim();
+          if (t.startsWith('//') || t.startsWith('///')) continue;
+          if (RegExp(r"""hwdec['"]?\s*[:=]\s*['"]auto['"]""").hasMatch(t)) {
+            offenders.add('${f.path}: $t');
+          }
+        }
+      }
+      expect(offenders, isEmpty, reason: '`auto` may pick a zero-copy path');
     });
   });
 }
