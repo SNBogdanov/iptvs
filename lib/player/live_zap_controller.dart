@@ -20,6 +20,8 @@ import 'package:flutter/foundation.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import 'buffer_preset.dart';
+import 'auto_switch.dart';
+import 'channel_dwell.dart';
 import 'channel_number_entry.dart';
 import 'zap_command.dart';
 import 'zap_quick_list.dart';
@@ -99,6 +101,14 @@ abstract class ZapCatalog {
   /// The buffering preset of [entry]'s owning source.
   BufferPreset bufferPresetFor(ZapEntry entry);
 
+  /// How long the auto-switch mode rests on [entry]'s owning source.
+  ///
+  /// Per **owning** source, exactly like [bufferPresetFor] and the aspect mode:
+  /// a cross-source favourite carries a different one from the active source's,
+  /// and a zap that crosses sources therefore brings that source's pace with it
+  /// rather than staying on whichever source the session happened to open on.
+  ChannelDwell dwellFor(ZapEntry entry);
+
   /// A credential-free diagnostics note. Implementations route it to
   /// `DiagnosticsLog`; **never** pass a locator, a header or a logo URL.
   void log(String note);
@@ -166,6 +176,7 @@ class LiveZapController extends ChangeNotifier {
     this.settleDelay = kZapSettleDelay,
     this.digitCommitDelay = kDigitEntryCommitDelay,
     this.messageDuration = kZapMessageDuration,
+    this.autoSwitchTick = kAutoSwitchTick,
   }) : // Stored by reference, not copied: a zap range is the whole catalog on
        // an unfiltered source, and `zapEntriesOf` hands over a *lazy* view
        // precisely so a 250k-channel launch doesn't materialise 250k objects
@@ -193,6 +204,28 @@ class LiveZapController extends ChangeNotifier {
   /// gesture from a partial one.
   final Duration digitCommitDelay;
   final Duration messageDuration;
+
+  /// How often the auto-switch countdown repaints. Injectable only so tests
+  /// need not wait a real second out.
+  final Duration autoSwitchTick;
+
+  /// The auto-switch mode: on/off, the countdown, and the tick that advances
+  /// the cursor.
+  ///
+  /// **Session-scoped and off on open** — an unattended channel walker that
+  /// turned itself on would play sound into a room nobody asked to be filled.
+  ///
+  /// **Its own notifier, deliberately not [notifyListeners].** The zap banner
+  /// restarts its own hide timer on every `bannerRevision` bump, so a
+  /// one-second countdown routed through here would hold that banner up for as
+  /// long as the mode is on. Keeping the two apart is what lets the countdown
+  /// move every second while the banner still behaves like a banner; a surface
+  /// that shows the mode listens to this one, not to the controller.
+  late final AutoSwitch autoSwitch = AutoSwitch(
+    dwell: catalog.dwellFor(playing),
+    tickInterval: autoSwitchTick,
+    onAdvance: channelUp,
+  );
 
   /// **Not final: the quick list can re-range a live session.** Picking a
   /// different category in the quick list replaces the list Up/Down walks —
@@ -376,6 +409,12 @@ class LiveZapController extends ChangeNotifier {
       'digits': numberEntry.digits,
       if (_message != null) 'message': _message,
       'settling': _settling || _settleTimer.pending,
+      // Printed, never derived, for the same reason the badges are: five
+      // surfaces would otherwise each round the remaining time its own way and
+      // disagree by a second. Absent when the mode is off, so a surface that
+      // has never heard of the mode reads an absent key as "nothing to draw".
+      if (autoSwitch.enabled)
+        'autoSwitch': autoSwitchChipLabel(autoSwitch),
       'position': _index + 1,
       'total': _entries.length,
       if (now != null) ...{
@@ -398,6 +437,17 @@ class LiveZapController extends ChangeNotifier {
   /// Applies one member of the shared vocabulary. Returns whether it was
   /// consumed, so a surface can fall through to its ordinary key handling.
   bool handleCommand(ZapCommand command) {
+    // The auto-switch mode is claimed **before** the quick list's dispatch,
+    // because it is the one command here that is not about navigation: it
+    // changes the session's pace, not which row is highlighted, and a list the
+    // user is reading should not have the thing it is browsing start walking
+    // out from under them. It still cannot *move* a channel while the list is
+    // open — the countdown stands down for exactly that — so claiming the
+    // toggle is not a way to sneak a switch past the list.
+    if (command.kind == ZapCommandKind.autoSwitch) {
+      toggleAutoSwitch();
+      return true;
+    }
     // **While the quick list is open it owns navigation.** Nothing here can
     // change channel except an explicit OK on a row: a list on screen that
     // the user is reading must not have channels changing behind it, and the
@@ -406,6 +456,12 @@ class LiveZapController extends ChangeNotifier {
     // channel in list order" — applied to the cursor instead of to playback.
     if (_listOpen) return _handleQuickListCommand(command);
     switch (command.kind) {
+      case ZapCommandKind.autoSwitch:
+        // Claimed above, before [_listOpen] could divert it — unreachable in
+        // practice. Present so the vocabulary stays exhaustively matched, which
+        // is what makes a *future* command a compile error here rather than a
+        // key that silently does nothing. `true`: it is this controller's.
+        return true;
       case ZapCommandKind.channelUp:
         channelUp();
         return true;
@@ -450,6 +506,12 @@ class LiveZapController extends ChangeNotifier {
 
   bool _handleQuickListCommand(ZapCommand command) {
     switch (command.kind) {
+      case ZapCommandKind.autoSwitch:
+        // Claimed by [handleCommand] before it got here: the mode belongs to
+        // the session, not to the highlighted row, so an open list does not
+        // capture it. Unreachable, and `true` if it ever is — see the matching
+        // arm there.
+        return true;
       case ZapCommandKind.openList:
         return true;
       case ZapCommandKind.closeList:
@@ -694,6 +756,9 @@ class LiveZapController extends ChangeNotifier {
     _listEmptyLabel = null;
     _listMode = ZapQuickListMode.channels;
     _channelCursor = _playingIndex >= 0 ? _playingIndex : _index;
+    // The list owns navigation while it is up, so the countdown freezes rather
+    // than running on behind it.
+    _syncAutoSwitch();
     _notify();
   }
 
@@ -707,6 +772,9 @@ class LiveZapController extends ChangeNotifier {
     _listEmptyLabel = null;
     _scheduleEntry = null;
     _schedule = const [];
+    // Resume where the countdown was frozen, not from a fresh full period: a
+    // list the user opened and closed should cost them no time.
+    _syncAutoSwitch();
     _notify();
   }
 
@@ -857,6 +925,9 @@ class LiveZapController extends ChangeNotifier {
     _index = _playingIndex >= 0 ? _playingIndex : 0;
     _channelCursor = _index;
     _listMode = ZapQuickListMode.channels;
+    // The re-range can leave a single row, which is a hold the mode has to
+    // learn about (see [AutoSwitchHold.nothingToSwitch]).
+    _syncAutoSwitch();
     catalog.log(
       'zap quick list re-range category=${category.title} rows=${rows.length}',
     );
@@ -1065,6 +1136,13 @@ class LiveZapController extends ChangeNotifier {
     _hostTarget = null;
     _index = target;
     _clearMessage();
+    // Any channel change — a held key, a list OK, a typed number, or the
+    // auto-switch's own tick — restarts the countdown from a full period. This
+    // is the whole difference between auto-switch being a background feature
+    // and it being a fight: a user who zaps by hand gets a full period to look
+    // at what they chose instead of being pulled off it a moment later.
+    autoSwitch.restart();
+    _syncAutoSwitch();
     _notify();
     if (immediate) {
       _settleTimer.cancel();
@@ -1072,6 +1150,42 @@ class LiveZapController extends ChangeNotifier {
     }
     _settleTimer.schedule(settleDelay, () => unawaited(_settle()));
     return null;
+  }
+
+  /// Re-reads the world the countdown has to stand down for, and hands the
+  /// playing entry's owning source its pace.
+  ///
+  /// Called from every state change the mode cares about rather than having
+  /// the mode watch the controller: each of these is the controller's own state
+  /// and there is exactly one of each, so a second subscription would be a
+  /// second place for the rules to live.
+  void _syncAutoSwitch() {
+    if (_disposed) return;
+    autoSwitch
+      ..adoptDwell(catalog.dwellFor(playing))
+      ..sync(
+        settling: _settling,
+        quickListOpen: _listOpen,
+        entryCount: _entries.length,
+      );
+  }
+
+  /// The `zap:auto` command. Flips the mode and says which way it went, in the
+  /// banner's own transient-message slot — every surface already prints that,
+  /// so the acknowledgement costs no new plumbing and reads the same everywhere.
+  ///
+  /// Returns true when the mode actually turned **on**, which is the one half a
+  /// surface might want to know (to start a pulse, say); the off direction is
+  /// the ordinary case.
+  bool toggleAutoSwitch() {
+    if (_disposed) return false;
+    final on = autoSwitch.toggle();
+    final period = autoSwitch.period.seconds;
+    _showMessage(
+      on ? 'Auto-switch on · ${period}s' : 'Auto-switch off',
+    );
+    _syncAutoSwitch();
+    return on;
   }
 
   Future<void> _settle() async {
@@ -1172,6 +1286,10 @@ class LiveZapController extends ChangeNotifier {
   void _setSettling(bool value) {
     if (_settling == value) return;
     _settling = value;
+    // The countdown stands down for the whole of a settle: a zap is
+    // stop → resolve → play, and the portal is single-connection, so switching
+    // mid-resolve asks it for a second link before the first is back.
+    _syncAutoSwitch();
     _notify();
   }
 
@@ -1206,6 +1324,11 @@ class LiveZapController extends ChangeNotifier {
     _settleTimer.cancel();
     _messageTimer?.cancel();
     _messageTimer = null;
+    // The countdown's own periodic timer has to go before the controller's
+    // super.dispose, exactly like the digit buffer's listener above: a tick
+    // landing after disposal would notify a dead notifier, and a `Timer.periodic`
+    // that is merely forgotten keeps the isolate awake forever.
+    autoSwitch.dispose();
     onStopCurrent = null;
     onPlay = null;
     onChannelChanged = null;

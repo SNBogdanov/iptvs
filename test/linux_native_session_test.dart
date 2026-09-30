@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/buffer_preset.dart';
+import 'package:iptvs/player/channel_dwell.dart';
 import 'package:iptvs/player/linux_native_session.dart';
 import 'package:iptvs/player/live_zap_controller.dart';
 import 'package:iptvs/sources/source.dart';
@@ -348,6 +349,8 @@ class _NullZapCatalog implements ZapCatalog {
   Future<void> persistAspect(ZapEntry entry, String label) async {}
   @override
   BufferPreset bufferPresetFor(ZapEntry entry) => BufferPreset.normal;
+  @override
+  ChannelDwell dwellFor(ZapEntry entry) => kDefaultChannelDwell;
   @override
   void log(String note) {}
   @override

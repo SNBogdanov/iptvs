@@ -77,6 +77,7 @@ class ZapBannerState {
     required this.total,
     this.epgNow,
     this.epgNext,
+    this.autoSwitchLabel,
   });
 
   /// Bumped on every cursor move/digit/message — `LiveZapController
@@ -108,6 +109,20 @@ class ZapBannerState {
   /// playing channel's `epg`.
   final Programme? epgNow;
   final Programme? epgNext;
+
+  /// The auto-switch mode's countdown, already formatted
+  /// (`autoSwitchChipLabel`) — `null` when the mode is off.
+  ///
+  /// **A separate field from [revision], deliberately.** The banner's whole
+  /// behaviour is that it hides: [revision] bumps on a cursor move, a digit or
+  /// a message and the overlay restarts its dwell timer on each bump. A
+  /// countdown that carried its seconds in [revision] would bump it once a
+  /// second and the banner would never go away while the mode was on — so the
+  /// count could not ride in the banner at all. The chip is drawn by a layer
+  /// that does not hide, which is also what a user needs: "is the next switch
+  /// in 4 s or in 40 s?" has to be answerable *while* the chrome is gone,
+  /// because that is exactly the state the answer is most useful in.
+  final String? autoSwitchLabel;
 
   /// `12 · BBC One`, or just the name when the provider gave no number, or
   /// null when there is no name at all to show. Mirrors Kotlin's
@@ -1941,41 +1956,123 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       right: 0,
       bottom: 0,
       child: IgnorePointer(
-        child: AnimatedOpacity(
-          // The fade is the only part of this that goes through [appMotion] —
-          // see [_armZapBanner] for why the 3s dwell itself must not.
-          duration: appMotion(context, const Duration(milliseconds: 180)),
-          opacity: _zapBannerVisible ? 1 : 0,
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              20 + _barInsets.left,
-              0,
-              20 + _barInsets.right,
-              _m.bottomPadBottom + _barInsets.bottom,
-            ),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: AppColors.panel,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            20 + _barInsets.left,
+            0,
+            20 + _barInsets.right,
+            _m.bottomPadBottom + _barInsets.bottom,
+          ),
+          // One anchor for both, stacked — not a second `Positioned` with its
+          // own guessed `top:`. A hard-coded offset below the top bar is the
+          // mistake [_touchChrome]'s doc records (it was wrong by ~74pt the
+          // moment the badges reflowed onto their own row), and this region has
+          // the same problem: the banner's height depends on whether the cursor
+          // has an EPG strip. Sharing the anchor makes overlap *impossible*
+          // rather than merely unlikely, and it is the only arrangement in
+          // which the chip can be visible while the banner is not.
+          //
+          // The card stays in the tree while faded, so the chip keeps a stable
+          // position instead of jumping down each time the banner appears.
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _autoSwitchChip(zap),
+              AnimatedOpacity(
+                // The fade is the only part of this that goes through
+                // [appMotion] — see [_armZapBanner] for why the 3s dwell itself
+                // must not.
+                duration: appMotion(context, const Duration(milliseconds: 180)),
+                opacity: _zapBannerVisible ? 1 : 0,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: AppColors.panel,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _zapIdentityRow(zap),
+                        if (zap.epgNow case final now?) ...[
+                          const SizedBox(height: 10),
+                          _liveEpgStripFor(now, zap.epgNext),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _zapIdentityRow(zap),
-                    if (zap.epgNow case final now?) ...[
-                      const SizedBox(height: 10),
-                      _liveEpgStripFor(now, zap.epgNext),
-                    ],
-                  ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The auto-switch countdown chip.
+  ///
+  /// **Outside [AnimatedOpacity], outside the banner's dwell timer, and outside
+  /// the chrome's auto-hide** — all three on purpose, and they are the same
+  /// decision. The mode is the one thing in this overlay that has to be
+  /// answerable *while nothing is on screen*: a user who cannot see whether the
+  /// timer is running cannot turn it off, and the answer has to survive the
+  /// chrome standing down because "how long until the next switch" is most
+  /// useful exactly when they have stopped touching the controls.
+  ///
+  /// It is also the reason [ZapBannerState.autoSwitchLabel] is a field of its
+  /// own and not part of [ZapBannerState.revision]: a per-second bump of
+  /// `revision` would restart the banner's 3 s hide on every tick and the
+  /// banner would never go away.
+  ///
+  /// Prints the controller's formatted string verbatim — every surface prints
+  /// it and none derives it, so the countdown reads identically on this
+  /// overlay, the Windows GDI overlay and the Lua OSD.
+  Widget _autoSwitchChip(ZapBannerState zap) {
+    final label = zap.autoSwitchLabel;
+    if (label == null || label.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: AppColors.panel,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Not a pause glyph: the countdown runs *and* the channel is
+              // playing, so this names the feature rather than a transport
+              // state. The clock is the honest picture of a timer, and the text
+              // beside it carries the state when it is held.
+              const Icon(
+                Icons.autorenew,
+                size: 14,
+                color: AppColors.accent,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                // Opted out of text scaling deliberately, like the PIN pad's
+                // digit labels: this sits in a fixed-extent region beside a
+                // video, and a 2x-scaled countdown is what pushes the banner
+                // off the bottom of a small window.
+                textScaler: TextScaler.noScaling,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ),

@@ -34,6 +34,10 @@ void main() {
         const ZapCommand(ZapCommandKind.back),
       );
       expect(
+        parseZapCommand('zap:auto'),
+        const ZapCommand(ZapCommandKind.autoSwitch),
+      );
+      expect(
         parseZapCommand('zap:digit:7'),
         const ZapCommand(ZapCommandKind.digit, 7),
       );

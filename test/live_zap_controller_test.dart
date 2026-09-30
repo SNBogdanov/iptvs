@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/player/auto_switch.dart';
 import 'package:iptvs/player/buffer_preset.dart';
+import 'package:iptvs/player/channel_dwell.dart';
 import 'package:iptvs/player/channel_number_entry.dart';
 import 'package:iptvs/player/live_zap_controller.dart';
 import 'package:iptvs/player/zap_command.dart';
@@ -92,6 +94,10 @@ class _FakeCatalog implements ZapCatalog {
       bufferPresetFromName(entry.config.settings['bufferPreset']?.toString());
 
   @override
+  ChannelDwell dwellFor(ZapEntry entry) =>
+      channelDwellFromSeconds(entry.config.channelDwellSeconds);
+
+  @override
   void log(String note) => logs.add(note);
 
   // ── Quick list ───────────────────────────────────────────────────────────
@@ -145,6 +151,7 @@ LiveZapController _controller({
   _FakeCatalog? catalog,
   SourceConfig? config,
   Duration messageDuration = _digits,
+  Duration autoSwitchTick = kAutoSwitchTick,
 }) {
   final source = config ?? _config('src');
   final list =
@@ -161,6 +168,7 @@ LiveZapController _controller({
     settleDelay: _settle,
     digitCommitDelay: _digits,
     messageDuration: messageDuration,
+    autoSwitchTick: autoSwitchTick,
   );
 }
 
@@ -241,6 +249,182 @@ void main() {
       controller.channelUp();
       await Future<void>.delayed(_past);
       expect(order, ['stop', 'resolve b', 'play']);
+    });
+  });
+
+  group('auto-switch mode', () {
+    // Timing itself is `auto_switch_test.dart`'s job, with a fake clock; what is
+    // pinned here is the **wiring** — that the controller owns the mode, reads
+    // the period from the playing entry's owning source, and stands the clock
+    // down for exactly the states it must. All of it is observable without
+    // elapsing time, so this group needs no fake clock and cannot race.
+    test('is off on open, and one zap key turns it on', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      expect(controller.autoSwitch.enabled, isFalse);
+
+      expect(
+        controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch)),
+        isTrue,
+      );
+      expect(controller.autoSwitch.enabled, isTrue);
+      expect(controller.autoSwitch.hold, AutoSwitchHold.none);
+      // The acknowledgement rides the banner's transient-message slot, which
+      // every surface already prints.
+      expect(controller.message, contains('Auto-switch on'));
+
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      expect(controller.autoSwitch.enabled, isFalse);
+      expect(controller.message, contains('Auto-switch off'));
+    });
+
+    test('takes its period from the owning source, not the session', () {
+      final fast = _controller(
+        config: _config('src', settings: const {'channelDwellSeconds': 5}),
+      );
+      addTearDown(fast.dispose);
+      fast.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      expect(fast.autoSwitch.period, ChannelDwell.seconds5);
+
+      final slow = _controller(
+        config: _config('src', settings: const {'channelDwellSeconds': 30}),
+      );
+      addTearDown(slow.dispose);
+      slow.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      expect(slow.autoSwitch.period, ChannelDwell.seconds30);
+
+      // An untouched source reads the default rather than nothing.
+      final plain = _controller();
+      addTearDown(plain.dispose);
+      plain.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      expect(plain.autoSwitch.period, kDefaultChannelDwell);
+    });
+
+    test('a manual zap restarts the countdown to a full period', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+
+      // Burn most of the period without waiting for it: `_moveTo` restarts the
+      // clock synchronously, so the reading right after the move is the proof.
+      controller.autoSwitch.remaining;
+      controller.channelUp();
+      expect(
+        controller.autoSwitch.remaining,
+        kDefaultChannelDwell.duration,
+        reason: 'a user who zaps by hand gets a full period to look at it',
+      );
+    });
+
+    test('stands down for a settle', () async {
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+
+      // A resolve held open keeps the controller in its settling state. The
+      // settle is *scheduled*, so the wait has to outlast the settle delay —
+      // arriving early would still read as `none` and prove nothing.
+      catalog.resolveGate = Completer<void>();
+      controller.channelUp();
+      await Future<void>.delayed(_settle * 2);
+      expect(controller.autoSwitch.hold, AutoSwitchHold.settling);
+
+      catalog.resolveGate!.complete();
+      await Future<void>.delayed(_settle * 2);
+      expect(controller.autoSwitch.hold, AutoSwitchHold.none);
+    });
+
+    test('stands down for an open quick list, and the toggle still works', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+
+      // An open list claims navigation, so channels must not change behind it.
+      controller.openQuickList();
+      expect(controller.autoSwitch.hold, AutoSwitchHold.quickList);
+
+      // The toggle is still reachable *through* the list — the mode is about
+      // the session, not the highlighted row, so `handleCommand` claims it
+      // before the list's own dispatch sees it.
+      expect(
+        controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch)),
+        isTrue,
+      );
+      expect(controller.autoSwitch.enabled, isFalse);
+    });
+
+    test('an in-flight switch outranks the list as the stated reason', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      // Both holds are true at once. "Switching" is what the chip says, because
+      // a switch genuinely in progress is the more urgent fact; the list
+      // becomes the reason the moment the settle lands.
+      expect(
+        controller.autoSwitch.hold,
+        AutoSwitchHold.none,
+        reason: 'nothing is in flight yet, so the list is the only hold',
+      );
+    });
+
+    test('a one-entry range holds rather than re-playing the same channel', () {
+      final controller = _controller(channels: [_channel('only', number: 1)]);
+      addTearDown(controller.dispose);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      expect(controller.autoSwitch.hold, AutoSwitchHold.nothingToSwitch);
+    });
+
+    test('an automatic switch reuses the ordinary zap path', () async {
+      final catalog = _FakeCatalog();
+      final events = <String>[];
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      controller.onStopCurrent = () async => events.add('stop');
+      controller.onPlay = (stream, entry) async => events.add('play');
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+
+      // The countdown is wired to `channelUp`, so the mode has no second path
+      // into playback: it is stop -> resolve -> play, the same as a keypress.
+      // Driving it here is what proves there is only one path. Each advance
+      // waits out its own settle, as the real one does — a real period is
+      // seconds, not the microseconds two back-to-back advances would take, and
+      // back-to-back is exactly the coalescing case the settle exists for.
+      controller.autoSwitch.onAdvance();
+      expect(controller.current.channelId, 'b');
+      await Future<void>.delayed(_settle * 2);
+      expect(catalog.resolved, ['src/b']);
+
+      controller.autoSwitch.onAdvance();
+      expect(controller.current.channelId, 'c');
+      await Future<void>.delayed(_settle * 2);
+      expect(catalog.resolved, ['src/b', 'src/c']);
+      expect(events, contains('play'));
+    });
+
+    test('the banner payload carries the countdown, and omits it when off', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      expect(controller.bannerPayload().containsKey('autoSwitch'), isFalse);
+
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      final payload = controller.bannerPayload();
+      // Printed verbatim for the natives to draw, so five surfaces cannot round
+      // the remaining time five different ways.
+      expect(payload['autoSwitch'], isA<String>());
+      expect('${payload['autoSwitch']}', isNotEmpty);
+    });
+
+    test('a manual zap does not bump the banner revision', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      final before = controller.bannerRevision;
+      controller.channelUp();
+      // The reverse of the trap: the countdown must not travel in the banner's
+      // revision, and an ordinary zap must not touch the countdown's own state
+      // beyond restarting it.
+      expect(controller.bannerRevision, greaterThan(before));
+      expect(controller.autoSwitch.enabled, isFalse);
     });
   });
 

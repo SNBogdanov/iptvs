@@ -738,6 +738,103 @@ void main() {
   // (docs/player.md "The quick list (Phase 6)"). A selection model —
   // one selected index, rows that are not focus targets, an explicit
   // itemExtent — drawn from a pure [ZapQuickListState] and nothing else.
+  group('auto-switch chip', () {
+    testWidgets('draws nothing at all while the mode is off', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(revision: 1, channelName: 'BBC One'),
+      );
+      await tester.pump();
+      // A permanent control that only ever reports absence is clutter, and an
+      // "off" chip is exactly that.
+      expect(find.byIcon(Icons.autorenew), findsNothing);
+    });
+
+    testWidgets('stays up after the chrome and the banner have both hidden', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(
+          revision: 1,
+          channelName: 'BBC One',
+          autoSwitchLabel: '7s',
+        ),
+      );
+      // Hides the chrome and lets the banner's own 3 s dwell run out — the
+      // state the countdown is most useful in, and the one it would be
+      // unreachable in if it shared the banner's fade.
+      await tester.pump(const Duration(seconds: 5));
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        0.0,
+        reason: 'the banner card is gone',
+      );
+      expect(find.text('12 · BBC One'), findsNothing);
+
+      // The chip is a sibling of the fade, not a child of it.
+      expect(find.byIcon(Icons.autorenew), findsOneWidget);
+      expect(find.text('7s'), findsOneWidget);
+    });
+
+    testWidgets('a frozen countdown still says why it is not running', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(
+          revision: 1,
+          channelName: 'BBC One',
+          autoSwitchLabel: '10 s · list open',
+        ),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      // A chip that vanished or went blank while the mode was on is how a user
+      // ends up unable to turn it off.
+      expect(find.text('10 s · list open'), findsOneWidget);
+    });
+
+    testWidgets('never overlaps the banner it sits above', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(
+          revision: 1,
+          channelNumber: 12,
+          channelName: 'BBC One',
+          autoSwitchLabel: '7s',
+        ),
+      );
+      // A fresh revision, so the banner card is up *and* the chip is on screen
+      // at the same moment — the one state in which they could collide.
+      await tester.pump();
+
+      final chip = tester.getRect(find.byIcon(Icons.autorenew));
+      // The identity run is deliberately shared with the bottom bar, so it
+      // matches twice here; scoping to the fade picks the banner's copy, which
+      // is the one the chip could collide with.
+      final banner = tester.getRect(
+        find.descendant(
+          of: find.byType(AnimatedOpacity),
+          matching: find.text('12 · BBC One'),
+        ),
+      );
+      expect(
+        chip.bottom,
+        lessThanOrEqualTo(banner.top),
+        reason: 'one shared anchor stacks them; overlap would be a second '
+            'guessed offset',
+      );
+    });
+  });
+
   group('quick list', () {
     testWidgets('draws the heading, the window and the cursor', (tester) async {
       await pumpOverlay(
@@ -1054,6 +1151,7 @@ ZapBannerState _zap({
   int total = 0,
   Programme? epgNow,
   Programme? epgNext,
+  String? autoSwitchLabel,
 }) => ZapBannerState(
   revision: revision,
   channelNumber: channelNumber,
@@ -1065,6 +1163,7 @@ ZapBannerState _zap({
   total: total,
   epgNow: epgNow,
   epgNext: epgNext,
+  autoSwitchLabel: autoSwitchLabel,
 );
 
 Programme _programme(String title, {int startHour = 20, int stopHour = 21}) =>

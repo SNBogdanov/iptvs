@@ -61,6 +61,19 @@ enum ZapCommandKind {
   /// Set the current channel's favorite state absolutely
   /// ([ZapCommand.value] `1`/`0`).
   favorite,
+
+  /// Turn the auto-switch mode on or off, whichever it currently is.
+  ///
+  /// A **toggle**, not a set: a remote has one spare key for this and no room
+  /// for "on" and "off" as two, and a key whose second press does nothing reads
+  /// as a dead remote. The direction actually taken comes back to the surface
+  /// in the banner message, so nothing has to guess it.
+  ///
+  /// In the vocabulary rather than bound per surface because the mode is Dart's
+  /// to own — the same reason `zap:up` is one string understood by five
+  /// renderers. A surface that bound it privately would have a second copy of
+  /// the on/off state.
+  autoSwitch,
 }
 
 /// A parsed member of the zap vocabulary. [value] is meaningful for
@@ -106,6 +119,8 @@ ZapCommand? parseZapCommand(String? raw) {
       return const ZapCommand(ZapCommandKind.descend);
     case 'zap:back':
       return const ZapCommand(ZapCommandKind.back);
+    case 'zap:auto':
+      return const ZapCommand(ZapCommandKind.autoSwitch);
   }
   if (raw.startsWith('zap:digit:')) {
     final digit = int.tryParse(raw.substring('zap:digit:'.length));

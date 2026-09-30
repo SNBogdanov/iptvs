@@ -24,6 +24,7 @@ import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
 import '../player/aspect_mode.dart' show aspectModeIndexOf;
 import '../player/buffer_preset.dart';
+import '../player/channel_dwell.dart';
 import '../player/live_zap_controller.dart';
 import '../player/player_screen.dart';
 import 'channel_list_chrome.dart';
@@ -3682,6 +3683,10 @@ class _ChannelListZapCatalog implements ZapCatalog {
   @override
   BufferPreset bufferPresetFor(ZapEntry entry) =>
       bufferPresetFromName(entry.config.bufferPresetName);
+
+  @override
+  ChannelDwell dwellFor(ZapEntry entry) =>
+      channelDwellFromSeconds(entry.config.channelDwellSeconds);
 
   @override
   void log(String note) => DiagnosticsLog.instance.add('library', note);

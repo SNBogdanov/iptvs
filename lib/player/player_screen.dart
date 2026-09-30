@@ -11,6 +11,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import 'aspect_mode.dart';
+import 'auto_switch.dart';
 import 'buffer_preset.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
@@ -1095,6 +1096,24 @@ class _PlayerScreenState extends State<PlayerScreen>
     // [LiveZapController.pendingCatchup]).
     zap.onExitRequested = _back;
     zap.addListener(_onZapChanged);
+    // The auto-switch countdown is a **second, separate** subscription, and the
+    // separation is the whole point: it repaints the chip and re-pushes the
+    // banner payload (the natives print the count from it), but it must never
+    // touch `_zapBannerAtMs`. That stamp is what the overlays key their 3 s
+    // banner auto-hide on, so routing the one-per-second tick through
+    // `_onZapChanged` would hold the zap banner open for as long as the mode
+    // was on — the countdown would keep the very banner it sits next to alive
+    // forever. This is why `AutoSwitch` is its own notifier rather than a field
+    // of the zap controller; the two must not share an update path.
+    zap.autoSwitch.addListener(_onAutoSwitchChanged);
+  }
+
+  /// The countdown moved. Repaint, and tell the natives — nothing else.
+  void _onAutoSwitchChanged() {
+    if (!mounted) return;
+    setState(() {});
+    unawaited(_pushZapBanner());
+    unawaited(_pushQuickList());
   }
 
   /// When the zap controller last notified, in epoch milliseconds.
@@ -1192,6 +1211,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       total: zap.entries.length,
       epgNow: guide.now,
       epgNext: guide.next,
+      // Printed by `autoSwitchChipLabel`, and deliberately its own field: the
+      // banner's `revision` is what restarts the hide timer, so a per-second
+      // countdown could not travel in it. The chip is drawn in a layer that
+      // does not hide, so the mode stays answerable with the chrome gone.
+      autoSwitchLabel: zap.autoSwitch.enabled
+          ? autoSwitchChipLabel(zap.autoSwitch)
+          : null,
     );
   }
 
@@ -3665,6 +3691,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     final zap = _zap;
     if (zap != null) {
       zap.removeListener(_onZapChanged);
+      // The countdown's listener goes with it. It is *not* disposed here —
+      // `AutoSwitch` belongs to the controller, which outlives this route and is
+      // the caller's to dispose; dropping the subscription is the whole of what
+      // this route owns, and a mode left running on a popped route is the
+      // controller's business, not a leak this one can prevent.
+      zap.autoSwitch.removeListener(_onAutoSwitchChanged);
       zap.onPlay = null;
       zap.onStopCurrent = null;
     }
@@ -4008,6 +4040,23 @@ class _PlayerScreenState extends State<PlayerScreen>
             // key at all. Same toggle, same chrome-independence. It collides
             // with nothing — this screen binds only F, M, I and S.
             const SingleActivator(LogicalKeyboardKey.keyG): _toggleQuickList,
+            // `Ctrl+Z` — the auto-switch mode's only key, on every surface that
+            // has a keyboard.
+            //
+            // **Ctrl, not a bare `Z`:** this screen already binds `Z` in spirit
+            // via the digit path's neighbours and, more to the point, a bare
+            // letter on a screen with `F`/`M`/`I`/`S`/`G` reads as an
+            // application shortcut the user has to discover; `Ctrl+Z` is the
+            // one chord every desktop already has a muscle memory *and* the one
+            // that is free on every remote and TV keyboard, where Ctrl is never
+            // pressed for anything else. It is deliberately *not* the platform
+            // undo chord, which this screen has no undo stack for.
+            SingleActivator(
+              LogicalKeyboardKey.keyZ,
+              control: true,
+            ): () => _handleZapInput(
+              const ZapCommand(ZapCommandKind.autoSwitch),
+            ),
             for (final entry in kDigitEntryKeys.entries)
               SingleActivator(entry.key): () => _handleZapInput(
                 ZapCommand(ZapCommandKind.digit, entry.value),
