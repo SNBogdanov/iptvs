@@ -23,6 +23,7 @@ import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
+import 'playback_audio_session.dart';
 import 'zap_command.dart';
 import 'zap_quick_list.dart';
 
@@ -359,55 +360,6 @@ class PlaybackContext {
     this.resumeFrom,
   });
 }
-
-/// Device-wide playback audio state (volume + the user's muted choice), shared
-/// by every [PlayerScreen] and the native player surfaces that route through
-/// them.
-///
-/// **Global by design**: a channel change tears down the previous playback —
-/// each fresh route builds a new media_kit [Player] at default volume 100, and
-/// the native surfaces are opened with whatever the last one ended on. Without
-/// a session, muting and then zapping a channel un-mutes it, which is the one
-/// surprise a user reliably reports as a bug.
-///
-/// **The session is the single authority for *intents*, the engine for
-/// *reality*.** A mute or a level is always `record()`ed here explicitly
-/// rather than read back off the engine: mpv's volume events lag or never
-/// arrive on the native surfaces, so a toggle driven by a stale read re-mutes
-/// instead of restoring sound, and a level set through a native slider that
-/// never reached the session reverts on the next zap.
-class PlaybackAudioSession {
-  /// The user's audible volume, 0–100. 0 is only reached through [muted].
-  double volume = 100;
-
-  /// Whether the user has muted. Kept separate from [volume] so a 0 volume is
-  /// recorded as the deliberate status it is, and so nothing silently undoes a
-  /// mute when a level is re-applied.
-  bool muted = false;
-
-  /// The volume to hand to a player: 0 while muted, else [volume].
-  double get applied => muted ? 0 : volume;
-
-  /// Applies the session's state to [player] (mpv `volume` is 0–100).
-  Future<void> apply(Player player) => player.setVolume(applied);
-
-  /// Mirrors a player's *actual* audible state into the session. Callers are
-  /// the `volume` stream listener (catches every surface that writes straight
-  /// to the player) and the native close relay (the Android Activity's final
-  /// state). A zero is the mute gesture; a non-zero is both a level and an
-  /// unmute.
-  void record(double actual) {
-    if (actual <= 0) {
-      muted = true;
-    } else {
-      volume = actual;
-      muted = false;
-    }
-  }
-}
-
-/// The single device-wide session (see [PlaybackAudioSession]).
-final playbackAudioSession = PlaybackAudioSession();
 
 /// Plays a resolved [StreamInfo] using media_kit (libmpv under the hood, so it
 /// handles HEVC / AC-3 / MPEG-TS that an HTML video element can't). Controls
@@ -1598,11 +1550,18 @@ class _PlayerScreenState extends State<PlayerScreen>
         ),
       );
     }
-    // Only force full volume when adopting a preview: the TV live preview plays
-    // muted, so an adopted engine may arrive at zero volume and must be made
-    // audible. A plain fresh open (default 100) or an error-overlay Retry must
-    // NOT clobber a volume the user deliberately lowered.
-    if (adopting) await _player.setVolume(100);
+    // The live preview is muted **by design** (unprompted sound on a television
+    // is a worse failure than a silent picture), so an adopted engine arrives at
+    // zero volume and has to be given the *user's* level back — not a hard 100,
+    // which is what this used to write and which silently un-muted anyone who
+    // had muted or turned the sound down. Reading the session is what makes the
+    // preview's deliberate silence a property of the preview rather than a mute
+    // the user never asked for.
+    //
+    // Applied on a **fresh** open too, which is the other half: a zap builds a
+    // new engine at media_kit's default 100, so without this a user who muted
+    // un-muted themselves by changing channel.
+    await playbackAudioSession.apply(_player);
     if (canSkipOpen) await _player.play();
     _showNativeControls();
       _hasOpened = true;
@@ -2625,7 +2584,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (command.startsWith('volumePercent:')) {
       final ratio = double.tryParse(command.substring('volumePercent:'.length));
       if (ratio != null) {
-        await _player.setVolume((ratio.clamp(0.0, 1.0) * 100).roundToDouble());
+        // `setLevel`, not a bare write: dragging a native slider is a user
+        // choice, and it has to reach the session or it reverts on the next
+        // zap. A non-zero level is also an unmute, which is how the sliders
+        // have always worked.
+        await playbackAudioSession.setLevel(
+          _player.setVolume,
+          (ratio.clamp(0.0, 1.0) * 100).roundToDouble(),
+        );
       }
       await _syncNativeControlState();
       return;
@@ -2690,8 +2656,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         _seekBy(10);
         break;
       case 'muteToggle':
-        final volume = _player.state.volume;
-        await _player.setVolume(volume > 0 ? 0 : 100);
+        // Through the session, not `state.volume`: the native surfaces drive a
+        // real mpv whose volume event lags or never arrives, so a toggle read
+        // off it re-mutes instead of restoring sound. Unmuting also restores
+        // the user's own level rather than snapping to 100.
+        await playbackAudioSession.toggleMute(_player.setVolume);
         break;
       case 'miniPlayer':
         await _toggleNativeMiniPlayer();

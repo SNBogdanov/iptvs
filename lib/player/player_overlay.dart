@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 
@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/image_utils.dart';
+import 'playback_audio_session.dart';
 import 'zap_quick_list.dart';
 
 /// The narrow slice of a media_kit [Player] the embedded overlay reads and
@@ -1042,16 +1043,21 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   bool get chromeVisible => _visible;
 
   /// Mute/unmute — the keyboard counterpart of the volume button.
+  ///
+  /// Through the device-wide session rather than off `state.volume`, for the
+  /// reason the native overlay's mute button does the same: the engine's own
+  /// volume is not a reliable read, and reading it here meant unmuting snapped
+  /// to 100 instead of restoring the level the user had, while a mute taken on
+  /// this surface was forgotten by the next route.
   void toggleMute() {
-    final volume = widget.controls.state.volume;
-    unawaited(widget.controls.setVolume(volume > 0 ? 0 : 100));
+    unawaited(playbackAudioSession.toggleMute(widget.controls.setVolume));
     _show();
   }
 
   /// Nudge the volume by [delta] (media_kit's scale is 0–100).
   void adjustVolume(double delta) {
     final volume = (widget.controls.state.volume + delta).clamp(0.0, 100.0);
-    unawaited(widget.controls.setVolume(volume));
+    unawaited(playbackAudioSession.setLevel(widget.controls.setVolume, volume));
     _show();
   }
 
@@ -1733,7 +1739,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           _button(
             volume == 0 ? Icons.volume_off : Icons.volume_up,
             'Mute',
-            () => unawaited(widget.controls.setVolume(volume > 0 ? 0 : 100)),
+            () => unawaited(
+              playbackAudioSession.toggleMute(widget.controls.setVolume),
+            ),
           ),
           if (showSlider)
             SizedBox(

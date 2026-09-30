@@ -1,5 +1,4 @@
-import 'package:flutter_test/flutter_test.dart';
-import 'package:iptvs/player/player_screen.dart';
+﻿import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/sources/source.dart';
 
@@ -49,41 +48,6 @@ void main() {
       final single = [_channel('solo')];
       expect(liveZapIndex(single, null, 1), 0);
       expect(liveZapIndex(single, null, -1), 0);
-    });
-  });
-
-  group('PlaybackAudioSession', () {
-    test('a fresh session is at 100 and unmuted', () {
-      final session = PlaybackAudioSession();
-      expect(session.applied, 100);
-      expect(session.muted, isFalse);
-    });
-
-    test('an engine-read mute records mute; a non-zero level unmutes and is '
-        'remembered — the app\'s own unmute sends 100 explicitly via '
-        'setVolume(100)', () {
-      final session = PlaybackAudioSession()..record(0);
-      expect(session.muted, isTrue);
-      expect(session.applied, 0);
-      // A non-zero report is both a level and an unmute (e.g. the Android
-      // Activity's final volume after the native overlay set one).
-      session.record(67);
-      expect(session.muted, isFalse);
-      expect(session.applied, 67);
-    });
-
-    test('a lowered (non-zero) volume is remembered across channels', () {
-      final session = PlaybackAudioSession()..record(42);
-      expect(session.applied, 42);
-      expect(session.muted, isFalse);
-    });
-
-    test('volume reports stay within the engine\'s 0..100 idiom', () {
-      final session = PlaybackAudioSession()
-        ..record(0)
-        ..record(100);
-      expect(session.applied, 100);
-      expect(session.muted, isFalse);
     });
   });
 }
