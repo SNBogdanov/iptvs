@@ -505,6 +505,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// Reload or a source change inside the same screen does not re-run it.
   bool _autoRefreshAttempted = false;
 
+  /// The last fullscreen session's "last channel" state, handed to the next
+  /// session's zap controller. Each session builds its own controller, so
+  /// without this the in-player recall key was dead until the user zapped
+  /// *inside* the new session. Recorded only for a session whose route was
+  /// actually pushed, and dropped with the repository it was played through.
+  ZapRecall? _zapRecall;
+
   /// Records that a channel started playing: this screen's own zap bookkeeping,
   /// and — through the device-local [LastChannelStore] — the next launch.
   ///
@@ -1163,6 +1170,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _crossSourceIndexKey = null;
       _crossSourceIndexCache = null;
       _focus.resetChannelSelection();
+      _zapRecall = null;
       _loadLive();
       _live.startEpgRefresh();
       _globalFavorites.startEpgRefresh();
@@ -2074,6 +2082,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         initialIndex: range.index,
         rangeCategoryId: range.categoryId,
         rangeLabel: range.label,
+        recall: _zapRecall,
         catalog: _ChannelListZapCatalog(this),
         random: random,
       )
@@ -2175,6 +2184,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // any set-top box that fell to the narrow layout, reach this path too.
       final zap = await _zapControllerFor(channel);
       ({ZapEntry entry, Programme programme})? pendingCatchup;
+      var opened = false;
       try {
         DiagnosticsLog.instance.add(
           'library',
@@ -2183,6 +2193,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         final stream = await repo.resolve(channel);
         if (!mounted) return;
         _notePlayedChannel(channel.id, sourceId: repo.source.id);
+        opened = true;
         final epg = _epgFor(
           channel,
           foreign: foreign,
@@ -2229,6 +2240,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         }
       } finally {
         pendingCatchup = zap.pendingCatchup;
+        if (opened) _zapRecall = zap.recall;
         zap.dispose();
         if (mounted) setState(() => _resolving = false);
       }
@@ -2309,6 +2321,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // zaps.
     final zap = await _zapControllerFor(channel, explicit: zapChannels);
     ({ZapEntry entry, Programme programme})? pendingCatchup;
+    var opened = false;
     try {
       DiagnosticsLog.instance.add(
         'library',
@@ -2530,6 +2543,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // under it and reset the volume to the preview's mute state (see
       // [LivePreviewController.adoptedByFullscreen]).
       _preview.adoptedByFullscreen = decision.adoptsEmbeddedPreview;
+      opened = true;
       final hotSwapped = await navigator.push<bool>(route) ?? false;
       // The push (and whatever PlayerScreen did while up) completed — a
       // failure past this point isn't the stop-and-resolve-fresh setup
@@ -2642,6 +2656,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // Outlives the route by exactly this block — `PlayerScreen.dispose`
       // unhooks itself, and the return leg above has finished reading it.
       pendingCatchup = zap.pendingCatchup;
+      if (opened) _zapRecall = zap.recall;
       zap.dispose();
       if (mounted) setState(() => _resolving = false);
     }
