@@ -809,7 +809,7 @@ class StalkerSource
       description:
           _firstString(details, ['description', 'descr', 'plot']) ??
           item.description,
-      year: _firstString(details, ['year', 'released']) ?? item.year,
+      year: _releaseDate(details, fallback: item.year),
       extra: {...item.extra, 'details': details},
     );
   }
@@ -1304,7 +1304,7 @@ class StalkerSource
       poster: _firstString(item, ['screenshot_uri', 'poster', 'cover', 'pic']),
       backdrop: _firstString(item, ['backdrop', 'background', 'cover_big']),
       description: _firstString(item, ['description', 'descr', 'plot']),
-      year: _firstString(item, ['year', 'released']),
+      year: _releaseDate(item),
       rating: _parseDouble(
         _firstString(item, ['rating_imdb', 'rating_kinopoisk', 'rating']),
       ),
@@ -1623,7 +1623,7 @@ class StalkerSource
       backdrop:
           _firstString(episode, ['backdrop', 'background']) ?? parent.backdrop,
       description: _firstString(episode, ['description', 'descr', 'plot']),
-      year: _firstString(episode, ['year', 'released']),
+      year: _releaseDate(episode),
       durationSeconds: _parseDurationSeconds(
         _firstString(episode, ['duration', 'time', 'length']),
       ),
@@ -2118,6 +2118,26 @@ class StalkerSource
     }
     return null;
   }
+
+  /// Дата релиза в её наиболее точном виде.
+  ///
+  /// Портал кладёт дату в payload трижды (`releasedate`, `release_date`,
+  /// `releaseDate`) и рядом кладёт в `year` заведомо огрублённое значение: у
+  /// части записей там полная дата, у части — только год. Поэтому `year` идёт
+  /// последним, а не первым: `['year', 'released']` читала огрублённое поле
+  /// первым и теряла точность, которая лежала в той же строке рядом. Из-за
+  /// этого карточка в каталоге показывала «2026», а открытая карточка — реальную
+  /// дату: список и `get_movie_details` шли через разные мапперы, и только
+  /// детали читали точные ключи первыми.
+  static String? _releaseDate(Map<dynamic, dynamic> map, {String? fallback}) =>
+      _firstString(map, const [
+        'releasedate',
+        'release_date',
+        'releaseDate',
+        'released',
+        'year',
+      ]) ??
+      fallback;
 
   // ── auth + endpoint (ported from the harness) ───────────────────────────────
 

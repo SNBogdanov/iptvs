@@ -822,7 +822,7 @@ MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
     poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
     backdrop: _firstString(m, ['backdrop_path', 'backdrop', 'cover_big']),
     description: _firstString(m, ['plot', 'description']),
-    year: _firstString(m, ['year', 'releaseDate', 'release_date']),
+    year: _firstString(m, ['releasedate', 'release_date', 'releaseDate', 'year']),
     rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),
     providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
     extra: m,
