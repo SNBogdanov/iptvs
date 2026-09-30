@@ -853,7 +853,10 @@ class _ChannelRow extends StatelessWidget {
                             imageUrl: logo,
                             width: 30,
                             height: 30,
-                            fit: BoxFit.cover,
+                            // Contain, like every other channel-logo surface:
+                            // a square `cover` crops a wide wordmark's ends and
+                            // a tall logo's top, which is not what a logo is.
+                            fit: BoxFit.contain,
                             memCacheWidth: imageCacheSize(context, 30),
                             errorWidget: (_, url, error) {
                               logImageFailure(error, url);

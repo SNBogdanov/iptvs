@@ -1075,7 +1075,15 @@ class _LivePreviewPanel extends StatelessWidget {
                       LayoutBuilder(
                         builder: (context, constraints) => CachedNetworkImage(
                           imageUrl: channel.logo!,
-                          fit: BoxFit.cover,
+                          // `contain`, not `cover`: a channel logo is artwork of
+                          // arbitrary aspect, and the row's own tile
+                          // ([_Logo]) already draws it contained. `cover` here
+                          // cropped to fill, so a wide wordmark lost its ends
+                          // and a tall one lost its top — the one place in the
+                          // app that cut a logo rather than letterboxing it,
+                          // and it showed up on every channel switch, since
+                          // the panel is what the selection retargets.
+                          fit: BoxFit.contain,
                           memCacheWidth: imageCacheSize(
                             context,
                             constraints.maxWidth.isFinite

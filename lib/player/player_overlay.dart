@@ -2001,7 +2001,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               imageUrl: logo,
               width: 28,
               height: 28,
-              fit: BoxFit.cover,
+              // Contain, matching the live list's `_Logo` and the EPG grid's
+              // row tile: a square `cover` crops a wide logo's ends and a tall
+              // one's top, and the banner has room to letterbox.
+              fit: BoxFit.contain,
               memCacheWidth: imageCacheSize(context, 28),
               placeholder: (_, _) => _zapLogoFallback(),
               errorWidget: (_, url, error) {
