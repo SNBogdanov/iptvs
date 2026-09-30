@@ -3573,6 +3573,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       ...options,
       ...nativeWindowOptions,
       ...videoOptions,
+      // Last, so it can't be shadowed by the maps above and lands on the
+      // player whatever the live/VOD split decided.
+      ...kMpvLogFilter,
     }, onWarn: (message) => _logPlayback('warn $message'));
   }
 

@@ -213,6 +213,7 @@ class LivePreviewController extends ChangeNotifier {
           ...mpvBufferOptions(_bufferPreset),
           ...embeddedVideoOptionsForPlatform(),
           ...embeddedMpvOverrides(),
+          ...kMpvLogFilter,
         }),
       );
       // Log the decoder mpv actually engaged once frames start flowing, so the

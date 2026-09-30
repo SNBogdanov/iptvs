@@ -1278,6 +1278,22 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   all playback logs go through `_logPlayback` (redacted). mpv's `http-header-fields` is a
   comma-parsed list — never naively join it: Linux sends a native JSON array over IPC, Android
   encodes items with mpv `%n%` raw-length quoting (`MpvOptionEncoding`).
+- **mpv's own log is a separate, console-only stream, and FFmpeg's is filtered out of it.**
+  media_kit calls `mpv_request_log_messages(ctx, 'warn')` — a *bare* level, i.e. warn-and-above
+  for **every** module, including the `ffmpeg` one, so a provider's problems (`mime type is not
+  rfc8216 compliant`, `non-existing SPS`, `PES packet size mismatch`, `Packet corrupt`) print in
+  bulk. `kMpvLogFilter` pins `msg-level=all=warn,ffmpeg=error` and is applied wherever the other
+  mpv options are (`_configureNativePlayer`, `LivePreviewController._createPlayer`). Both halves
+  are load-bearing: **`all=warn` is restated** because setting `msg-level` after init *replaces*
+  media_kit's request rather than adding to it, and **`ffmpeg=error` and not lower** because
+  media_kit consumes error-level messages to populate its `errorController`, which is what
+  surfaces a failure to the error/reconnect path — `fatal`/`no` starves recovery. One notch
+  deliberately higher than Android's native `ffmpeg=fatal` (`player/MpvController.kt`), since a
+  real decode failure prints at error (`Failed setup for format d3d11`, `no frame!`). Logging
+  only: it never changes what mpv decodes — `hwdec` is decided separately, and a stale
+  `hwdec_override.txt` beside the exe silently wins over `auto-safe`. Pinned by
+  `test/mpv_log_filter_test.dart`. Detail: docs/player.md "mpv's own log, and why FFmpeg's is
+  filtered out of it".
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in

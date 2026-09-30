@@ -3139,6 +3139,44 @@ mpv's `%n%` **raw-length quoting** (UTF-8 byte counts; `MpvOptionEncoding`, pinn
 `MpvOptionEncodingTest`) since the libmpv AAR only exposes string setters. All playback logs go
 through `_logPlayback`, which redacts URLs via `_redactPlayback`.
 
+### mpv's own log, and why FFmpeg's is filtered out of it
+
+`_logPlayback` is the app's record. mpv's terminal output is a **separate** stream that reaches
+the console of whatever terminal launched the app (a release build has no console of its own, so
+this is a developer-window concern, never an end-user one), and it is *not* part of the exportable
+diagnostics.
+
+At init media_kit calls `mpv_request_log_messages(ctx, 'warn')` (`media_kit/lib/src/player/
+native/player/real.dart`) — a **bare** level, which mpv reads as "warn and above for every
+module". That includes FFmpeg's own diagnostics, routed under the `ffmpeg` module, so an IPTV
+stream's provider-side problems print in bulk: `mime type is not rfc8216 compliant` (a panel
+serving `.m3u8` under a non-HLS `Content-Type`), `non-existing SPS 0 referenced in buffering
+period` (MPEG-TS carrying parameter sets out of band), `PES packet size mismatch` /
+`Packet corrupt` (a damaged transport stream), `Missing reference picture`, `Increasing reorder
+buffer to 2`. None of it is actionable from the client and none of it stops playback.
+
+`kMpvLogFilter` (`lib/player/mpv_options.dart`) pins `msg-level=all=warn,ffmpeg=error`, applied
+where the other mpv options are — `_configureNativePlayer` (`player_screen.dart`) and
+`LivePreviewController._createPlayer`. Two things about it are deliberate:
+
+- **`all=warn` is restated**, because setting `msg-level` after init *replaces* media_kit's
+  request rather than adding to it. Without it the filter would raise mpv's own verbosity while
+  lowering FFmpeg's.
+- **`ffmpeg=error` and not lower** is load-bearing: media_kit consumes error-level messages
+  internally to populate its `errorController`, which is what surfaces a playback failure to the
+  error/reconnect path. `fatal`/`no` would silence the messages recovery depends on. It is one
+  notch deliberately *higher* than the Android native fallback's `ffmpeg=fatal`
+  (`player/MpvController.kt`), because a genuine decode failure prints at error —
+  `Failed setup for format d3d11: hwaccel initialisation returned error` / `no frame!` — and is the
+  one FFmpeg line worth seeing. Pinned by `test/mpv_log_filter_test.dart`, which also asserts the
+  filter collides with no other map merged into the same `applyMpvOptions` call.
+
+Note this is *logging* only: it changes what reaches the console, never what mpv decodes. The
+`hwdec` decision (`auto-safe` on the native surface, see Windows above) is separate, and a
+`hwdec_override.txt` beside the executable still overrides it — so a stale override left over from
+a decode experiment is the first thing to check when the d3d11 error appears and `auto-safe`
+seems not to be in effect.
+
 ## MethodChannel handler ownership
 
 The two inbound native→Dart channels — `iptvs/native_hdr_player` (Android `nativeClosed` with

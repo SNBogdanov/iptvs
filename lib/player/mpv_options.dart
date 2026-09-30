@@ -32,6 +32,43 @@ const Map<String, String> kLiveMpvOptions = {
       'analyzeduration=3000000,probesize=10000000',
 };
 
+/// mpv log filtering: keep mpv's own messages at their configured level, and
+/// drop FFmpeg's to `error`.
+///
+/// At init media_kit calls `mpv_request_log_messages(ctx, 'warn')`
+/// (`media_kit/lib/src/player/native/player/real.dart`), a **bare** level with
+/// no module — which mpv reads as "warn and above for *every* module". That
+/// includes FFmpeg's own diagnostics, which mpv routes under the `ffmpeg`
+/// module, so an IPTV stream's provider-side problems print straight into the
+/// console of whatever terminal launched the app: `mime type is not rfc8216
+/// compliant` (the panel serving `.m3u8` under a non-HLS `Content-Type`),
+/// `non-existing SPS 0 referenced in buffering period` (MPEG-TS carrying
+/// parameter sets out of band), `PES packet size mismatch` / `Packet corrupt`
+/// (a genuinely damaged transport stream), `Missing reference picture` and
+/// `Increasing reorder buffer to 2`. None of it is actionable from here, and
+/// none of it stops playback — it is provider quality, not an app fault.
+///
+/// `all=warn` is restated so the other half of the change is explicit: mpv's
+/// *own* messages keep exactly the level they had, and this property is the
+/// same mechanism as media_kit's `mpv_request_log_messages` call, so setting it
+/// after init overrides it rather than adding to it.
+///
+/// **`ffmpeg=error` and not lower is load-bearing.** media_kit consumes
+/// error-level log messages internally to populate its `errorController`, which
+/// is what surfaces a playback failure to the error/reconnect path — silencing
+/// the `ffmpeg` module below `error`, or `msg-level` globally, would silence the
+/// very messages that drive recovery. This is also one notch deliberately
+/// *higher* than the Android native fallback's `ffmpeg=fatal`
+/// (`player/MpvController.kt`): a real decode failure prints at error
+/// (`Failed setup for format d3d11: hwaccel initialisation returned error`,
+/// `no frame!`) and is the one FFmpeg line worth seeing.
+///
+/// The app's own playback record is unaffected and remains the exportable
+/// surface — this only quiets mpv's terminal output, which is console-only.
+const Map<String, String> kMpvLogFilter = {
+  'msg-level': 'all=warn,ffmpeg=error',
+};
+
 /// Tone-map-to-SDR options for **embedded** (non-native-surface) playback on
 /// non-Windows platforms — notably Android, where the fallback/preview path
 /// renders through a Flutter texture (which can't display HDR passthrough) rather
