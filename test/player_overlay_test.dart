@@ -833,6 +833,54 @@ void main() {
             'guessed offset',
       );
     });
+
+    testWidgets('sits on the right, clear of the channel name', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(
+          revision: 1,
+          channelNumber: 12,
+          channelName: 'BBC One',
+          autoSwitchLabel: '7s',
+        ),
+      );
+      await tester.pump();
+
+      final chip = tester.getRect(find.byIcon(Icons.autorenew));
+      final bannerFinder = find.descendant(
+        of: find.byType(AnimatedOpacity),
+        matching: find.text('12 · BBC One'),
+      );
+      final banner = tester.getRect(bannerFinder);
+      // The identity Text is a child of a stretching Column, so its render box
+      // is the full width of the card while the glyphs sit at the left of it.
+      // Comparing boxes would put the name's edge at the card's edge and fail
+      // a layout that is in fact clear, so measure the painted extent.
+      final name = tester.widget<Text>(bannerFinder);
+      final painter = TextPainter(
+        text: TextSpan(text: name.data, style: name.style),
+        textDirection: TextDirection.ltr,
+        maxLines: name.maxLines,
+      )..layout();
+      expect(
+        chip.left,
+        greaterThanOrEqualTo(banner.left + painter.width),
+        reason: 'the countdown must not share horizontal space with the name',
+      );
+      // The name is left-aligned and the chip was too, so the two stacked on
+      // the same edge and read as one crowded line once the gap between rows
+      // closed up on a short window. On the right the horizontal gap is the
+      // whole width of the name, at any height.
+      expect(
+        chip.center.dx,
+        greaterThan(tester.view.physicalSize.width / 2),
+        reason: 'on the right half of the bar, not merely nudged off the name',
+      );
+    });
   });
 
   group('quick list', () {

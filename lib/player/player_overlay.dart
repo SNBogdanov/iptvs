@@ -1976,7 +1976,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           // position instead of jumping down each time the banner appears.
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
+            // `stretch`, so the chip's `Align` below has a full-width box to
+            // push against. The card wants tight width either way (its inner
+            // column stretches too), so this changes only the chip.
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _autoSwitchChip(zap),
               AnimatedOpacity(
@@ -2037,42 +2040,45 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Widget _autoSwitchChip(ZapBannerState zap) {
     final label = zap.autoSwitchLabel;
     if (label == null || label.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: AppColors.panel,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Not a pause glyph: the countdown runs *and* the channel is
-              // playing, so this names the feature rather than a transport
-              // state. The clock is the honest picture of a timer, and the text
-              // beside it carries the state when it is held.
-              const Icon(
-                Icons.autorenew,
-                size: 14,
-                color: AppColors.accent,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                // Opted out of text scaling deliberately, like the PIN pad's
-                // digit labels: this sits in a fixed-extent region beside a
-                // video, and a 2x-scaled countdown is what pushes the banner
-                // off the bottom of a small window.
-                textScaler: TextScaler.noScaling,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: AppColors.panel,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Not a pause glyph: the countdown runs *and* the channel is
+                // playing, so this names the feature rather than a transport
+                // state. The clock is the honest picture of a timer, and the
+                // text beside it carries the state when it is held.
+                const Icon(
+                  Icons.autorenew,
+                  size: 14,
+                  color: AppColors.accent,
                 ),
-              ),
-            ],
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  // Opted out of text scaling deliberately, like the PIN pad's
+                  // digit labels: this sits in a fixed-extent region beside a
+                  // video, and a 2x-scaled countdown is what pushes the banner
+                  // off the bottom of a small window.
+                  textScaler: TextScaler.noScaling,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
