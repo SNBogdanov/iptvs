@@ -173,6 +173,21 @@ class SourceConfig {
   /// never ride the source row into the cloud.
   bool get autoResumeLastChannel => settings['autoResumeLastChannel'] != false;
 
+  /// How long the auto-switch shortcut rests on each channel, in seconds, as
+  /// the stored number (see `player/channel_dwell.dart` for the ladder and
+  /// `channelDwellFromSeconds` for the parse).
+  ///
+  /// **Absent means the default, and only a non-default is ever written**, so a
+  /// source nobody touched serializes exactly as it did before this setting
+  /// existed — no cloud churn, no migration. Kept as a raw [int?] rather than the
+  /// enum for the same reason [bufferPresetName] is: this layer must not depend
+  /// on `lib/player/`, so the ladder lives beside the feature that will read it
+  /// and callers parse it.
+  int? get channelDwellSeconds {
+    final value = settings['channelDwellSeconds'];
+    return value is int ? value : int.tryParse('${value ?? ''}'.trim());
+  }
+
   /// Extra XMLTV guide URLs, one per line in `fields['epgUrls']`.
   ///
   /// A newline-separated blob rather than JSON because [fields] is

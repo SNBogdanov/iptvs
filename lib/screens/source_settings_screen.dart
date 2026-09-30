@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/app_database.dart';
 import '../data/net.dart' show looksLikeValidUrl;
 import '../player/buffer_preset.dart';
+import '../player/channel_dwell.dart';
 import '../data/source_store.dart';
 import '../sources/epg_guides.dart' show kMaxEpgGuides;
 import '../sources/m3u_upgrade.dart';
@@ -254,6 +255,24 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       settings.remove('bufferPreset');
     } else {
       settings['bufferPreset'] = next.storageName;
+    }
+    await _save(_config.copyWith(settings: settings));
+  }
+
+  /// Advances the auto-switch dwell to the next step on its ladder.
+  ///
+  /// Only a **non-default** value is ever written, and the default is removed
+  /// rather than stored — the same trick `autoResumeLastChannel` uses, so a
+  /// source nobody touched keeps serializing byte-for-byte as it did before
+  /// this setting existed and it costs no cloud churn and no migration.
+  Future<void> _cycleChannelDwell() async {
+    final current = channelDwellFromSeconds(_config.channelDwellSeconds);
+    final next = nextChannelDwell(current);
+    final settings = <String, dynamic>{..._config.settings};
+    if (next == kDefaultChannelDwell) {
+      settings.remove('channelDwellSeconds');
+    } else {
+      settings['channelDwellSeconds'] = next.storageValue;
     }
     await _save(_config.copyWith(settings: settings));
   }
@@ -597,6 +616,19 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                             _ResumeOnLaunchTile(
                               enabled: _config.autoResumeLastChannel,
                               onTap: _toggleResumeOnLaunch,
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'Channel switching',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            _ChannelDwellTile(
+                              dwell: channelDwellFromSeconds(
+                                _config.channelDwellSeconds,
+                              ),
+                              onTap: _cycleChannelDwell,
                             ),
                             // Extra XMLTV guides. Here rather than on the
                             // add/edit source form because it is an ongoing
@@ -1006,6 +1038,58 @@ class _ResumeOnLaunchTile extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(
                     _hint,
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ChannelDwellTile extends StatelessWidget {
+  final ChannelDwell dwell;
+  final VoidCallback onTap;
+
+  const _ChannelDwellTile({required this.dwell, required this.onTap});
+
+  /// A period this app has no use for yet: nothing acts on the value until the
+  /// auto-switch feature lands, and a control that looks live and silently does
+  /// nothing is worse than one that says so.
+  static const _hint =
+      'How long each channel stays on screen when auto-switching. No shortcut '
+      'acts on this yet.';
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      semanticsLabel:
+          'Auto-switch dwell: ${channelDwellLabel(dwell)}. $_hint '
+          'Activate to change.',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.timer_outlined, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Auto-switch dwell: ${channelDwellLabel(dwell)}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    channelDwellHint(dwell),
                     style: const TextStyle(
                       color: AppColors.textLo,
                       fontSize: 12,
