@@ -353,22 +353,43 @@ class ZapKeyPolicyTest {
     @Test
     fun `the dedicated keys keep their own meaning with the list open`() {
         // `zap:up`/`zap:down` mean "the next channel" in both states; Dart
-        // reads them as one row in list order while the list is up — so Page
-        // Down, which is the one that sends `zap:up`, walks the cursor *down*
-        // the list and reads the way it looks. Digits likewise stay digits —
-        // Dart moves the cursor with them.
+        // reads them as one row in list order while the list is up — so
+        // CHANNEL_UP walks the cursor *down* the list and reads the way it
+        // looks. Digits likewise stay digits — Dart moves the cursor with them.
         assertEquals(
             ZapKeyAction.ChannelUp,
             decide(ZapKeyPolicy.KEYCODE_CHANNEL_UP, quickListOpen = true).action,
         )
-        assertEquals(
-            ZapKeyAction.ChannelUp,
-            decide(ZapKeyPolicy.KEYCODE_PAGE_DOWN, quickListOpen = true).action,
-        )
-        assertEquals(
-            ZapKeyAction.ChannelDown,
-            decide(ZapKeyPolicy.KEYCODE_PAGE_UP, quickListOpen = true).action,
-        )
+        // The page keys deliberately do **not** keep theirs: with the list up
+        // they page it, because routing them through the channel commands is
+        // what made them indistinguishable from the arrow beside them (Dart
+        // resolves `zap:up` to `moveQuickList(1)` — one row).
+        val pageDown = decide(ZapKeyPolicy.KEYCODE_PAGE_DOWN, quickListOpen = true)
+        assertEquals(ZapKeyAction.Move, pageDown.action)
+        assertEquals(ZapKeyPolicy.ZAP_PAGE_ROWS, pageDown.delta)
+        assertEquals("zap:move:${ZapKeyPolicy.ZAP_PAGE_ROWS}", pageDown.command)
+        val pageUp = decide(ZapKeyPolicy.KEYCODE_PAGE_UP, quickListOpen = true)
+        assertEquals(ZapKeyAction.Move, pageUp.action)
+        assertEquals(-ZapKeyPolicy.ZAP_PAGE_ROWS, pageUp.delta)
+        // …and with the list down they are channel keys again, in every state.
+        for (visible in listOf(false, true)) {
+            assertEquals(
+                "zap:up",
+                decide(
+                    ZapKeyPolicy.KEYCODE_PAGE_DOWN,
+                    controlsVisible = visible,
+                    quickListOpen = false,
+                ).command,
+            )
+            assertEquals(
+                "zap:down",
+                decide(
+                    ZapKeyPolicy.KEYCODE_PAGE_UP,
+                    controlsVisible = visible,
+                    quickListOpen = false,
+                ).command,
+            )
+        }
         assertEquals(
             ZapKeyAction.PreviousChannel,
             decide(ZapKeyPolicy.KEYCODE_LAST_CHANNEL, quickListOpen = true).action,

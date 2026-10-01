@@ -19,6 +19,7 @@ enum class ZapKeyAction {
     CloseList,
     MoveUp,
     MoveDown,
+    Move,
     Descend,
     Digit,
     Activate,
@@ -29,7 +30,18 @@ enum class ZapKeyAction {
  * One key's outcome. [command] is the string to send to Dart on the shared zap
  * vocabulary (`lib/player/zap_command.dart`), or null when nothing is sent.
  */
-data class ZapKeyDecision(val action: ZapKeyAction, val digit: Int = -1) {
+data class ZapKeyDecision(
+    val action: ZapKeyAction,
+    val digit: Int = -1,
+    /**
+     * Signed row delta for [ZapKeyAction.Move]. A separate field from [digit]
+     * rather than a reuse of it: the two carry different things on the same
+     * wire string (`zap:move:<n>` against `zap:digit:<n>`), and overloading one
+     * int for both is the kind of saving that costs a page key silently paging
+     * by a digit.
+     */
+    val delta: Int = 0,
+) {
     /** Whether `dispatchKeyEvent` must return true for this press. */
     val consumed: Boolean get() = action != ZapKeyAction.None
 
@@ -45,6 +57,7 @@ data class ZapKeyDecision(val action: ZapKeyAction, val digit: Int = -1) {
             // keep meaning "the next channel", i.e. the next row down.
             ZapKeyAction.MoveUp -> "zap:move:-1"
             ZapKeyAction.MoveDown -> "zap:move:1"
+            ZapKeyAction.Move -> "zap:move:$delta"
             ZapKeyAction.Descend -> "zap:descend"
             ZapKeyAction.Digit -> "zap:digit:$digit"
             ZapKeyAction.Activate -> "zap:activate"
@@ -109,6 +122,15 @@ object ZapKeyPolicy {
      * feature back out, and `ZapKeyPolicyTest` still pins both settings.
      */
     const val QUICK_LIST_ENABLED = true
+
+/**
+ * How far a page key moves the quick-list cursor, in rows. Mirrors Dart's
+ * `kZapPageRows` and the Windows `kZapPageRows` (kZapWindowRows - 1): the
+ * window is what a page is *of*, and the natives only ever receive the window,
+ * never a measured viewport, so the step has to be the same number on every
+ * renderer or a page key means something different per surface.
+ */
+const val ZAP_PAGE_ROWS = 39
 
     /**
      * @param keyCode the `android.view.KeyEvent` key code.
@@ -222,6 +244,14 @@ object ZapKeyPolicy {
                 // wrapping, so a held key settles instead of flapping.
                 KEYCODE_DPAD_UP -> ZapKeyDecision(ZapKeyAction.MoveUp)
                 KEYCODE_DPAD_DOWN -> ZapKeyDecision(ZapKeyAction.MoveDown)
+                KEYCODE_PAGE_UP -> ZapKeyDecision(
+                    ZapKeyAction.Move,
+                    -ZAP_PAGE_ROWS,
+                )
+                KEYCODE_PAGE_DOWN -> ZapKeyDecision(
+                    ZapKeyAction.Move,
+                    ZAP_PAGE_ROWS,
+                )
                 KEYCODE_DPAD_LEFT, KEYCODE_BACK -> if (isRepeat) {
                     ZapKeyDecision.swallow
                 } else {

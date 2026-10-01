@@ -115,6 +115,15 @@ inline constexpr int kZapVkDigit0 = 0x30;  // '0'
 inline constexpr int kZapVkDigit9 = 0x39;  // '9'
 inline constexpr int kZapVkNumpad0 = 0x60; // VK_NUMPAD0
 inline constexpr int kZapVkNumpad9 = 0x69; // VK_NUMPAD9
+
+// How far a page key moves the quick-list cursor, in rows. Mirrors Dart's
+// `kZapPageRows` (kZapWindowRows - 1): the window is what a page is *of*, and
+// this surface only ever receives the window, never a measured viewport, so
+// the step has to be the same number on every renderer or a page key means
+// something different per surface. The one row of overlap keeps the cursor from
+// appearing to skip content between pages.
+inline constexpr int kZapPageRows = 39;
+
 // This surface's stand-in for a remote's dedicated `GUIDE` key, which has no
 // Win32 virtual-key code at all — the same stand-in relationship Page
 // Up/Page Down have with CHANNEL_UP/CHANNEL_DOWN above. 'G' was picked
@@ -230,11 +239,15 @@ inline ZapKeyDecision DecideZapKey(
     case kZapVkPrior:
       // The page keys run against the channel keys, deliberately: Page Down
       // is "step forward" to a remote, the same gesture as a scrollbar, so it
-      // advances and Page Up steps back. `kChannelUp` still *is* the next
-      // channel, which in a list is the next row down.
-      return ZapKeyDecision{ZapKeyAction::kChannelDown};
+      // advances and Page Up steps back.
+      //
+      // With the list open they page it rather than nudging it. They used to
+      // return kChannelDown/kChannelUp, which Dart resolves through
+      // `moveQuickList(±1)` — one row — making a page key on this surface
+      // indistinguishable from the arrow beside it.
+      return ZapMoveDecision(-kZapPageRows);
     case kZapVkNext:
-      return ZapKeyDecision{ZapKeyAction::kChannelUp};
+      return ZapMoveDecision(kZapPageRows);
     case kZapVkGuide:
       // A dedicated key that did nothing the second time reads as a dead
       // remote, so it toggles — the same rule Dart's `guide` binding applies.

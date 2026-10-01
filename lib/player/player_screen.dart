@@ -4025,14 +4025,30 @@ class _PlayerScreenState extends State<PlayerScreen>
             // ends of the remote, and only the page pair is a stand-in for
             // CHANNEL_UP/DOWN on a keyboard, where "up" has no channel
             // meaning to preserve. What the *command* means is untouched —
-            // `channelUp` is still the next channel — and because the open
-            // quick list resolves the same commands through
-            // `moveQuickList(±1)`, its page keys now move the cursor the way
-            // they look, which is the other half of why this reads right.
+            // `channelUp` is still the next channel.
+            //
+            // With the quick list open they page it, by a screenful rather than
+            // by a row: they used to ride the same `channelUp`/`channelDown`
+            // the arrows' one-row siblings resolve through, which made a page
+            // key indistinguishable from an arrow.
             const SingleActivator(LogicalKeyboardKey.pageDown): () =>
-                _handleZapInput(const ZapCommand(ZapCommandKind.channelUp)),
+                _handleZapInput(
+                  _zapListOpen
+                      ? const ZapCommand(
+                          ZapCommandKind.move,
+                          kZapPageRows,
+                        )
+                      : const ZapCommand(ZapCommandKind.channelUp),
+                ),
             const SingleActivator(LogicalKeyboardKey.pageUp): () =>
-                _handleZapInput(const ZapCommand(ZapCommandKind.channelDown)),
+                _handleZapInput(
+                  _zapListOpen
+                      ? const ZapCommand(
+                          ZapCommandKind.move,
+                          -kZapPageRows,
+                        )
+                      : const ZapCommand(ZapCommandKind.channelDown),
+                ),
             const SingleActivator(LogicalKeyboardKey.mediaLast): () =>
                 _handleZapInput(
                   const ZapCommand(ZapCommandKind.previousChannel),

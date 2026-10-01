@@ -1570,6 +1570,12 @@ end
 -- **No zap key ever reveals the chrome.** Revealing it on the first Up would
 -- hand the second Up to the control row instead of the next channel, which is
 -- the opposite of what was pressed for (docs/tv-navigation.md).
+-- How far a page key moves the quick-list cursor, in rows. Mirrors Dart's
+-- `kZapPageRows` and the Windows `kZapPageRows`: the window is what a page is
+-- *of*, and this surface only ever receives the window, never a measured
+-- viewport. One row of overlap so the cursor never appears to skip content.
+local ZAP_PAGE_ROWS = 39
+
 local function zap_key_command(key, is_repeat)
     if not state.isLive then return nil, false end
 
@@ -1605,11 +1611,14 @@ local function zap_key_command(key, is_repeat)
         end
         -- The page keys run against the channel keys, deliberately: Page Down
         -- is "step forward" to a remote, the same gesture as a scrollbar, so
-        -- it advances and Page Up steps back. `zap:up` still means the next
-        -- channel — the next row *down* in a list — Dart decides that, the
-        -- same as it decides the arrows mean ∓1 (docs/tv-navigation.md).
-        if key == 'PGDWN' then return 'zap:up', false end
-        if key == 'PGUP' then return 'zap:down', false end
+        -- it advances and Page Up steps back.
+        --
+        -- With the list open they page it, by a windowful rather than a row.
+        -- They used to send `zap:up`/`zap:down`, which Dart resolves through
+        -- `moveQuickList(±1)` — one row — so on this surface a page key did
+        -- exactly what the arrow beside it did. Mirrors Dart's `kZapPageRows`.
+        if key == 'PGDWN' then return 'zap:move:' .. ZAP_PAGE_ROWS, false end
+        if key == 'PGUP' then return 'zap:move:-' .. ZAP_PAGE_ROWS, false end
         if key == 'ENTER' or key == 'KP_ENTER' then
             if is_repeat then return nil, true end
             return 'zap:activate', false

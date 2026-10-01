@@ -1243,7 +1243,7 @@ press that drives the list still suppresses the reveal-on-input post). The whole
 | Up / Down | `zap:up`/`zap:down` (chrome hidden only) | `zap:move:-1`/`zap:move:1`, repeats allowed |
 | Return / `VK_SELECT` | commits a pending digit buffer, else falls through | `zap:activate` |
 | Escape / Backspace | clears a pending digit buffer, else falls through | `zap:back`, **ahead of the ordinary back branch** |
-| Page Down / Page Up | `zap:up`/`zap:down` | `zap:up`/`zap:down` (list *order*, so the cursor walks **down** the list on Page Down) |
+| Page Down / Page Up | `zap:up`/`zap:down` | `zap:move:39`/`zap:move:-39` - a **pageful**, not a row |
 | Digits, numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor instead of zapping) |
 | `G` | `zap:list` | `zap:close` |
 
@@ -1670,7 +1670,7 @@ Up back to the volume control mid-walk would be two cursors for one press:
 | `LEFT` | `zap:list` when the chrome is hidden (seek otherwise); repeat swallowed | `zap:back`; repeat swallowed |
 | `RIGHT` | `zap:prev` when the chrome is hidden (seek otherwise); repeat swallowed | `zap:descend`; repeat swallowed |
 | `UP` / `DOWN` | `zap:up`/`zap:down` when the chrome is hidden (volume otherwise); repeats pass | `zap:move:-1`/`zap:move:1`; repeats pass |
-| `PGDWN` / `PGUP` | `zap:up`/`zap:down` | unchanged — `zap:up` is still "the next channel", so Page Down walks the cursor down the list and Page Up up it (Dart decides that) |
+| `PGDWN` / `PGUP` | `zap:up`/`zap:down` | page the highlight by a windowful: `zap:move:39` / `zap:move:-39` |
 | `ENTER` / `KP_ENTER` | commits a pending digit buffer | `zap:activate`; repeat swallowed |
 | `ESC` / `BS` | clears a pending digit buffer, else the Back ladder | `zap:back`; repeat swallowed |
 | digits, `KP` digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor instead of zapping) |
@@ -1738,12 +1738,18 @@ stays null for VOD, catch-up, and every route that isn't channel-list-borne, so 
   The arrows are untouched as well, and still differ: the **closed** arrow keys zap
   (`channelUp`/`channelDown`), while the **open quick list** turns them into literal cursor moves
   (`zap:move:-1`/`zap:move:1`) because there Up has to move the highlight the way it looks.
-- **The quick list inherits the new direction for free, and that is the other half of why it
-  reads right.** Its page keys resolve through the *same* `zap:up`/`zap:down` commands into
-  `moveQuickList(±1)`, so Page Down now walks the cursor **down** the list and Page Up up it. Before
-  the swap both page keys moved the highlight against the way the key reads, which was the one
-  place the list contradicted the scrollbar. The four key rings therefore agree without any of them
-  deriving the direction — Dart's command semantics are still the single place it is decided.
+- **The quick list pages, by a windowful rather than by a row.** With the list open the page keys
+    stop being channel keys and send `zap:move:39`/`zap:move:-39`, while `CHANNEL_UP`/`CHANNEL_DOWN`
+    and the arrows keep their one-row meaning. That separation is the point: routing the page pair
+    through `zap:up`/`zap:down` made it resolve through `moveQuickList(+1)`, so a page key moved
+    exactly as far as the arrow beside it, which is what it did on all four surfaces.
+    The step is `kZapWindowRows - 1` (39), mirrored by the Windows `kZapPageRows`, the Kotlin
+    `ZAP_PAGE_ROWS` and the Lua `ZAP_PAGE_ROWS`: the window is what a page is *of*, and the natives
+    only ever receive the window, never a measured viewport, so a viewport-derived step would be
+    Dart's number on one surface and a guess on the other three. One row of overlap keeps a scan of
+    consecutive pages from appearing to skip content. `moveQuickList` clamps, so a page key cannot
+    wrap a long list. Direction is unchanged and still decided in one place: Page Down moves the
+    highlight **down**.
 
 - **The resolver is state-based, never reuse of the route's original widget fields.** The
   `_current*` mirrors already exist so a single live route survives probes/episodes without a

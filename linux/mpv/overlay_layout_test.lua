@@ -883,10 +883,10 @@ check(open_key('KP_ENTER') == 'zap:activate', 'open: the numpad OK too')
 check(open_key('ESC') == 'zap:back',
   'open: Escape peels a list rung ahead of the Back ladder')
 check(open_key('BS') == 'zap:back', 'open: Backspace does the same')
-check(open_key('PGUP') == 'zap:down',
-  'open: PGUP steps back — the cursor moves up the list, the way the key reads')
-check(open_key('PGDWN') == 'zap:up',
-  'open: PGDWN steps forward, so the cursor moves down the list')
+check(open_key('PGUP') == 'zap:move:-39',
+  'open: PGUP pages back up the list, by a windowful rather than a row')
+check(open_key('PGDWN') == 'zap:move:39',
+  'open: PGDWN pages forward down the list, by the same step')
 check(open_key('4') == 'zap:digit:4', 'open: a digit still enters a number')
 check(open_key('KP4') == 'zap:digit:4', 'open: from the numpad as well')
 check(open_key('g') == 'zap:close', 'open: the guide key closes the list')

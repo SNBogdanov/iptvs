@@ -36,6 +36,23 @@ import 'package:flutter/foundation.dart';
 /// a few kilobytes whatever the range's size.
 const int kZapWindowRows = 40;
 
+/// How far a page key moves the quick-list cursor, in rows.
+///
+/// The window is what a page is *of*, so the step is derived from it rather
+/// than from the viewport: the natives only ever receive [kZapWindowRows] rows
+/// and never learn how many the surface actually draws, so a viewport-derived
+/// step would be Dart's number on one surface and a guess on the other three.
+/// One row of overlap, so consecutive pages share a row and the cursor never
+/// appears to skip content — the usual list convention, and the reason the
+/// step is a window minus one rather than the window itself.
+///
+/// This is the value `zap:move:±kZapPageRows` carries. It existed as a
+/// documented contract on `moveQuickList` ("an arbitrary signed delta so a page
+/// key can move by a screenful") while **every** surface sent `±1`, which is
+/// why a page key moved one row: the arrows and the page pair were emitting the
+/// same command with the same magnitude.
+const int kZapPageRows = kZapWindowRows - 1;
+
 /// Which mode of the quick list's **mode stack** is on screen.
 ///
 /// The stack is the whole navigation model: Right/OK descends, Left/Back

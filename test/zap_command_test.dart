@@ -1,6 +1,9 @@
+import 'dart:io' show File;
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/zap_command.dart';
+import 'package:iptvs/player/zap_quick_list.dart';
 
 void main() {
   group('parseZapCommand', () {
@@ -181,6 +184,65 @@ void main() {
       debounce.cancel();
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(ran, 1);
+    });
+  });
+
+  // A page key's step is duplicated in four places by necessity — the natives
+  // cannot import Dart — and there is no test anywhere that would notice one of
+  // them drifting. So the duplication gets its own assertion, which is what
+  // keeps "Page Down moves a pageful" one behaviour rather than four.
+  group('quick-list page step', () {
+    test('is the window less one row, so pages overlap by a row', () {
+      // A whole-window jump would leave no overlap, so a scan of consecutive
+      // pages appears to skip content between pages.
+      expect(kZapPageRows, kZapWindowRows - 1);
+      expect(kZapPageRows, greaterThan(0));
+    });
+
+    test('every native surface hardcodes the same step', () {
+      // `zap:move:<n>` is the only thing the natives send; if one of them
+      // disagrees with the others a page key means a different distance
+      // depending on which surface is drawing.
+      final surfaces = <String, String>{
+        'windows/runner/zap_key_policy.h': 'kZapPageRows',
+        'android/app/src/main/kotlin/com/gchofficial/iptvs/player/ZapKeyPolicy.kt':
+            'ZAP_PAGE_ROWS',
+        'linux/mpv/iptvs_overlay.lua': 'ZAP_PAGE_ROWS',
+      };
+      surfaces.forEach((path, name) {
+        final file = File(path);
+        expect(
+          file.existsSync(),
+          isTrue,
+          reason: '$path must keep the page step mirrored from Dart',
+        );
+        // Matched on the name alone: the three languages spell the declaration
+        // differently (`int x = 39`, `const val x = 39`, `local x = 39`) and a
+        // pattern that tried to cover all of them would stop matching the day
+        // one of them reorders its keywords.
+        final declared = RegExp(
+          name + r'\s*=\s*(\d+)',
+        ).firstMatch(file.readAsStringSync());
+        expect(
+          declared?.group(1),
+          '$kZapPageRows',
+          reason: '$path declares $name as ${declared?.group(1)}, '
+              'but Dart pages by $kZapPageRows',
+        );
+      });
+    });
+
+    test('parses as an ordinary signed move on every delta', () {
+      // The natives' page commands must survive the shared parser, which is
+      // what routes them to `moveQuickList` and not to a channel switch.
+      expect(
+        parseZapCommand('zap:move:$kZapPageRows'),
+        ZapCommand(ZapCommandKind.move, kZapPageRows),
+      );
+      expect(
+        parseZapCommand('zap:move:-39'),
+        const ZapCommand(ZapCommandKind.move, -39),
+      );
     });
   });
 }

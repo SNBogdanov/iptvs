@@ -768,7 +768,7 @@ frozen mapping applies:
 | Up / Down | `zap:up` / `zap:down` (chrome hidden only) | `zap:move:-1` / `zap:move:1` |
 | Return / `VK_SELECT` | a pending digit buffer only | `zap:activate` |
 | Escape / Backspace | a pending digit buffer, else the Back ladder below | `zap:back`, ahead of the ordinary back branch |
-| Page Down / Page Up | `zap:up` / `zap:down` | unchanged — list *order*, so the cursor walks **down** on Page Down |
+| Page Down / Page Up | `zap:up` / `zap:down` | `zap:move:39` / `zap:move:-39` - a **pageful**, not a row |
 | Digits / numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor) |
 | `G` | `zap:list` | `zap:close` |
 
@@ -893,7 +893,7 @@ the policy is consulted per press, so an arrow reverts to seek/volume the instan
 | D-pad Left | Yes | opens the list (`zap:list`); repeat swallowed | one rung up (`zap:back`); repeat swallowed |
 | D-pad Right | Yes | previous channel; repeat swallowed | descend (`zap:descend`); repeat swallowed |
 | D-pad Up / Down | Yes | channel up/down; repeats pass | move the highlight ∓1; repeats pass |
-| `PGDWN` / `PGUP` | No | next / previous channel (Page Down advances) | unchanged — `zap:up` is the next channel, so Page Down moves the highlight down |
+| `PGDWN` / `PGUP` | No | next / previous channel (Page Down advances) | page the highlight by a windowful: `zap:move:39` / `zap:move:-39` |
 | Digits, numpad digits | No | number entry | number entry (Dart moves the cursor) |
 | Enter / numpad Enter | No | commits a pending number | activates the selected row |
 | `ESC` / Backspace | No | clears a pending number, else the Back ladder | one rung up, ahead of the ladder |
