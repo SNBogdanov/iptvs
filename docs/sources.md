@@ -501,3 +501,43 @@ Hiding them again is the user's call, through the per-source category toggles
 in `source_settings_screen` — the app does not filter adult content itself.
 
 Pinned by `test/stalker_censored_genres_test.dart`.
+
+## Xtream: the live stream format, and the panel's own direct link
+
+Two per-source Xtream preferences live in **Source settings → Live stream format**, and they answer
+two different questions, which is why they are two tiles rather than one three-state cycle.
+
+**Which container to request** (`settings['streamExtension']`, absent = automatic) is about a URL
+the *app* composes. Xtream live streams follow `/live/USER/PASS/STREAM_ID.ext`, and most panels
+serve both `.ts` and `.m3u8`, so the automatic case asks the panel what it has: a per-channel
+`container_extension` from `get_live_streams` (`xtreamLiveExtensionFor`, mapped camelCase into
+`extra['containerExtension']` by `mapLiveChannels`), else the platform default in
+`streamExtension` — `ts` everywhere, `m3u8` on iOS so live routes to AVPlayer rather than the
+permanently-SDR mpv fallback (docs/ios.md "The `streamExtension` lever"). An explicit `ts`/`m3u8`
+outranks the panel, because a panel that doesn't serve the chosen container answers 404, which is a
+dead channel rather than a degraded one, and Dart's `engineFailed` fallback reopens the *same* URL
+on the other engine. A value outside `{ts, m3u8}` — including a case or whitespace variant, which
+the tile never writes but a hand-edited config can carry — is *not* a choice, so the panel decides.
+`validatedXtreamStreamExtension` is the single reader both the tile and the resolver go through,
+because they once disagreed on exactly that: `'TS'` read as unset in the UI and as a choice in the
+URL.
+
+**Whether to use the panel's own address** (`settings['useDirectUrl']`, off unless exactly `true`)
+is about a URL the *panel* composed. `get_live_streams` often carries `direct_source` (and
+sometimes `stream_url`) pointing at whatever CDN the reseller chose; `directUrlFor` uses it verbatim
+when it is a plain absolute URL, `direct_source` first, then `stream_url`. It is deliberately
+off by default: a direct URL is whatever the reseller baked in **at catalog-fetch time**, which on
+many panels is a rotating expiring token, and the app re-requests the composed `/live/...` URL at
+play time — so the default survives a cache that is hours old, and the direct one can 403 minutes
+after the catalog load with nothing to re-resolve against. Some users need it anyway: a provider
+that only serves the CDN host, or one that refuses the `player_api` path its own direct URL would
+have worked on. Two refusals are the point of the shape: a **schemeless or relative** address is
+skipped rather than completed against the panel host (inventing a stream the user never asked for is
+worse than either answer), and an **explicit `streamExtension` keeps composing the URL**, so a
+deliberate `.ts`/`.m3u8` choice is never silently ignored — which makes direct playback exactly the
+Automatic case, since a spelled-out address leaves no container to choose. **Catch-up is never
+taken direct**: timeshift is a panel-built path with no direct counterpart, and a live address
+there is a 404.
+
+Pinned by the `XtreamSource direct source URL` group in `test/xtream_url_test.dart`, beside
+`XtreamSource stream extension` for the container half.

@@ -9,7 +9,7 @@ import '../sources/epg_guides.dart' show kMaxEpgGuides;
 import '../sources/m3u_upgrade.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
-import '../sources/xtream_source.dart' show kXtreamStreamExtensions;
+import '../sources/xtream_source.dart' show validatedXtreamStreamExtension;
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
@@ -37,11 +37,12 @@ Set<String> bulkToggleHidden(
   return next;
 }
 
-/// The next value in the [_StreamFormatTile] cycle: unset (platform default)
-/// → `ts` → `m3u8` → unset. Pure so the tri-state cycle stays unit-testable;
-/// [current] outside `{null, 'ts', 'm3u8'}` (including a value this screen
-/// never wrote) is treated as unset, matching
-/// `resolveXtreamStreamExtension`'s own fallback.
+/// The next value in the [_StreamFormatTile] cycle: unset (automatic — the
+/// panel's own `container_extension`, else the platform default) → `ts` →
+/// `m3u8` → unset. Pure so the tri-state cycle stays unit-testable; [current]
+/// outside `{null, 'ts', 'm3u8'}` (including a value this screen never wrote)
+/// is treated as unset, matching
+/// [validatedXtreamStreamExtension]'s own fallback.
 String? nextStreamExtension(String? current) {
   const order = <String?>[null, 'ts', 'm3u8'];
   final idx = order.indexOf(current);
@@ -380,14 +381,15 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     ).showSnackBar(const SnackBar(content: Text('Catch-up overrides saved')));
   }
 
-  /// The explicit override, or `null` for "unset" (platform default). Any
-  /// stored value outside [kXtreamStreamExtensions] — including one this
-  /// screen never wrote — is treated as unset too, matching
-  /// `resolveXtreamStreamExtension`'s own fallback.
-  String? get _streamExtension {
-    final v = _config.settings['streamExtension']?.toString();
-    return kXtreamStreamExtensions.contains(v) ? v : null;
-  }
+  /// The explicit override, or `null` for "unset" (the automatic case — the
+  /// panel's own `container_extension`, else the platform default). Delegates
+  /// to [validatedXtreamStreamExtension] rather than re-checking membership
+  /// here, because the tile's label and `XtreamSource`'s resolution have to
+  /// agree on which stored values count as a choice — they disagreed on case
+  /// and surrounding whitespace before, so a hand-edited `'TS'` read as unset
+  /// here and as a choice there.
+  String? get _streamExtension =>
+      validatedXtreamStreamExtension(_config.settings['streamExtension']?.toString());
 
   /// Cycles Automatic → .ts → .m3u8 → Automatic. Only ever called from a user
   /// tap, so opening this screen never writes a value that pins a source away
@@ -399,6 +401,25 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       settings.remove('streamExtension');
     } else {
       settings['streamExtension'] = next;
+    }
+    await _save(_config.copyWith(settings: settings));
+  }
+
+  /// Whether live playback uses the panel's own `direct_source` / `stream_url`
+  /// verbatim. Only ever `true` is written — an explicit choice is needed to
+  /// turn this on, since the fallback (a composed URL) is the one that survives
+  /// an expiring direct link, so a stray value must never read as consent.
+  bool get _useDirectUrl => _config.settings['useDirectUrl'] == true;
+
+  Future<void> _toggleDirectUrl() async {
+    final settings = <String, dynamic>{..._config.settings};
+    final next = !_useDirectUrl;
+    if (next) {
+      settings['useDirectUrl'] = true;
+    } else {
+      // Removed rather than written `false`, so the key stays absent on every
+      // install that never turned it on — the same shape the format tile uses.
+      settings.remove('useDirectUrl');
     }
     await _save(_config.copyWith(settings: settings));
   }
@@ -789,6 +810,10 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                                 value: _streamExtension,
                                 onTap: _cycleStreamExtension,
                               ),
+                              _DirectSourceTile(
+                                value: _useDirectUrl,
+                                onTap: _toggleDirectUrl,
+                              ),
                             ],
                           ],
                         ),
@@ -1150,6 +1175,71 @@ class _BufferPresetTile extends StatelessWidget {
   }
 }
 
+/// Whether the panel's own `direct_source` / `stream_url` is used verbatim for
+/// live playback, instead of a URL composed from `stream_id`.
+///
+/// A **separate** tile from [_StreamFormatTile], not another step of its
+/// cycle, because the two answer different questions: the format tile decides
+/// which container a *composed* URL asks for, and there is nothing for a
+/// composed URL to ask when the panel has already spelled the whole address
+/// out. Merging them would have meant a "format" that is really a "don't build
+/// a URL" state, and an explicit `.ts`/`.m3u8` choice would silently have no
+/// effect on a direct one.
+///
+/// Off by default, and the copy says why: a direct URL is whatever the reseller
+/// baked in at catalog-fetch time, which on many panels is a CDN token that
+/// expires, whereas the app re-requests the composed URL at play time.
+class _DirectSourceTile extends StatelessWidget {
+  final bool value;
+  final VoidCallback onTap;
+
+  const _DirectSourceTile({required this.value, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      scrollOnFocus: false,
+      debugLabel: 'sourceSettings.directSource',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.link, size: 20, color: AppColors.textLo),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text("Use provider's direct link"),
+                  Text(
+                    value
+                        ? "Plays the channel's own address, when the "
+                              'provider gives one.'
+                        : "Off — the app builds each channel's own address, "
+                              'so an expiring link cannot break it.',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              value ? 'On' : 'Off',
+              style: TextStyle(
+                color: value ? AppColors.accent : AppColors.textLo,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StreamFormatTile extends StatelessWidget {
   final String? value;
   final VoidCallback onTap;
@@ -1165,7 +1255,9 @@ class _StreamFormatTile extends StatelessWidget {
   String get _hint => switch (value) {
     'ts' => 'Live channels always request the .ts format.',
     'm3u8' => 'Live channels always request the .m3u8 format.',
-    _ => "Uses this device's default format.",
+    // "Automatic" now means the panel's own answer first, so saying only
+    // "this device's default" would misdescribe what is about to happen.
+    _ => "Follows each channel's format, or this device's default.",
   };
 
   @override

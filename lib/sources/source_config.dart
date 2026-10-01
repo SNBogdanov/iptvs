@@ -86,6 +86,10 @@ class SourceConfig {
           // 404, which is a dead channel rather than a degraded one; an
           // unrecognised value falls back to the platform default.
           streamExtension: settings['streamExtension']?.toString(),
+          // Off unless the value is exactly `true` — this blob is user-
+          // editable and rides the source row into the cloud, so an absent or
+          // malformed value must never read as "on".
+          useDirectUrl: settings['useDirectUrl'] == true,
           extraEpgUrls: extraEpgUrls,
           playlistExpiryHint: fields['playlistExpiryHint'],
           catchupTimezone: catchupTimezone,

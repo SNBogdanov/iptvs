@@ -319,8 +319,10 @@ common path. Asymmetric costs justify an asymmetric default.
 **Consequence to state plainly: Stalker/MAG portals get HDR only when `create_link`
 returns an `.m3u8` URL**, because its locators are extension-less and therefore hit
 rule 4. This is what makes the `streamExtension` lever below launch scope rather
-than a nicety — defaulting Xtream to `m3u8` on iOS is what actually makes AVPlayer
-the common path.
+than a nicety — for Xtream, an Automatic source that takes the platform fallback gets
+`m3u8` on iOS, which is what actually makes AVPlayer the common path. Note the
+qualifier now that Automatic asks the panel first: a panel labelling its live streams
+`ts` keeps them on mpv, and the per-source override is how a user overrides that.
 
 Container sniffing can still be wrong — a `.m3u8` AVPlayer accepts and then chokes on. A
 **runtime fallback** is therefore mandatory, not optional. **All three detection shapes this
@@ -592,28 +594,55 @@ GLES deprecation was found — Apple has deprecated, not removed, it. Watch, don
 
 ### The `streamExtension` lever
 
-[`resolveXtreamStreamExtension`](../lib/sources/xtream_source.dart#L45) picks `'ts'` or `'m3u8'`
-per source, feeding every live URL and timeshift URL `XtreamSource` builds. Most Xtream panels
-serve both, so preferring `m3u8` on iOS routes a large share of live content onto AVPlayer with
-**no new plumbing** — a per-platform default, not a feature.
+**Automatic now asks the panel, not the platform.**
+`XtreamSource.liveExtensionFor` resolves each live and timeshift URL in this order:
+
+1. **the panel's own `container_extension`** for that channel, mapped by `xtreamLiveExtensionFor`
+   (`ts`/`mpegts` → `.ts`, `hls`/`m3u8` → `.m3u8`),
+2. **the per-source override**, if the user cycled the tile to a value,
+3. **the platform default** — `m3u8` on iOS, `ts` elsewhere.
+
+Steps 1 and 2 are mutually exclusive by construction: an override is a user decision and wins, and
+only its *absence* hands the decision to the panel. That's what `validatedXtreamStreamExtension`
+exists to keep honest — a single predicate for "did the user choose?", shared with
+`SourceSettingsScreen`'s tile label, so a stored value can't read as a choice in the resolver and as
+unset in the UI. (It normalises case and whitespace; the tile's own copy of that check did not, so a
+hand-edited `'TS'` used to disagree between the two.)
+
+Anything the panel names that isn't servable on the live endpoint — `mp4`, `mkv`, empty, absent —
+falls through to step 3, never into the URL. That is deliberate and load-bearing rather than
+cautious: the live endpoint serves `.ts` and `.m3u8`, and asking for an extension it does not serve
+is a 404, i.e. the dead-channel failure below, not a degraded one. A panel naming `mp4` for a live
+stream is naming a container, not granting a request.
+
+**Why the platform default is still the iOS lever.**
+[`resolveXtreamStreamExtension`](../lib/sources/xtream_source.dart) supplies step 3: `m3u8` on iOS,
+`ts` elsewhere. `AVPlayer` cannot play a naked continuous MPEG-TS stream, so a `.ts` locator routes
+straight to the libmpv fallback — permanently tone-mapped SDR, no PiP, no AirPlay (see "Known parity
+gaps"). A panel that labels its streams `ts` therefore lands iOS on mpv even though `m3u8` would have
+worked, and the per-source override is the deliberate way to opt back in: cycle it to "Always .m3u8"
+and every channel on that source routes to AVPlayer.
 
 This does not help Stalker, whose `create_link` returns whatever the portal chooses, nor M3U
 playlists that name `.ts` directly.
 
 **The per-source escape hatch, and why it has to exist.** `SourceConfig.settings['streamExtension']`
-overrides the platform default — `null`/unset (Automatic), `'ts'`, or `'m3u8'` — and is reachable
-from `SourceSettingsScreen`'s `_StreamFormatTile`, an "OK to cycle" tri-state row (`Automatic →
-Always .ts → Always .m3u8`, `debugLabel: 'sourceSettings.streamFormat'`) that opening the settings
-screen never pins away from the default on its own (the value stays `null` until a user actually
-cycles it). This is not a nicety: **a panel that doesn't actually serve `m3u8` fails *dead*, not
-merely SDR.** The extension is a fixed per-source choice, not something negotiated per request, so
-the fallback re-resolve after an `engineFailed` reopens the exact **same** URL — `.m3u8` on a panel
-that answers 404 for it fails identically the second time, on mpv, which has no more luck with a
-404 than AVPlayer did. Unlike the routing-rule failures rule 4 exists for (an unrecognised
-extension, safely routed to the engine that plays everything), a *wrongly forced* `m3u8` is not
-something either engine can route around — the tri-state override is the only way to recover a
-channel on such a panel, by forcing `.ts` so both the initial open and any reload land on a URL
-that actually exists.
+selects between Automatic, `'ts'`, and `'m3u8'` — reachable from `SourceSettingsScreen`'s
+`_StreamFormatTile`, an "OK to cycle" tri-state row (`Automatic → Always .ts → Always .m3u8`,
+`debugLabel: 'sourceSettings.streamFormat'`) that opening the settings screen never pins away from
+the default on its own (the value stays unset until a user actually cycles it). The hint text says
+"Follows each channel's format, or this device's default", because that is now what Automatic does.
+
+It is not a nicety, even with the panel answering first: **a panel that doesn't actually serve `m3u8`
+fails *dead*, not merely SDR.** The extension is a fixed per-source choice, not something negotiated
+per request, so the fallback re-resolve after an `engineFailed` reopens the exact **same** URL —
+`.m3u8` on a panel that answers 404 for it fails identically the second time, on mpv, which has no
+more luck with a 404 than AVPlayer did. Unlike the routing-rule failures rule 4 exists for (an
+unrecognised extension, safely routed to the engine that plays everything), a *wrongly forced*
+`m3u8` is not something either engine can route around — the tri-state override is the only way to
+recover a channel on such a panel, by forcing `.ts` so both the initial open and any reload land on
+a URL that actually exists. It also remains the only lever for a panel whose `container_extension`
+is accurate but unhelpful, such as one that labels HLS `ts`.
 
 ### Native player
 

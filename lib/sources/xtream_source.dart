@@ -41,12 +41,57 @@ const kXtreamStreamExtensions = <String>{'ts', 'm3u8'};
 /// [kXtreamStreamExtensions] falls back to the platform default rather than
 /// being passed through to the URL builder.
 ///
+/// **This is the fallback, not the normal path any more.** `XtreamSource` asks
+/// the panel's own `container_extension` first (see [xtreamLiveExtensionFor]),
+/// and only reaches the default when the panel named nothing servable. So a
+/// panel that labels its streams gets what it actually stores, and an explicit
+/// [override] — or the platform default — still decides when it does not.
+///
 /// Pure and platform-injected so `flutter test` can assert both branches from a
 /// desktop VM.
-String resolveXtreamStreamExtension(String? override, {required bool isIOS}) {
+String resolveXtreamStreamExtension(String? override, {required bool isIOS}) =>
+    validatedXtreamStreamExtension(override) ?? (isIOS ? 'm3u8' : 'ts');
+
+/// The one place the per-source `streamExtension` value is accepted, so
+/// "is this a real choice?" cannot answer differently in
+/// [resolveXtreamStreamExtension] (which falls back to the platform default)
+/// and in the source (which must distinguish *no* choice from a deliberate
+/// one — that distinction is what lets the panel's own
+/// `container_extension` decide). Null means "the user never chose".
+String? validatedXtreamStreamExtension(String? override) {
   final value = override?.trim().toLowerCase() ?? '';
-  if (kXtreamStreamExtensions.contains(value)) return value;
-  return isIOS ? 'm3u8' : 'ts';
+  return kXtreamStreamExtensions.contains(value) ? value : null;
+}
+
+/// Maps a panel-reported `container_extension` onto the extension this source
+/// asks the live/timeshift endpoint for, or returns [fallback] when the panel
+/// named nothing we can serve.
+///
+/// The panel names the container it *stores*; the live endpoint serves `.ts`
+/// and `.m3u8`. The two aliases for each are the ones panels actually ship —
+/// `mpegts` is the same MPEG transport stream as `ts`, and `hls` is the same
+/// playlist as `m3u8` — so those are folded rather than treated as unknown.
+///
+/// Anything else falls back rather than being passed through: the failure mode
+/// of an extension the endpoint will not serve is a 404, which is a dead
+/// channel rather than a degraded one (same reasoning as
+/// [resolveXtreamStreamExtension]'s override). A live channel's
+/// `container_extension` is absent or `mp4` on plenty of panels, and "whatever
+/// we were already asking for" is the right answer for both.
+String xtreamLiveExtensionFor(
+  String? containerExtension, {
+  required String fallback,
+}) {
+  switch (containerExtension?.trim().toLowerCase()) {
+    case 'ts':
+    case 'mpegts':
+      return 'ts';
+    case 'm3u8':
+    case 'hls':
+      return 'm3u8';
+    default:
+      return fallback;
+  }
 }
 
 /// A [Source] backed by an Xtream Codes panel (host + username + password).
@@ -68,6 +113,65 @@ class XtreamSource
   /// [resolveXtreamStreamExtension] — see there for the iOS default and the
   /// per-source override.
   final String streamExtension;
+
+  /// The user's deliberate per-source choice, or null when they never made one.
+  ///
+  /// [streamExtension] cannot answer "was this asked for?" on its own, because
+  /// it has already collapsed "no answer" into the platform default. This
+  /// distinguishes the two, which is what lets a per-channel
+  /// `container_extension` decide the automatic case while an explicit choice
+  /// still wins outright.
+  final String? streamExtensionOverride;
+
+  /// The panel's direct URL for [extra], when the user opted into direct
+  /// playback and the payload carried one — `direct_source` first, then
+  /// `stream_url`.
+  ///
+  /// A **plain, absolute** URL only: a panel that sends a relative path here
+  /// is describing its own routing rather than a CDN, and composing one
+  /// against the panel host would silently produce something the user never
+  /// asked for. Anything with no scheme is rejected here rather than fixed, so
+  /// the refusal is a fallback to the normal URL instead of a broken stream.
+  String? directUrlFor(Map<String, dynamic> extra) {
+    if (!useDirectUrl) return null;
+    for (final key in const ['directSource', 'streamUrl']) {
+      final raw = extra[key]?.toString().trim();
+      if (raw == null || raw.isEmpty) continue;
+      final uri = Uri.tryParse(raw);
+      if (uri == null || !uri.hasScheme || uri.host.isEmpty) continue;
+      return raw;
+    }
+    return null;
+  }
+
+  /// The extension to request for [channel]: the panel's own
+  /// `container_extension` when the user chose nothing, else the user's choice,
+  /// else the platform default in [streamExtension].
+  String liveExtensionFor(Map<String, dynamic> extra) {
+    final override = streamExtensionOverride;
+    if (override != null) return override;
+    return xtreamLiveExtensionFor(
+      extra['containerExtension']?.toString(),
+      fallback: streamExtension,
+    );
+  }
+
+  /// Whether the panel's own `direct_source` / `stream_url` should be used
+  /// verbatim when present, instead of composing a `/live/USER/PASS/ID.ext`
+  /// URL.
+  ///
+  /// Off by default, and deliberately so: `direct_source` points at whatever
+  /// CDN the reseller chose, which on many panels is a **rotating expiring
+  /// token** baked at catalog-fetch time. Composing the URL from `stream_id`
+  /// is the portable answer, since the app already re-requests it at play time;
+  /// a cached direct URL has no such guarantee and can 403 minutes after the
+  /// catalog load, with nothing to re-resolve against. Users opt in because
+  /// some providers *only* serve the CDN host, or reject a `player_api` path
+  /// their own direct URL would have worked.
+  ///
+  /// Consulted only for live playback — catch-up is a `timeshift` path the
+  /// panel builds itself and has no direct counterpart.
+  final bool useDirectUrl;
 
   /// Expiry carried by an M3U/get.php URL before it was converted to an
   /// Xtream source. Some panels expose it in the playlist URL but omit it
@@ -105,6 +209,7 @@ class XtreamSource
     required this.username,
     required this.password,
     String? streamExtension,
+    this.useDirectUrl = false,
     this.playlistExpiryHint,
     this.extraEpgUrls = const [],
     this.catchupTimezone,
@@ -115,7 +220,8 @@ class XtreamSource
   }) : streamExtension = resolveXtreamStreamExtension(
          streamExtension,
          isIOS: Platform.isIOS,
-       );
+       ),
+       streamExtensionOverride = validatedXtreamStreamExtension(streamExtension);
 
   /// User-assigned label (from SourceConfig); preferred over the derived name.
   final String? displayName;
@@ -226,9 +332,24 @@ class XtreamSource
 
   @override
   Future<StreamInfo> resolve(Channel channel) async {
+    // A user-set stream format is a request about the *composed* URL, so a
+    // deliberate override keeps composing it — silently ignoring a choice the
+    // user just made would be worse than either answer. Direct playback is
+    // therefore exactly the "Automatic" case: the panel spelled the whole
+    // address out and there is no container left for us to pick.
+    final override = streamExtensionOverride;
+    final direct = override == null ? directUrlFor(channel.extra) : null;
+    if (direct != null) {
+      return StreamInfo(
+        url: direct,
+        headers: {HttpHeaders.userAgentHeader: 'VLC/3.0.20 LibVLC/3.0.20'},
+      );
+    }
     final streamId = channel.extra['streamId']?.toString() ?? channel.id;
     return StreamInfo(
-      url: '$_base/live/$username/$password/$streamId.$streamExtension',
+      url:
+          '$_base/live/$username/$password/'
+          '$streamId.${liveExtensionFor(channel.extra)}',
     );
   }
 
@@ -242,7 +363,8 @@ class XtreamSource
     return StreamInfo(
       url:
           '$_base/timeshift/$username/$password/$duration/'
-          '${_timeshiftStart(programme.start, catchupCapability)}/$streamId.$streamExtension',
+          '${_timeshiftStart(programme.start, catchupCapability)}/'
+          '$streamId.${liveExtensionFor(channel.extra)}',
       isLive: false,
     );
   }
@@ -751,6 +873,9 @@ List<Channel> mapLiveChannels(dynamic decoded) {
     final m = Map<String, dynamic>.from(s);
     final streamId = '${m['stream_id']}';
     final epgId = m['epg_channel_id']?.toString();
+    final containerExt = m['container_extension']?.toString();
+    final directSource = _firstString(m, ['direct_source', 'directSource']);
+    final streamUrl = _firstString(m, ['stream_url', 'streamUrl']);
     return Channel(
       id: streamId,
       name: '${m['name']}',
@@ -765,6 +890,15 @@ List<Channel> mapLiveChannels(dynamic decoded) {
       extra: {
         'streamId': streamId,
         if (epgId != null && epgId.isNotEmpty) 'tvgId': epgId,
+        // The panel's own container for this stream, kept so `resolve` can ask
+        // for it instead of guessing. camelCase, not the panel's
+        // `container_extension`: this map is the app's side of the boundary and
+        // every other key in it already is.
+        if (containerExt != null && containerExt.isNotEmpty)
+          'containerExtension': containerExt,
+        if (directSource != null && directSource.isNotEmpty)
+          'directSource': directSource,
+        if (streamUrl != null && streamUrl.isNotEmpty) 'streamUrl': streamUrl,
       },
     );
   }).toList();
