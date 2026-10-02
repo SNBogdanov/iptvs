@@ -49,6 +49,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   List<MetadataProvider> _metadataProviders = const [];
   LibraryRepository? _repo;
   bool _loading = true;
+
+/// The [MetadataConfig] the current [_repo] was built with, so `_loadActive`
+  /// can tell a settings-only source edit (reuse the repository) from a metadata
+  /// edit (rebuild it — its providers are `final`).
+  MetadataConfig? _metadataConfig;
+
+  /// Sources replaced by a settings-only edit, waiting to be closed.
+  ///
+  /// `dispose()` force-closes a source's HTTP client, and an in-flight channel
+  /// load or guide fetch still holds the repository that was reading through it
+  /// — retiring one immediately would abort that work and, unlike the full
+  /// rebuild (where the child starts a fresh load straight after), nothing
+  /// would be there to replace it. So a reused repository's old source is
+  /// parked here and closed on the next rebuild or on teardown, which is prompt
+  /// enough: an idle source costs a keep-alive socket and nothing else.
+  final List<Source> _retiredSources = [];
   bool Function(KeyEvent event)? _keyboardLogger;
   bool _updateResumeActive = false;
 
@@ -194,6 +210,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     unawaited(_cloudAutoSync?.dispose() ?? Future<void>.value());
     _cloudAutoSync = null;
     _cloudAutoSyncProfileId = null;
+    for (final retired in _retiredSources) {
+      unawaited(retired.dispose());
+    }
+    _retiredSources.clear();
     _source?.dispose();
     for (final provider in _metadataProviders) {
       provider.close();
@@ -225,14 +245,82 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _loadActive() async {
     final gen = ++_loadActiveGeneration;
-    if (mounted) setState(() => _loading = true);
     final cfg = await widget.store.activeConfig();
     if (cfg != null) await migrateSourceIdentity(widget.db, cfg);
+    final metadata = await widget.store.metadataConfig();
+
+    // A settings-only edit — a hidden category, a catch-up override, a renamed
+    // label, the Xtream direct-URL/extension levers — leaves every cached
+    // catalog row correct, because those keys are read at play time or by the
+    // UI and never while building the rows. `ChannelListScreen` reloads the
+    // whole catalog whenever it is handed a *different* `LibraryRepository`, so
+    // rebuilding one here is what made leaving the sources screen take as long
+    // as a cold start. Hand the new settings to the repository already in
+    // flight instead and keep its identity.
+    //
+    // Both halves have to match: the source decides the catalog, and the
+    // metadata providers are `final` on the repository, so a changed metadata
+    // config still needs the rebuild below (and must not leave the providers
+    // this repository holds closed).
+    final repo = _repo;
+    final reusable =
+        repo != null &&
+        cfg != null &&
+        _config != null &&
+        _config!.hasSameCatalogInputs(cfg) &&
+        _metadataConfig != null &&
+        _metadataConfig!.sameConfiguration(metadata);
+    if (reusable) {
+      // The common case by far: a hidden category, an aspect or buffer choice,
+      // the resume preference. None of those reach the built [Source], so the
+      // repository keeps the one it has — nothing to swap, nothing to retire,
+      // and nothing that could abort an in-flight load.
+      if (_config!.sameSourceInputs(cfg)) {
+        if (!mounted || gen != _loadActiveGeneration) return;
+        setState(() {
+          _config = cfg;
+          _loading = false;
+        });
+        _loadProfileInfo();
+        unawaited(_startCloudAutoSync());
+        unawaited(_maybeUpgradeM3uSource(cfg));
+        return;
+      }
+      // A catch-up override or an Xtream lever moved: the cached catalog is
+      // still valid, but the source has to be rebuilt to carry the new value.
+      final src = cfg.build();
+      if (!mounted || gen != _loadActiveGeneration) {
+        await src.dispose();
+        return;
+      }
+      final previous = repo.source;
+      // Swap first: the repository must never be left pointing at a disposed
+      // source. The previous one is *retired*, not disposed — see
+      // [_retiredSources].
+      repo.source = src;
+      setState(() {
+        _config = cfg;
+        _source = src;
+        _loading = false;
+      });
+      if (!identical(previous, src)) _retiredSources.add(previous);
+      _loadProfileInfo();
+      unawaited(_startCloudAutoSync());
+      unawaited(_maybeUpgradeM3uSource(cfg));
+      return;
+    }
+
+    if (mounted) setState(() => _loading = true);
+    // Safe to close now: the repository below is a different object, so nothing
+    // can reach them again.
+    for (final retired in _retiredSources) {
+      await retired.dispose();
+    }
+    _retiredSources.clear();
     await _source?.dispose();
     for (final provider in _metadataProviders) {
       provider.close();
     }
-    final metadata = await widget.store.metadataConfig();
     final providers = _buildMetadataProviders(metadata);
     debugPrint(
       '[iptvs.metadata] providers=${providers.map((p) => '${p.provider}:${p.authMode}').join(',')}',
@@ -249,6 +337,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _config = cfg;
       _source = src;
       _metadataProviders = providers;
+      _metadataConfig = metadata;
       _repo = src == null
           ? null
           : LibraryRepository(

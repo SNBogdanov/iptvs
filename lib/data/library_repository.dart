@@ -68,7 +68,17 @@ class MediaLibrarySnapshot {
 /// when available, refreshes EPG when stale, and only hits the provider for
 /// the heavy fetch on a cold start or an explicit refresh.
 class LibraryRepository {
-  final Source source;
+  /// The provider half of the repository.
+  ///
+  /// Settable only so `HomeShell._loadActive` can hand a **settings-changed**
+  /// source to the repository that is already loaded (see
+  /// [SourceConfig.hasSameCatalogInputs]): the cached rows are keyed by
+  /// `source.id` and none of those settings take part in building them, so
+  /// rebuilding the repository over them would re-run the channel load and the
+  /// EPG refresh for a hidden category or a catch-up override. An edit that
+  /// *does* change the catalog (kind, id, `fields`) still builds a new
+  /// repository, and with it a new source.
+  Source source;
   final AppDatabase db;
   final List<MetadataProvider> metadataProviders;
   final bool autoEnrichMetadata;

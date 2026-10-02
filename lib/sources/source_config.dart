@@ -51,10 +51,83 @@ class SourceConfig {
     this.settings = const {},
   });
 
+  /// Whether [other] would leave every **cached catalog row** for this source
+  /// exactly as it is.
+  ///
+  /// The cache is keyed by [id], and the rows in it are built from [kind] and
+  /// [fields] alone — credentials, playlist URL, and the EPG guide URLs
+  /// (`epgUrl`/`epgUrls`, which is why editing a guide list *does* change it and
+  /// has to re-ingest). Everything in [settings] is read either at play time or
+  /// by the UI, never while building the catalog: hidden categories, the
+  /// catch-up overrides, aspect mode, buffer preset, the resume preference, and
+  /// the Xtream `useDirectUrl`/`streamExtension` levers (those are resolved per
+  /// channel from `extra` by `directUrlFor`/`liveExtensionFor`).
+  ///
+  /// This is the predicate that lets `HomeShell._loadActive` hand a settings
+  /// edit to the repository it already has instead of rebuilding one over an
+  /// unchanged cache — a new repository re-runs the whole channel load and EPG
+  /// refresh, which is the multi-second wait a category toggle should never cost.
+  bool hasSameCatalogInputs(SourceConfig other) =>
+      id == other.id &&
+      kind == other.kind &&
+      _sameFields(fields, other.fields);
+
+  /// Settings keys [build] turns into constructor arguments, i.e. the ones a
+  /// *built* [Source] can never learn later. Keep in step with [build]: a key
+  /// read there and missing here leaves a stale source in place until the next
+  /// rebuild (a source switch, a profile switch, an activation).
+  static const _sourceReadSettings = {
+    'catchupTimezone',
+    'catchupOffsetMinutes',
+    'catchupMaxDays',
+    // The two Xtream levers, resolved per channel at play time rather than
+    // while ingesting — see `directUrlFor`/`liveExtensionFor`.
+    'streamExtension',
+    'useDirectUrl',
+  };
+
+  /// Whether a [Source] built from this config would behave exactly like one
+  /// built from [other] — the second half of `HomeShell._loadActive`'s reuse
+  /// decision, after [hasSameCatalogInputs] has said the cache is still valid.
+  ///
+  /// True for the edits the source-settings screen makes most often: a hidden
+  /// category, the aspect mode, the buffer preset, the resume preference. Those
+  /// are read by the UI, so the loaded repository can keep the source it already
+  /// has — nothing to swap, nothing to retire. False when something [build] bakes
+  /// in moved instead: a catch-up override, an Xtream lever, or the label
+  /// (`displayName`, which the player badge and zap banner print). That is when
+  /// the repository is reused but handed a freshly built source.
+  bool sameSourceInputs(SourceConfig other) =>
+      hasSameCatalogInputs(other) &&
+      label == other.label &&
+      _sameSettings(other, _sourceReadSettings);
+
+  bool _sameSettings(SourceConfig other, Set<String> keys) {
+    for (final key in keys) {
+      if (settings[key] != other.settings[key]) return false;
+    }
+    return true;
+  }
+
+  /// Content equality for the credential/URL map. `Map` has no `==` by content,
+  /// and [package:collection] is not a direct dependency here.
+  static bool _sameFields(Map<String, String> a, Map<String, String> b) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (b[entry.key] != entry.value) return false;
+    }
+    return true;
+  }
+
   Source build() {
     // The user-assigned label is the canonical display name everywhere it's shown
     // (app bar, player badge, logs); fall back to each source's derived name when
     // it's blank.
+    //
+    // Everything read out of [settings] below — the catch-up overrides, the two
+    // Xtream levers — is listed in [_sourceReadSettings]: those are baked into
+    // the built source, so a change to one of them cannot be served by reusing
+    // the source an already-loaded repository holds.
     final name = label.trim().isEmpty ? null : label.trim();
     final catchupTimezone = settings['catchupTimezone']?.toString();
     final catchupOffsetMinutes = int.tryParse(

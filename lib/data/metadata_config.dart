@@ -21,6 +21,23 @@ class MetadataConfig {
   bool get hasTvdb => tvdbApiKey.trim().isNotEmpty;
   bool get hasMdblist => mdblistApiKey.trim().isNotEmpty;
 
+  /// Whether [other] would build the same set of `MetadataProvider`s.
+  ///
+  /// `HomeShell._loadActive` reuses the loaded `LibraryRepository` when the
+  /// source's catalog inputs are unchanged, and this is the other half of that
+  /// decision: the providers it holds are `final`, so a changed key, provider or
+  /// `autoEnrich` flag has to rebuild the repository rather than leave it
+  /// enrichment with the credentials that were just replaced. Compared field by
+  /// field rather than through [toJson] so no key material is ever concatenated
+  /// into a comparison string.
+  bool sameConfiguration(MetadataConfig other) =>
+      provider == other.provider &&
+      tmdbApiKey == other.tmdbApiKey &&
+      tvdbApiKey == other.tvdbApiKey &&
+      tvdbPin == other.tvdbPin &&
+      mdblistApiKey == other.mdblistApiKey &&
+      autoEnrich == other.autoEnrich;
+
   String get preferredVisualProvider =>
       provider == 'tvdb' || provider == 'tmdb' ? provider : 'tmdb';
 

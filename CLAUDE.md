@@ -222,7 +222,18 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   source's now/next). Staleness is decided in `load` before scheduling, so a load with nothing to
   do leaves `pendingEpgRefresh` null — the live status line reads that to say `· updating guide…`.
   Don't reintroduce an `await` on the refresh, and don't feed a lazy provider stream straight into
-  `replaceEpgStream`. Because the guide now lands *after* the list is built, two states are
+  `replaceEpgStream`. **A repository's identity is a load signal, not a formality**:
+  `ChannelListScreen.didUpdateWidget` watches it with `!identical(old.repo, widget.repo)` and re-runs
+  `_loadLive()` on a new one, so `HomeShell._loadActive` must not rebuild the repository for an edit
+  that left the cache valid — that made leaving the sources screen cost a full channel load. It reuses
+  the loaded one (hence `LibraryRepository.source` being settable) when
+  `SourceConfig.hasSameCatalogInputs` and `MetadataConfig.sameConfiguration` both hold, and keeps the
+  *source* too when `sameSourceInputs` does. The EPG guide list rides in `fields`, so editing guides
+  still re-ingests — the refresh `invalidateEpg` schedules must not be deferred — and a reused
+  repository's old source is **retired, not disposed** (`_retiredSources`: `dispose()` force-closes
+  the HTTP client an in-flight load is still reading through). See [docs/sources.md](docs/sources.md)
+  "Leaving the sources screen must not re-ingest the catalog".
+  Because the guide now lands *after* the list is built, two states are
   surfaced that used to be impossible: `LiveController.expectsEpg` sizes rows tall while a refresh
   runs on a source whose `capabilitiesOf(...).epg` is `supported` (an `unknown` source waits and
   sees, so it isn't sized tall for a guide that never comes), and `epgUnavailable` —

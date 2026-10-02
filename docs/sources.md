@@ -541,3 +541,42 @@ there is a 404.
 
 Pinned by the `XtreamSource direct source URL` group in `test/xtream_url_test.dart`, beside
 `XtreamSource stream extension` for the container half.
+
+## Leaving the sources screen must not re-ingest the catalog
+
+`HomeShell._loadActive` runs on **every** return from the sources screen, the profile picker and the
+cloud screen, and it used to build a brand-new `Source` + `LibraryRepository` every time.
+`ChannelListScreen.didUpdateWidget` watches the repository by **identity** (`!identical(old.repo,
+widget.repo)`) and treats a new one as a new source: it disposes its controllers and re-runs
+`_loadLive()` plus both EPG refreshes. So hiding a category and going back cost a full channel load
+on a 250k-channel portal - a cold start for an edit that changed no cached row.
+
+Two predicates decide instead, both pure and both unit-tested
+(`test/source_config_test.dart`, `test/metadata_config_test.dart`):
+
+- **`SourceConfig.hasSameCatalogInputs`** - the cache is keyed by `id` and its rows are built from
+  `kind` + `fields` alone (credentials, playlist URL, `epgUrl`/`epgUrls`). So a *settings-only* edit
+  leaves every row correct and the repository is **reused**: `LibraryRepository.source` becomes
+  settable so the new settings can be handed to the instance already loaded. Note the EPG guide list
+  rides in `fields`, so editing it still forces the rebuild `invalidateEpg` expects - the guide
+  refresh must not be deferred. The metadata half is `MetadataConfig.sameConfiguration`, because the
+  repository's `MetadataProvider`s are `final`: a changed key, provider or `autoEnrich` flag has to
+  rebuild, or enrichment keeps credentials the user just replaced.
+- **`SourceConfig.sameSourceInputs`** - the narrower question of whether the *built* `Source` itself
+  is stale. Hidden categories, aspect mode, buffer preset and the resume preference never reach
+  `build()`, so the common edit keeps the source object as well: nothing to swap, nothing to retire,
+  and no chance of disturbing work in flight. The catch-up overrides, the two Xtream levers and the
+  label (`displayName`, printed by the player badge and the zap banner) *are* baked in by `build()`,
+  so those reuse the repository but hand it a freshly built source.
+
+**A reused repository's old source is retired, not disposed** (`HomeShell._retiredSources`). A
+source's `dispose()` force-closes its HTTP client, and an in-flight channel load or streamed guide
+fetch still holds the repository that was reading through it; retiring one immediately would abort
+that work, and unlike the full rebuild - where the child starts a fresh load straight after - nothing
+would be there to replace it. Retired sources are closed on the next rebuild or on teardown, which is
+prompt enough: an idle source costs a keep-alive socket and nothing else.
+
+Keep the two predicates in step with `build()` and with the settings keys
+`source_settings_screen` writes. A key `build()` reads that is missing from `_sourceReadSettings`
+leaves a stale source until the next rebuild; a settings key wrongly listed there costs a needless
+source swap (retirement churn), not correctness.

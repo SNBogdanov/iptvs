@@ -124,4 +124,152 @@ void main() {
       expect(relabeled.hiddenCategoryIds(ContentKind.series), {'s1'});
     });
   });
+
+  // `HomeShell._loadActive` reuses the loaded repository when this holds, which
+  // is what keeps leaving the sources screen from re-running the whole channel
+  // load. Every settings key a source-settings edit can write has to answer
+  // "same catalog" here; every catalog input has to answer "different".
+  group('hasSameCatalogInputs', () {
+    test('an unchanged config matches itself', () {
+      expect(base.hasSameCatalogInputs(base), isTrue);
+      expect(
+        base.hasSameCatalogInputs(base.copyWith(label: 'Renamed')),
+        isTrue,
+        reason: 'the label is display-only',
+      );
+    });
+
+    test('hidden categories and catch-up overrides do not change the catalog',
+        () {
+      final hidden = base.withHiddenCategories(ContentKind.live, {'sport'});
+      expect(base.hasSameCatalogInputs(hidden), isTrue);
+      expect(
+        base.hasSameCatalogInputs(
+          hidden.copyWith(settings: {
+            'catchupTimezone': 'Europe/Berlin',
+            'catchupOffsetMinutes': 120,
+            'catchupMaxDays': 7,
+          }),
+        ),
+        isTrue,
+      );
+      expect(
+        base.hasSameCatalogInputs(
+          base.copyWith(settings: {'aspectMode': '16:9', 'bufferPreset': 'high'}),
+        ),
+        isTrue,
+      );
+      expect(
+        base.hasSameCatalogInputs(
+          base.copyWith(settings: {'useDirectUrl': true, 'streamExtension': 'm3u8'}),
+        ),
+        isTrue,
+        reason: 'both are resolved per channel at play time, not while ingesting',
+      );
+    });
+
+    test('credentials, playlist URL and EPG guides do change the catalog', () {
+      expect(
+        base.hasSameCatalogInputs(
+          base.copyWith(fields: const {
+            'host': 'http://h:80',
+            'username': 'u',
+            'password': 'rotated',
+          }),
+        ),
+        isFalse,
+      );
+      expect(
+        base.hasSameCatalogInputs(
+          base.copyWith(fields: const {
+            'host': 'http://h:80',
+            'username': 'u',
+            'password': 'p',
+            'epgUrls': 'https://guide.invalid/a.xml',
+          }),
+        ),
+        isFalse,
+        reason: 'guide URLs are part of what the cached guide was built from',
+      );
+      expect(
+        base.hasSameCatalogInputs(base.copyWith(fields: const {'host': 'http://h:80'})),
+        isFalse,
+        reason: 'a dropped credential key is a change, not a subset match',
+      );
+    });
+
+    test('the id and the kind are catalog inputs', () {
+      expect(base.hasSameCatalogInputs(base.copyWith(id: 'id2')), isFalse);
+      expect(
+        base.hasSameCatalogInputs(base.copyWith(kind: SourceKind.m3u)),
+        isFalse,
+      );
+    });
+  });
+
+  // The second half of the reuse decision: the common settings edits must not
+  // even rebuild the `Source`, so an already-loaded repository can keep the one
+  // it holds (no swap, no retirement, no chance of aborting in-flight work).
+  group('sameSourceInputs', () {
+    test('a UI-only edit keeps the source', () {
+      expect(base.sameSourceInputs(base), isTrue);
+      expect(
+        base.sameSourceInputs(
+          base.withHiddenCategories(ContentKind.live, {'sport'}),
+        ),
+        isTrue,
+      );
+      expect(
+        base.sameSourceInputs(
+          base.copyWith(
+            settings: {
+              'aspectMode': '16:9',
+              'bufferPreset': 'high',
+              'autoResumeLastChannel': false,
+              'channelDwellSeconds': 7,
+            },
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('a rename rebuilds the source but not the catalog', () {
+      // `build()` passes the label through as `displayName`, and the player
+      // badge and zap banner print it — so the source must be rebuilt, while
+      // every cached row is still correct.
+      final renamed = base.copyWith(label: 'Renamed');
+      expect(renamed.hasSameCatalogInputs(base), isTrue);
+      expect(renamed.sameSourceInputs(base), isFalse);
+    });
+
+    test('a catch-up override or an Xtream lever rebuilds the source', () {
+      for (final settings in const <Map<String, dynamic>>[
+        {'catchupTimezone': 'Europe/Berlin'},
+        {'catchupOffsetMinutes': 120},
+        {'catchupMaxDays': 7},
+        {'streamExtension': 'm3u8'},
+        {'useDirectUrl': true},
+      ]) {
+        expect(
+          base.sameSourceInputs(base.copyWith(settings: settings)),
+          isFalse,
+          reason: 'build() bakes $settings into the source',
+        );
+      }
+    });
+
+    test('a credential change rebuilds the source too', () {
+      expect(
+        base.sameSourceInputs(
+          base.copyWith(fields: const {
+            'host': 'http://h:80',
+            'username': 'u',
+            'password': 'rotated',
+          }),
+        ),
+        isFalse,
+      );
+    });
+  });
 }
