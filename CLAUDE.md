@@ -945,6 +945,20 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 
 - **Windows handoff: set `wid` before `vo`** in `_configureNativePlayer`, or mpv flashes a stray
   top-level window.
+- **Windows system tray icon** (docs/player.md "System tray icon"): the runner puts the app icon in
+  the notification area and intercepts `WM_CLOSE` so closing the window hides it to the tray instead
+  of quitting. Restore = left-click; quit = tray **Exit** or the in-app double-Back exit, both of
+  which set `force_quit_` so the close cannot be re-intercepted. The in-app exit must use the
+  runner's `exitApp` method, not `SystemNavigator.pop()` — the Windows engine handles
+  `System.exitApplication`, so a bare `pop()` is a no-op there. `close_to_tray_` (default true) is the
+  X-button policy, settable via `setCloseToTray`; `OnDestroy` removes the icon through the retained
+  `tray_owner_hwnd_` because the base class has already nulled its own handle by then. Hiding sends a
+  native `trayHidden` event on `iptvs/tray` (the Windows `hidden` lifecycle does **not** fire for a
+  `SW_HIDE`), and Dart pauses the preview/player on it via `silenceRequest`; restoring sends
+  `trayShown` and resumes via `resumeRequest`. The **boss key** is F12 (a `HardwareKeyboard` handler
+  on the app root, plus a runner-side `WM_KEYDOWN`/`VK_F12` for the native HDR surface) and just calls
+  `hideToTray`. A global Settings screen (avatar menu → Settings) hosts the close-to-tray, random
+  zapping and always-on-top-in-fullscreen preferences in `AppSettingsStore`.
 - **Windows: the runner sizes mpv's VO window itself** (`ResyncNativeVideoRenderer`) — never rely on
   mpv's `--wid` parent hook. mpv reaches `ResizeBuffers` only via a real `WM_SIZE` on its child HWND
   (`VO_EVENT_RESIZE`), and its `EqualRect` early-out never revisits a size it missed: a dropped edge
@@ -1173,6 +1187,16 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   resolve/reopen path are **gone**; the controller owns the list, the cursor and the resolve. Its
   caller is still outstanding after that removal (docs/player.md "Live zapping" → Ownership). The
   buffering preset and aspect choice stay session-level across a zap. docs/player.md "Live zap".
+- **Random zapping (Ctrl+R) and the auto-switch countdown are two session-scoped zapping modes.**
+  The countdown (`lib/player/auto_switch.dart`, its own `ChangeNotifier` so its per-second tick never
+  holds the zap banner up) walks the range on each source's `ChannelDwell` and advances through
+  `channelUp`. Random (`LiveZapController.random`, toggled by Ctrl+R, persisted in
+  `AppSettingsStore.randomZapping`) makes `channelUp`/`channelDown` pick a random index that is never
+  the one under the cursor — inherited by the countdown's `channelUp` funnel, so an auto-walk also
+  jumps randomly. The shuffle marker is `ZapBannerState.random`, drawn beside the countdown chip
+  (which renders when the countdown is on **or** random is on, so the mode stays answerable with the
+  chrome gone); `onRandomChanged` persists it back from the channel list. docs/player.md
+  "Live zapping" → "Auto-switch countdown + random zapping".
 - **A typed number in the fullscreen player is a zap, not a second input system.** `PlayerScreen`
   owns **no** `ChannelNumberEntry`: it reads the session's `LiveZapController.numberEntry` and draws
   the shared `ChannelNumberChip`, so a digit moves the same cursor PgDn/PgUp move, in the same range,

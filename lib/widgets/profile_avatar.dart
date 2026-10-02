@@ -25,15 +25,17 @@ int profileColorIndexFor(String id) {
   return h % kProfileAvatarColors.length;
 }
 
-enum _ProfileMenuAction { changeProfile, profileSettings }
+enum _ProfileMenuAction { changeProfile, profileSettings, settings }
 
 /// The AppBar avatar: the active profile's initial in its colour, opening a
-/// dropdown with "Change profile" and (when wired) "Profile settings".
+/// dropdown with "Change profile", "Settings" (global), and (when wired)
+/// "Profile settings" (cloud sync).
 class ProfileAvatarButton extends StatelessWidget {
   final String? profileName;
   final int colorIndex;
   final VoidCallback? onChangeProfile;
   final VoidCallback? onProfileSettings;
+  final VoidCallback? onSettings;
 
   const ProfileAvatarButton({
     super.key,
@@ -41,6 +43,7 @@ class ProfileAvatarButton extends StatelessWidget {
     required this.colorIndex,
     required this.onChangeProfile,
     required this.onProfileSettings,
+    this.onSettings,
   });
 
   @override
@@ -58,6 +61,8 @@ class ProfileAvatarButton extends StatelessWidget {
             onChangeProfile?.call();
           case _ProfileMenuAction.profileSettings:
             onProfileSettings?.call();
+          case _ProfileMenuAction.settings:
+            onSettings?.call();
         }
       },
       itemBuilder: (_) => [
@@ -69,6 +74,17 @@ class ProfileAvatarButton extends StatelessWidget {
                 Icon(Icons.switch_account_outlined, size: 18),
                 SizedBox(width: 10),
                 Text('Change profile'),
+              ],
+            ),
+          ),
+        if (onSettings != null)
+          const PopupMenuItem(
+            value: _ProfileMenuAction.settings,
+            child: Row(
+              children: [
+                Icon(Icons.settings_outlined, size: 18),
+                SizedBox(width: 10),
+                Text('Settings'),
               ],
             ),
           ),

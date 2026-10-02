@@ -26,7 +26,7 @@ import 'player_overlay.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
 import 'playback_audio_session.dart';
-import 'zap_command.dart';
+import 'tray.dart';import 'zap_command.dart';
 import 'zap_quick_list.dart';
 
 /// Buffering/dropped this long before a non-forced live reconnect fires.
@@ -911,6 +911,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       WidgetsBinding.instance.addObserver(this);
       _lifecycleObserverRegistered = true;
     }
+    // The boss key / hide-to-tray signal: the Windows runner raises this when
+    // the window hides, because the `hidden` lifecycle it would otherwise ride
+    // never fires for a `SW_HIDE`. Unconditional — pausing on this is a no-op
+    // when nothing is playing.
+    silenceRequest.addListener(_onSilenceRequested);
+    resumeRequest.addListener(_onResumeRequested);
 
     // Show errors once as an overlay rather than a stream of snackbars. On a live
     // stream, auto-reconnect instead of surfacing a terminal error.
@@ -1237,6 +1243,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       autoSwitchLabel: zap.autoSwitch.enabled
           ? autoSwitchChipLabel(zap.autoSwitch)
           : null,
+      random: zap.random,
     );
   }
 
@@ -2171,11 +2178,37 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+    // Boss key / hide-to-tray: the window going hidden must quiet the player
+    // just as the channel list quiets its preview, or audio keeps playing
+    // behind a window the user cannot see. `_player.pause()` covers the
+    // embedded and Windows-native surfaces (both present through this same
+    // player); the separate-engine surfaces keep their own idling, so a pause
+    // there is a no-op.
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      _logPlayback('lifecycle ${state.name}: pausing player');
+      unawaited(_player.pause());
+    }
     // Re-evaluate on *every* transition, not just `resumed`: the deferral is
     // released by a predicate over three signals, and a transition to any of
     // them can be the one that unblocks it.
     if (!_iosFallbackPending) return;
     _evaluateIosFallback();
+  }
+
+  /// The boss key / hide-to-tray signal (docs/player.md "System tray icon").
+  /// `_player` presents both the embedded and the Windows-native surfaces, so a
+  /// pause silences both; the separate-engine surfaces keep their own idling and
+  /// a pause there is a no-op.
+  void _onSilenceRequested() {
+    _logPlayback('silence requested: pausing player');
+    unawaited(_player.pause());
+  }
+
+  /// The restore-from-tray leg: resume what [_onSilenceRequested] paused.
+  void _onResumeRequested() {
+    _logPlayback('resume requested: playing player');
+    unawaited(_player.play());
   }
 
   /// Reopens the current content on the embedded media_kit/libmpv surface after
@@ -3749,6 +3782,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       WidgetsBinding.instance.removeObserver(this);
       _lifecycleObserverRegistered = false;
     }
+    silenceRequest.removeListener(_onSilenceRequested);
+    resumeRequest.removeListener(_onResumeRequested);
     final token = _hdrToken;
     if (token != null) {
       _hdrOwner.release(token);
@@ -4001,6 +4036,13 @@ class _PlayerScreenState extends State<PlayerScreen>
               return;
             }
             _embeddedSurfaceKey.currentState?.toggleMute();
+          },
+          // Ctrl+R: random zapping — a zap picks a random channel instead of
+          // the next one. Toggled in-session and persisted through the
+          // controller's `onRandomChanged`; the acknowledgement is the banner's
+          // transient message.
+          const SingleActivator(LogicalKeyboardKey.keyR, control: true): () {
+            _zap?.toggleRandom();
           },
           if (_usesSharedEmbeddedOverlay) ...{
             const SingleActivator(LogicalKeyboardKey.keyI): () {

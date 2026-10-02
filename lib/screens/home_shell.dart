@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/app_database.dart';
+import '../data/app_settings_store.dart';
 import '../data/cloud_auto_sync.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
@@ -28,6 +29,7 @@ import '../widgets/profile_avatar.dart';
 import 'channel_list_screen.dart';
 import 'cloud_sync_screen.dart';
 import 'legal_screen.dart';
+import 'settings_screen.dart';
 import 'profile_pick_screen.dart';
 import 'sources_screen.dart';
 import 'update_flow.dart';
@@ -509,6 +511,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     await _loadActive();
   }
 
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(store: const AppSettingsStore()),
+      ),
+    );
+  }
+
   Future<void> _useDemo() async {
     await widget.store.save(
       const SourceConfig(
@@ -598,8 +608,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       profileColorIndex: _profileColorIndex,
       onChangeProfile: _changeProfile,
       // Profile settings = the cloud-sync screen; only meaningful when the
-      // build has cloud config.
+      // build has cloud config. Global settings are always available.
       onProfileSettings: CloudConfig.isConfigured ? _profileSettings : null,
+      onSettings: _openSettings,
     );
   }
 }

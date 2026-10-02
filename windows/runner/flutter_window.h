@@ -61,6 +61,19 @@ private:
   void SetNativeWindowFullscreen(bool fullscreen);
   void SetNativeWindowMiniPlayer(bool mini);
   void RegisterNativeHdrPlayerChannel();
+  void RegisterTrayChannel();
+
+  // System tray icon (docs/player.md "Windows tray icon"): the notification-area
+  // icon, its show/hide + exit menu, and the close-to-tray policy. WM_CLOSE
+  // hides to the tray (keeping the app running) unless an explicit exit was
+  // requested via the tray menu.
+  void CreateTrayIcon();
+  void DestroyTrayIcon();
+  void ShowTrayMenu();
+  void HideToTray();
+  void RestoreFromTray();
+  LRESULT HandleTrayCallback(LPARAM lparam);
+  void SetAlwaysOnTop(bool on);
 
   // The project to run.
   flutter::DartProject project_;
@@ -69,6 +82,11 @@ private:
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       native_hdr_channel_;
+  // The tray-notification channel (native → Dart): carries `trayHidden` so Dart
+  // can silence playback when the window hides, which the `hidden` lifecycle
+  // does not reach on Windows.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      tray_channel_;
 
   // Native child HWND used by mpv for Windows HDR playback.
   HWND native_video_surface_ = nullptr;
@@ -89,6 +107,16 @@ private:
   WINDOWPLACEMENT native_windowed_placement_ = {};
   LONG_PTR native_windowed_style_ = 0;
   LONG_PTR native_windowed_ex_style_ = 0;
+
+  // System tray icon state. `close_to_tray_` is the X-button policy (true = hide
+  // to the tray and keep the app running; false = quit); `force_quit_` is set by
+  // the tray "Exit" so a real close cannot be intercepted. `tray_owner_hwnd_` is
+  // the top-level HWND the icon was added to, retained because OnDestroy runs
+  // after the base class has already nulled its own window handle.
+  bool close_to_tray_ = true;
+  bool force_quit_ = false;
+  bool tray_icon_created_ = false;
+  HWND tray_owner_hwnd_ = nullptr;
 };
 
 #endif // RUNNER_FLUTTER_WINDOW_H_

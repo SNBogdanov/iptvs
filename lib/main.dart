@@ -1,6 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'
+    show
+        HardwareKeyboard,
+        KeyDownEvent,
+        KeyEvent,
+        KeyRepeatEvent,
+        LogicalKeyboardKey,
+        MethodChannel;
 import 'package:media_kit/media_kit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -12,6 +22,7 @@ import 'data/net.dart' show redactText;
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
+import 'player/tray.dart';
 import 'screens/profile_pick_screen.dart';
 import 'theme.dart';
 
@@ -36,6 +47,14 @@ Future<void> main() async {
         kAndroidImageCacheBytes;
   }
   MediaKit.ensureInitialized();
+  // The Windows runner's X-button policy (hide to tray vs quit) is a persisted
+  // device preference that must reach the native side before the first close.
+  // Fired before the boot group below so its keychain read overlaps the others;
+  // never on the critical path to the first frame.
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    unawaited(applyPersistedCloseToTray());
+    unawaited(loadAlwaysOnTopPreference());
+  }
   final store = SourceStore();
   // Cloud init, opening the database and reading the source list are mutually
   // independent — only the identity migration below needs the database and the
@@ -86,10 +105,54 @@ Future<void> _initialiseCloud() async {
   );
 }
 
-class IptvApp extends StatelessWidget {
+class IptvApp extends StatefulWidget {
   final AppDatabase db;
   final SourceStore store;
   const IptvApp({super.key, required this.db, required this.store});
+
+  @override
+  State<IptvApp> createState() => _IptvAppState();
+}
+
+class _IptvAppState extends State<IptvApp> {
+  /// The boss key (docs/player.md "System tray icon"): F12 hides the window to
+  /// the tray from anywhere in the app. A `HardwareKeyboard` handler rather
+  /// than a `Shortcuts`/`Focus` binding, so it fires whatever widget holds
+  /// focus (the native HDR surface forwards its keys to the runner instead and
+  /// is handled there). Hiding triggers the `hidden` lifecycle, which is what
+  /// stops the preview and the player.
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    if (event.logicalKey != LogicalKeyboardKey.f12) return false;
+    if (defaultTargetPlatform != TargetPlatform.windows) return false;
+    DiagnosticsLog.instance.add('player', 'boss key F12 -> hideToTray');
+    unawaited(hideToTray());
+    return true;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_onKey);
+    // The runner hides the window to the tray (X button, tray menu, the boss
+    // key) and notifies Dart here, because the Windows `hidden` lifecycle does
+    // not fire for a `SW_HIDE`. The notifier below is what the preview and the
+    // player listen to.
+    const MethodChannel(kTrayChannel).setMethodCallHandler((call) async {
+      if (call.method == 'trayHidden') {
+        requestSilence();
+      } else if (call.method == 'trayShown') {
+        requestResume();
+      }
+      return null;
+    });
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -99,7 +162,7 @@ class IptvApp extends StatelessWidget {
       theme: AppTheme.dark,
       // The picker itself decides whether to appear (startup-mode setting +
       // profile count) and silently short-circuits to HomeShell otherwise.
-      home: ProfilePickScreen(db: db, store: store, bootMode: true),
+      home: ProfilePickScreen(db: widget.db, store: widget.store, bootMode: true),
     );
   }
 }

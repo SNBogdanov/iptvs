@@ -1376,6 +1376,40 @@ above need an on-device pass. The pure halves (`zap_key_policy.h`, `zap_quick_li
 compiled and asserted on with `g++ -std=c++17 -Wall -Wextra -Werror` as scratch work; there is
 still no committed C++ harness in this runner.
 
+### System tray icon
+
+The runner puts an icon in the shell notification area (reusing `IDI_APP_ICON`) so the window can
+be hidden and restored without quitting — the one affordance that survives a hidden window.
+`CreateTrayIcon`/`DestroyTrayIcon` add/remove it in `OnCreate`/`OnDestroy`; `kTrayCallbackMessage`
+(`WM_APP + 0x50`) carries the mouse event, and `HandleTrayCallback` turns a left-click/double-click
+into `RestoreFromTray` (`ShowWindow(SW_SHOW)` + `SetForegroundWindow`) and a right-click into a
+popup menu with two items: **Hide/Show window** (a toggle) and **Exit**.
+
+`WM_CLOSE` is intercepted: unless the runner was told to force-quit, closing the window (X, Alt+F4,
+the taskbar close) **hides it to the tray** instead of quitting, so the app keeps running with no
+window. `ShowWindow(SW_HIDE)` does **not** drive the engine to `AppLifecycleState.hidden` on Windows
+(the engine keeps the child Flutter view in its "visible windows" set, so the state lands on
+`inactive`), which is why the runner sends a native `trayHidden` event on the `iptvs/tray` channel
+instead; Dart raises `silenceRequest` (`lib/player/tray.dart`), and the channel list pauses the
+preview while the player pauses — so no stream keeps playing behind a window the user cannot see.
+Restoring sends the mirror `trayShown`, and `resumeRequest` resumes what was paused. Quitting goes
+through the tray menu's **Exit**, or the in-app double-Back exit, both of which set `force_quit_`
+before posting `WM_CLOSE` so the real close cannot be re-intercepted. The in-app exit uses the
+runner's `exitApp` method rather than `SystemNavigator.pop()`, because the Windows engine handles
+`System.exitApplication`, not `SystemNavigator.pop`, and a plain `pop()` is a no-op there. The
+X-button policy is `close_to_tray_` (default true), settable via the `setCloseToTray` method on
+`iptvs/native_hdr_player`; `hideToTray`/`restoreWindow`/`setAlwaysOnTop` are exposed the same way.
+`OnDestroy` removes the icon via the retained `tray_owner_hwnd_` — the base class has already nulled
+its own window handle by the time `OnDestroy` runs, so the icon's HWND is remembered at add time.
+
+**The boss key is F12** — a `HardwareKeyboard` handler on the app root (`main.dart`) for the windowed
+and embedded surfaces, plus a runner-side `WM_KEYDOWN`/`VK_F12` for the native HDR surface, both
+ending in the same `HideToTray`. **Always on top in fullscreen** (`AppSettingsStore.alwaysOnTop`,
+toggled in Settings) raises the window via `setAlwaysOnTop` only while `_resolving` — the fullscreen
+player route — is up; the windowed preview deliberately stays normal. The preference is mirrored in
+the `alwaysOnTopEnabled` notifier so a Settings toggle reaches the live screen without re-reading the
+keychain on every state change.
+
 ## Linux
 
 **The embedded `media_kit`/libmpv surface is the default Linux fullscreen path;
@@ -2378,6 +2412,28 @@ makes "which channel did this session end on" answerable after the fact —
   the session actually ended on via `LivePreviewController.adoptFullscreenChannel` — called *before*
   `adoptedByFullscreen` is cleared, so a clean EOF landing in that window restarts the right channel
   rather than the launch one the controller would otherwise still believe in.
+
+### Auto-switch countdown + random zapping
+
+Two related zapping modes, both session-scoped and off on open.
+
+**The auto-switch countdown** (`lib/player/auto_switch.dart`) walks the range on a per-source
+period (`ChannelDwell`), advancing through `channelUp` so an automatic switch is the same
+stop→resolve→play a keypress produces. `AutoSwitch` is **its own `ChangeNotifier`**, deliberately
+not the zap controller's: the banner restarts its 3 s hide on every `bannerRevision` bump, so a
+one-second countdown routed through that path would hold the banner up forever. The countdown rides
+the deadline, not a decrement, so a late tick (a hidden window throttling timers) self-corrects. The
+chip (`autoSwitchChipLabel`) is printed verbatim by every surface and holds — not pauses — while a
+resolve is in flight, the quick list is open, or the range has one entry (`AutoSwitchHold`).
+
+**Random zapping** (`LiveZapController.random`, toggled by **Ctrl+R**, persisted in
+`AppSettingsStore.randomZapping`) makes `channelUp`/`channelDown` pick a random index that is never
+the channel already under the cursor — which the auto-switch's `channelUp` funnel inherits, so a
+running countdown also jumps randomly. The toggle reports through the banner's transient-message
+slot, and the shuffle marker is a `random` field on `ZapBannerState` drawn beside the countdown chip
+(the chip renders when the countdown is on **or** random is on, so the mode stays answerable with
+the chrome gone). `onRandomChanged` persists it back to the store from the channel list, and the
+initial value is loaded once when the screen builds its first session.
 
 ### Android native input + banner (Phase 2)
 

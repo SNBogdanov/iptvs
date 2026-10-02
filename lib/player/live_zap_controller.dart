@@ -14,6 +14,7 @@
 
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
@@ -177,6 +178,7 @@ class LiveZapController extends ChangeNotifier {
     this.digitCommitDelay = kDigitEntryCommitDelay,
     this.messageDuration = kZapMessageDuration,
     this.autoSwitchTick = kAutoSwitchTick,
+    this.random = false,
   }) : // Stored by reference, not copied: a zap range is the whole catalog on
        // an unfiltered source, and `zapEntriesOf` hands over a *lazy* view
        // precisely so a 250k-channel launch doesn't materialise 250k objects
@@ -208,6 +210,17 @@ class LiveZapController extends ChangeNotifier {
   /// How often the auto-switch countdown repaints. Injectable only so tests
   /// need not wait a real second out.
   final Duration autoSwitchTick;
+
+  /// Whether a channel change picks a **random** channel instead of the next
+  /// one — both for a manual zap and for the auto-switch's own tick, which
+  /// funnels through [channelUp]. A persisted global preference, loaded at
+  /// session open; toggled by Ctrl+R in the player.
+  bool random;
+
+  /// Fired when [random] is toggled, so the host can persist the global setting.
+  void Function(bool value)? onRandomChanged;
+
+  final Random _rng = Random();
 
   /// The auto-switch mode: on/off, the countdown, and the tick that advances
   /// the cursor.
@@ -415,6 +428,10 @@ class LiveZapController extends ChangeNotifier {
       // has never heard of the mode reads an absent key as "nothing to draw".
       if (autoSwitch.enabled)
         'autoSwitch': autoSwitchChipLabel(autoSwitch),
+      // Printed, never derived: the shuffle marker beside the countdown chip,
+      // so a surface that has never heard of random zapping reads an absent key
+      // as "no marker".
+      if (random) 'random': true,
       'position': _index + 1,
       'total': _entries.length,
       if (now != null) ...{
@@ -566,10 +583,34 @@ class LiveZapController extends ChangeNotifier {
   /// **Both directions wrap**, unlike the live tab (where Up never wraps
   /// because it escapes to another pane). There is nothing to escape to here,
   /// and a remote that stops dead at the end of the list reads as broken.
-  void channelUp() => _moveTo((_index + 1) % _entries.length);
+  void channelUp() => _moveTo(_nextIndex(1));
 
-  void channelDown() =>
-      _moveTo((_index - 1 + _entries.length) % _entries.length);
+  void channelDown() => _moveTo(_nextIndex(-1));
+
+  /// The index [delta] rows away from the cursor — or, when [random] is on, a
+  /// random index that is never the one already under the cursor (re-picking
+  /// the channel on screen would read as a dead key).
+  int _nextIndex(int delta) {
+    if (_entries.length <= 1) return _index;
+    if (!random) {
+      return (_index + delta + _entries.length) % _entries.length;
+    }
+    var pick = _rng.nextInt(_entries.length);
+    while (pick == _index) {
+      pick = _rng.nextInt(_entries.length);
+    }
+    return pick;
+  }
+
+  /// Toggles random zapping, persists through [onRandomChanged], and reports
+  /// the new state in the banner's transient-message slot.
+  bool toggleRandom() {
+    random = !random;
+    _showMessage(random ? 'Random zapping on' : 'Random zapping off');
+    onRandomChanged?.call(random);
+    _notify();
+    return random;
+  }
 
   /// Classic "last channel" recall. No-op until two channels have played —
   /// and also a no-op when the previous channel isn't in the current range

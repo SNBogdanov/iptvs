@@ -79,6 +79,7 @@ class ZapBannerState {
     this.epgNow,
     this.epgNext,
     this.autoSwitchLabel,
+    this.random = false,
   });
 
   /// Bumped on every cursor move/digit/message — `LiveZapController
@@ -124,6 +125,11 @@ class ZapBannerState {
   /// in 4 s or in 40 s?" has to be answerable *while* the chrome is gone,
   /// because that is exactly the state the answer is most useful in.
   final String? autoSwitchLabel;
+
+  /// Whether a zap picks a **random** channel instead of the next one. Drawn as
+  /// a shuffle marker beside the countdown chip; off on a route with no random
+  /// zapping.
+  final bool random;
 
   /// `12 · BBC One`, or just the name when the provider gave no number, or
   /// null when there is no name at all to show. Mirrors Kotlin's
@@ -2063,7 +2069,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// overlay, the Windows GDI overlay and the Lua OSD.
   Widget _autoSwitchChip(ZapBannerState zap) {
     final label = zap.autoSwitchLabel;
-    if (label == null || label.isEmpty) return const SizedBox.shrink();
+    final random = zap.random;
+    final hasCountdown = label != null && label.isNotEmpty;
+    if (!random && !hasCountdown) return const SizedBox.shrink();
     return Align(
       alignment: Alignment.centerRight,
       child: Padding(
@@ -2078,29 +2086,42 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Not a pause glyph: the countdown runs *and* the channel is
-                // playing, so this names the feature rather than a transport
-                // state. The clock is the honest picture of a timer, and the
-                // text beside it carries the state when it is held.
-                const Icon(
-                  Icons.autorenew,
-                  size: 14,
-                  color: AppColors.accent,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  label,
-                  // Opted out of text scaling deliberately, like the PIN pad's
-                  // digit labels: this sits in a fixed-extent region beside a
-                  // video, and a 2x-scaled countdown is what pushes the banner
-                  // off the bottom of a small window.
-                  textScaler: TextScaler.noScaling,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+                // The shuffle marker for random zapping, drawn even when the
+                // countdown is off — the mode must stay answerable while
+                // nothing else is on screen.
+                if (random) ...[
+                  const Icon(
+                    Icons.shuffle,
+                    size: 14,
+                    color: AppColors.accent,
                   ),
-                ),
+                  if (hasCountdown) const SizedBox(width: 6),
+                ],
+                if (hasCountdown) ...[
+                  // Not a pause glyph: the countdown runs *and* the channel is
+                  // playing, so this names the feature rather than a transport
+                  // state. The clock is the honest picture of a timer, and the
+                  // text beside it carries the state when it is held.
+                  const Icon(
+                    Icons.autorenew,
+                    size: 14,
+                    color: AppColors.accent,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    label,
+                    // Opted out of text scaling deliberately, like the PIN pad's
+                    // digit labels: this sits in a fixed-extent region beside a
+                    // video, and a 2x-scaled countdown is what pushes the banner
+                    // off the bottom of a small window.
+                    textScaler: TextScaler.noScaling,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

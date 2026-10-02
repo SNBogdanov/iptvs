@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
+import '../data/app_settings_store.dart';
 import '../data/device_class.dart';
 import '../data/diagnostics_log.dart';
 import '../data/last_channel_store.dart';
@@ -27,6 +28,13 @@ import '../player/buffer_preset.dart';
 import '../player/channel_dwell.dart';
 import '../player/live_zap_controller.dart';
 import '../player/player_screen.dart';
+import '../player/tray.dart'
+    show
+        alwaysOnTopEnabled,
+        applyAlwaysOnTop,
+        exitApp,
+        resumeRequest,
+        silenceRequest;
 import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
 import 'epg_grid_screen.dart';
@@ -382,9 +390,11 @@ class ChannelListScreen extends StatefulWidget {
   final int profileColorIndex;
 
   /// Avatar dropdown callbacks. "Profile settings" (cloud sync) is only wired
-  /// when the build has cloud config; "Change profile" is always available.
+  /// when the build has cloud config; "Change profile" and "Settings" (global)
+  /// are always available.
   final VoidCallback? onChangeProfile;
   final VoidCallback? onProfileSettings;
+  final VoidCallback? onSettings;
 
   const ChannelListScreen({
     super.key,
@@ -396,6 +406,7 @@ class ChannelListScreen extends StatefulWidget {
     this.profileColorIndex = 0,
     this.onChangeProfile,
     this.onProfileSettings,
+    this.onSettings,
   });
 
   @override
@@ -798,6 +809,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     );
     _bodyListenable = Listenable.merge([_dataListenable, _preview]);
     WidgetsBinding.instance.addObserver(this);
+    silenceRequest.addListener(_onSilenceRequested);
+    resumeRequest.addListener(_onResumeRequested);
+    alwaysOnTopEnabled.addListener(_syncAlwaysOnTop);
     _loadLive();
     _live.startEpgRefresh();
     _globalFavorites.startEpgRefresh();
@@ -962,18 +976,65 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// The app going to the background (home button, back-exit, launcher) must
   /// not leave the preview engine running — its audio would keep playing
   /// behind the launcher (the shared native engine outlives the Flutter UI).
-  /// Skipped while a fullscreen playback handoff is in flight ([_resolving]
-  /// spans the whole player push): launching the native player also
-  /// backgrounds this screen's lifecycle, and an adopted preview engine must
-  /// keep playing through it.
+  /// `hidden` is the state Windows reaches when the window is hidden to the
+  /// tray (docs/player.md "Windows tray icon"); `paused` covers the mobile
+  /// background. Both stop the preview. Skipped while a fullscreen playback
+  /// handoff is in flight ([_resolving] spans the whole player push): launching
+  /// the native player also backgrounds this screen's lifecycle, and an adopted
+  /// preview engine must keep playing through it.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.paused) return;
+    final backgrounded = state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden;
+    if (!backgrounded) return;
     if (_resolving) return;
     if (_preview.channelId != null) {
-      DiagnosticsLog.instance.add('library', 'lifecycle paused: preview stop');
+      DiagnosticsLog.instance.add(
+          'library', 'lifecycle ${state.name}: preview stop');
       unawaited(_preview.stop(clearSelection: true));
     }
+  }
+
+  /// The boss key / hide-to-tray signal (docs/player.md "System tray icon").
+  /// The runner raises it directly because the Windows `hidden` lifecycle never
+  /// fires for a `SW_HIDE`, so this is the reliable path to silence the preview.
+  /// Paused, not stopped: a pause keeps the frozen frame and the selection, so
+  /// the restore leg can resume it instead of leaving a blank panel.
+  void _onSilenceRequested() {
+    if (_preview.channelId != null || _preview.nativeActive) {
+      DiagnosticsLog.instance.add('library', 'silence requested: preview pause');
+      unawaited(_preview.pause());
+    }
+  }
+
+  /// The restore-from-tray leg: resume the preview the hide paused. Raised by
+  /// the runner's `trayShown` event, because the Windows `resumed` lifecycle is
+  /// as unreliable as `hidden` was for the hide.
+  void _onResumeRequested() {
+    if (_preview.channelId != null) {
+      DiagnosticsLog.instance.add('library', 'resume requested: preview play');
+      unawaited(_preview.play());
+    }
+  }
+
+  /// Applies the always-on-top style to match the current playback state and
+  /// the persisted preference. The window is raised **only while fullscreen is
+  /// up** (`_resolving` spans the whole player route) and dropped back to
+  /// normal the moment it closes; the windowed preview deliberately does not
+  /// raise it. Idempotent: the native call is skipped when the state is
+  /// unchanged.
+  bool? _lastAlwaysOnTopApplied;
+
+  void _syncAlwaysOnTop() {
+    if (!Platform.isWindows) return;
+    final onTop = alwaysOnTopEnabled.value && _resolving;
+    if (onTop == _lastAlwaysOnTopApplied) return;
+    _lastAlwaysOnTopApplied = onTop;
+    DiagnosticsLog.instance.add(
+      'library',
+      'always-on-top ${onTop ? 'on' : 'off'} fullscreen=$_resolving',
+    );
+    unawaited(applyAlwaysOnTop(onTop));
   }
 
   /// Load live channels (via the controller) plus the focus-node prune and
@@ -1062,6 +1123,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   @override
   void dispose() {
+    alwaysOnTopEnabled.removeListener(_syncAlwaysOnTop);
+    resumeRequest.removeListener(_onResumeRequested);
+    silenceRequest.removeListener(_onSilenceRequested);
     WidgetsBinding.instance.removeObserver(this);
     _disposeRepositoryControllers();
     _searchTimer?.cancel();
@@ -1824,18 +1888,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   /// Builds the zap controller for one fullscreen session. Live only — VOD and
-  /// catch-up have no channel neighbours.
-  LiveZapController _zapControllerFor(
+  /// catch-up have no channel neighbours. Reads the random-zapping preference
+  /// fresh on every open: a value the user just toggled in Settings (a route
+  /// pushed over this screen) would otherwise be missed by a value cached at
+  /// screen init.
+  Future<LiveZapController> _zapControllerFor(
     Channel channel, {
     List<Channel>? explicit,
-  }) {
+  }) async {
     final range = _zapRangeFor(channel, explicit: explicit);
+    final random = await const AppSettingsStore().randomZapping();
     return LiveZapController(
       entries: range.entries,
       initialIndex: range.index,
       rangeCategoryId: range.categoryId,
       rangeLabel: range.label,
       catalog: _ChannelListZapCatalog(this),
+      random: random,
     )..onChannelChanged = (entry) {
       // Keeps the toolbar's "last channel" target and the post-playback
       // selection restore pointed at the channel the session is really on.
@@ -1845,6 +1914,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (mounted) {
         _notePlayedChannel(entry.channelId, sourceId: entry.sourceId);
       }
+    }
+    ..onRandomChanged = (value) {
+      unawaited(const AppSettingsStore().setRandomZapping(value));
     };
   }
 
@@ -1909,7 +1981,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       setState(() => _resolving = true);
       // Zapping is not a wide-layout privilege: a phone with a keyboard, and
       // any set-top box that fell to the narrow layout, reach this path too.
-      final zap = _zapControllerFor(channel);
+      final zap = await _zapControllerFor(channel);
       ({ZapEntry entry, Programme programme})? pendingCatchup;
       try {
         DiagnosticsLog.instance.add(
@@ -2043,7 +2115,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // reads through it while it is up, and the return leg below reads where
     // the session *ended* — which is not where it started as soon as the user
     // zaps.
-    final zap = _zapControllerFor(channel, explicit: zapChannels);
+      final zap = await _zapControllerFor(channel, explicit: zapChannels);
     ({ZapEntry entry, Programme programme})? pendingCatchup;
     try {
       DiagnosticsLog.instance.add(
@@ -3186,11 +3258,24 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (_preview.channelId != null || _preview.nativeActive) {
       unawaited(_preview.stop(clearSelection: true));
     }
-    SystemNavigator.pop();
+    if (Platform.isWindows) {
+      // `SystemNavigator.pop()` is a no-op on Windows (the engine handles
+      // `System.exitApplication`, not `SystemNavigator.pop`), and a plain window
+      // close is now intercepted by the close-to-tray policy — so an explicit
+      // quit must go through the runner's force-quit path.
+      unawaited(exitApp());
+    } else {
+      SystemNavigator.pop();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    // The fullscreen flag (`_resolving`) changes through `setState`, so the
+    // always-on-top style is re-synced once the frame settles. Guarded inside
+    // `_syncAlwaysOnTop`, so the native call fires only when the desired state
+    // actually moved.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncAlwaysOnTop());
     // **A messenger scoped to this screen**, not `MaterialApp`'s.
     //
     // The app-level messenger lives *above* the Navigator, so anything it is
@@ -3217,6 +3302,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                     colorIndex: widget.profileColorIndex,
                     onChangeProfile: widget.onChangeProfile,
                     onProfileSettings: widget.onProfileSettings,
+                    onSettings: widget.onSettings,
                   )
                 : null,
             // Group the actions so D-pad traversal treats them as one cluster (reached

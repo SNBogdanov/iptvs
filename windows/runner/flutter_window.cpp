@@ -18,6 +18,7 @@
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include "flutter/generated_plugin_registrant.h"
@@ -62,12 +63,21 @@ constexpr const wchar_t kNativeVideoSurfaceClassName[] =
 constexpr const wchar_t kNativeControlsClassName[] =
     L"IPTVS_NATIVE_VIDEO_CONTROLS";
 constexpr const char kNativeHdrPlayerChannel[] = "iptvs/native_hdr_player";
+constexpr const char kTrayChannel[] = "iptvs/tray";
 constexpr UINT kNativeVideoSurfaceInputMessage = WM_APP + 0x4D;
 constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
 constexpr UINT_PTR kNativeControlsHideTimer = 0x5031;
 constexpr UINT_PTR kNativeVideoResyncTimer = 0x5032;
 constexpr UINT_PTR kNativeZapBannerTimer = 0x5033;
+// System tray icon (docs/player.md "Windows tray icon"): the shell-notification
+// callback message and the popup menu's command ids. uID and callback message
+// must match between NIM_ADD and NIM_DELETE, hence named constants rather than
+// literals scattered across two sites.
+constexpr UINT kTrayCallbackMessage = WM_APP + 0x50;
+constexpr UINT kTrayIconId = 1;
+constexpr UINT kTrayMenuShowHide = 0x5141;
+constexpr UINT kTrayMenuExit = 0x5142;
 // How long the zap banner stays up after a press. Mirrors Kotlin
 // `ZAP_BANNER_VISIBLE_MS` and the Lua OSD's `ZAP_BANNER_VISIBLE_S`: long
 // enough to read a channel name and its now/next after a single press, short
@@ -3624,7 +3634,12 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   RegisterNativeHdrPlayerChannel();
+  RegisterTrayChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+
+  // The tray icon outlives the first frame: it is the one affordance left after
+  // the window hides to the tray, so it must exist even before Dart has drawn.
+  CreateTrayIcon();
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() { this->Show(); });
 
@@ -3641,6 +3656,7 @@ void FlutterWindow::OnDestroy() {
   SetNativeWindowFullscreen(false);
   DestroyNativeControls();
   DestroyNativeVideoSurface();
+  DestroyTrayIcon();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -3648,10 +3664,185 @@ void FlutterWindow::OnDestroy() {
   Win32Window::OnDestroy();
 }
 
+// ── system tray icon ───────────────────────────────────────────────────────
+
+void FlutterWindow::CreateTrayIcon() {
+  HWND hwnd = GetHandle();
+  if (!hwnd || tray_icon_created_) {
+    return;
+  }
+  HICON icon = nullptr;
+  // Load the app icon at the shell's small-icon size. The module handle must be
+  // explicit: `LoadIconW(nullptr, ...)` reads the low word of the resource id as
+  // a *predefined* Windows icon id (101 is not one), so it returned NULL and the
+  // tray fell back to the generic IDI_APPLICATION glyph.
+  const int icon_size = GetSystemMetrics(SM_CXSMICON);
+  icon = static_cast<HICON>(LoadImageW(
+      GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON,
+      icon_size, icon_size, LR_SHARED));
+  if (!icon) {
+    icon = LoadIconW(nullptr, IDI_APPLICATION);
+  }
+
+  NOTIFYICONDATAW nid = {};
+  nid.cbSize = sizeof(nid);
+  nid.hWnd = hwnd;
+  nid.uID = kTrayIconId;
+  nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  nid.uCallbackMessage = kTrayCallbackMessage;
+  nid.hIcon = icon;
+  lstrcpynW(nid.szTip, L"iptvs", _countof(nid.szTip));
+
+  if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+    tray_icon_created_ = true;
+    tray_owner_hwnd_ = hwnd;
+  }
+}
+
+void FlutterWindow::DestroyTrayIcon() {
+  if (!tray_icon_created_) {
+    return;
+  }
+  HWND hwnd = tray_owner_hwnd_ ? tray_owner_hwnd_ : GetHandle();
+  NOTIFYICONDATAW nid = {};
+  nid.cbSize = sizeof(nid);
+  nid.hWnd = hwnd;
+  nid.uID = kTrayIconId;
+  Shell_NotifyIconW(NIM_DELETE, &nid);
+  tray_icon_created_ = false;
+  tray_owner_hwnd_ = nullptr;
+}
+
+void FlutterWindow::HideToTray() {
+  HWND hwnd = GetHandle();
+  if (hwnd) {
+    ShowWindow(hwnd, SW_HIDE);
+  }
+  // Tell Dart to silence playback directly: `SW_HIDE` does not drive the
+  // engine to `AppLifecycleState.hidden` on Windows, so the lifecycle observers
+  // never fire and the stream keeps playing behind the hidden window.
+  if (tray_channel_) {
+    tray_channel_->InvokeMethod(
+        "trayHidden", std::make_unique<flutter::EncodableValue>(true));
+  }
+}
+
+void FlutterWindow::RestoreFromTray() {
+  HWND hwnd = GetHandle();
+  if (!hwnd) {
+    return;
+  }
+  ShowWindow(hwnd, SW_SHOW);
+  SetForegroundWindow(hwnd);
+  // Mirror of HideToTray's `trayHidden`: tell Dart the window came back so the
+  // preview/player the hide paused can resume.
+  if (tray_channel_) {
+    tray_channel_->InvokeMethod(
+        "trayShown", std::make_unique<flutter::EncodableValue>(true));
+  }
+}
+
+void FlutterWindow::SetAlwaysOnTop(bool on) {
+  HWND hwnd = GetHandle();
+  if (!hwnd) {
+    return;
+  }
+  // Always-on-top is a window style, not a one-shot raise: HWND_TOPMOST keeps
+  // the window above non-topmost windows for as long as the style holds, and
+  // HWND_NOTOPMOST removes it. No size/move/activate side effects.
+  SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void FlutterWindow::ShowTrayMenu() {
+  HMENU menu = CreatePopupMenu();
+  if (!menu) {
+    return;
+  }
+  const bool visible = IsWindowVisible(GetHandle());
+  AppendMenuW(menu, MF_STRING, kTrayMenuShowHide,
+              visible ? L"Hide window" : L"Show window");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"Exit");
+
+  POINT pt;
+  GetCursorPos(&pt);
+  // Without a foreground window the popup menu will not dismiss on an outside
+  // click; a momentary foreground grab is the standard fix.
+  SetForegroundWindow(GetHandle());
+
+  const UINT cmd = TrackPopupMenu(
+      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0,
+      GetHandle(), nullptr);
+  DestroyMenu(menu);
+
+  switch (cmd) {
+    case kTrayMenuShowHide:
+      if (IsWindowVisible(GetHandle())) {
+        HideToTray();
+      } else {
+        RestoreFromTray();
+      }
+      break;
+    case kTrayMenuExit:
+      force_quit_ = true;
+      PostMessage(GetHandle(), WM_CLOSE, 0, 0);
+      break;
+    default:
+      break;
+  }
+}
+
+LRESULT FlutterWindow::HandleTrayCallback(LPARAM lparam) {
+  const UINT event = LOWORD(lparam);
+  switch (event) {
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+      // A single click restores, so a window hidden to the tray is one click
+      // from being back — matching the menu's "Show window".
+      RestoreFromTray();
+      return 0;
+    case WM_RBUTTONUP:
+    case WM_CONTEXTMENU:
+      ShowTrayMenu();
+      return 0;
+    default:
+      return 0;
+  }
+}
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // System tray icon (docs/player.md "Windows tray icon"). These must run
+  // before every other branch: WM_CLOSE on a native-video-surface session would
+  // otherwise fall through to the surface teardown below and close outright.
+  if (message == kTrayCallbackMessage) {
+    return HandleTrayCallback(lparam);
+  }
+  if (message == WM_CLOSE) {
+    if (close_to_tray_ && !force_quit_) {
+      // Hide to the tray instead of quitting. The Dart side's lifecycle handler
+      // sees the window go hidden and stops the preview, so no stream keeps
+      // running behind a window the user cannot see.
+      HideToTray();
+      return 0;
+    }
+    // A real close: hand it to the base handler, whose DefWindowProc path
+    // destroys the window and (quit_on_close_) posts the quit message.
+    return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
+  }
+
+  if (message == WM_KEYDOWN && wparam == VK_F12) {
+    // Boss key: F12 instantly hides the window to the tray. This branch exists
+    // for the native HDR surface, which forwards its keys here instead of to
+    // the Flutter view; the windowed and embedded cases are handled Dart-side
+    // (`HardwareKeyboard`), and both end in the same HideToTray.
+    HideToTray();
+    return 0;
+  }
+
   if (message == WM_KEYDOWN && native_video_surface_ != nullptr) {
     // In-player live zapping claims its keys before every other branch on
     // this surface — including the Escape/Back one below, because a
@@ -5128,6 +5319,56 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
           return;
         }
 
+        if (call.method_name() == "setCloseToTray") {
+          bool close_to_tray = true;
+          const auto *args = call.arguments();
+          if (args && std::holds_alternative<bool>(*args)) {
+            close_to_tray = std::get<bool>(*args);
+          }
+          close_to_tray_ = close_to_tray;
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "hideToTray") {
+          HideToTray();
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "restoreWindow") {
+          RestoreFromTray();
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "exitApp") {
+          // An explicit in-app quit must not be intercepted by the close-to-tray
+          // policy: force the real close path.
+          force_quit_ = true;
+          PostMessage(GetHandle(), WM_CLOSE, 0, 0);
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "setAlwaysOnTop") {
+          bool on = false;
+          const auto *args = call.arguments();
+          if (args && std::holds_alternative<bool>(*args)) {
+            on = std::get<bool>(*args);
+          }
+          SetAlwaysOnTop(on);
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
         result->NotImplemented();
       });
+}
+
+void FlutterWindow::RegisterTrayChannel() {
+  tray_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kTrayChannel,
+          &flutter::StandardMethodCodec::GetInstance());
 }
