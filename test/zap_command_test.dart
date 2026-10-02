@@ -191,6 +191,63 @@ void main() {
   // cannot import Dart — and there is no test anywhere that would notice one of
   // them drifting. So the duplication gets its own assertion, which is what
   // keeps "Page Down moves a pageful" one behaviour rather than four.
+  group('quick-list mouse', () {
+    test('wheel delta is three rows per notch, signed by direction', () {
+      expect(kZapWheelRows, 3);
+      expect(zapQuickListWheelDelta(120), kZapWheelRows);
+      expect(zapQuickListWheelDelta(1), kZapWheelRows);
+      expect(zapQuickListWheelDelta(-120), -kZapWheelRows);
+      expect(zapQuickListWheelDelta(-0.5), -kZapWheelRows);
+      // A horizontal scroll arrives as a zero `dy`, and a zero is ignored
+      // rather than rounded into a row - guessing a direction is how a
+      // gesture ends up moving the cursor sideways.
+      expect(zapQuickListWheelDelta(0), 0);
+    });
+
+    test('the Windows renderer mirrors the same step', () {
+      // The natives speak only `zap:move:<n>`, so a step that differs per
+      // surface makes one notch of the wheel travel a different distance
+      // depending on which renderer is drawing.
+      final file = File('windows/runner/zap_quick_list_state.h');
+      expect(file.existsSync(), isTrue);
+      final declared = RegExp(
+        r'kNativeWheelRows\s*=\s*(\d+)',
+      ).firstMatch(file.readAsStringSync());
+      expect(
+        declared?.group(1),
+        '$kZapWheelRows',
+        reason: 'the native wheel step is ${declared?.group(1)}, '
+            'but Dart moves the cursor by $kZapWheelRows',
+      );
+    });
+
+    test('a row click moves the cursor onto that row, or not at all', () {
+      // One click has to both put the cursor on the row and play it, so the
+      // delta is absolute-index-minus-cursor: 0 means "already there", and the
+      // press then only has to activate. A row outside the pushed window is
+      // not clickable - there is no row drawn there to click.
+      final state = ZapQuickListState(
+        open: true,
+        mode: ZapQuickListMode.channels,
+        heading: 'All channels',
+        rows: const [
+          ZapQuickListRow(index: 10, id: 'a', label: 'a', kind: ZapQuickListRowKind.channel),
+          ZapQuickListRow(index: 11, id: 'b', label: 'b', kind: ZapQuickListRowKind.channel),
+          ZapQuickListRow(index: 12, id: 'c', label: 'c', kind: ZapQuickListRowKind.channel),
+        ],
+        selectedIndex: 4,
+        windowStart: 10,
+        total: 3,
+      );
+      // Positive is down the list, which is what `moveQuickList` means by it.
+      expect(zapQuickListRowMoveDelta(state, 0), 6);
+      expect(zapQuickListRowMoveDelta(state, 1), 7);
+      expect(zapQuickListRowMoveDelta(state, 2), 8);
+      expect(zapQuickListRowMoveDelta(state, -1), 0);
+      expect(zapQuickListRowMoveDelta(state, 3), 0);
+    });
+  });
+
   group('quick-list page step', () {
     test('is the window less one row, so pages overlap by a row', () {
       // A whole-window jump would leave no overlap, so a scan of consecutive

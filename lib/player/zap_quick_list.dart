@@ -53,6 +53,25 @@ const int kZapWindowRows = 40;
 /// same command with the same magnitude.
 const int kZapPageRows = kZapWindowRows - 1;
 
+/// How far one mouse-wheel notch moves the quick-list cursor, in rows.
+///
+/// The wheel is the pointer's answer to the arrow keys, and it obeys the same
+/// split they do: it **moves** and never activates, so scrolling a list can
+/// never switch the channel being played ([moveQuickList] is a pure cursor
+/// move — unlike an in-player `zap:move`, which arms the settle timer, the
+/// open list's `zap:move` only re-cuts the window). A click on a row is what
+/// commits, through the same `zap:move` + `zap:activate` pair a key produces.
+///
+/// Three rather than one, because a notch is a flick: one row per notch makes
+/// a mouse roughly three times slower than the arrow keys for the same
+/// journey, and the point of the wheel is scanning a long list quickly. It is
+/// small against the 9-row native menu and the Flutter panel's taller viewport,
+/// so a single notch never runs the cursor off either end of the screen.
+///
+/// Mirrored in `windows/runner/zap_quick_list_state.h` and guarded across
+/// surfaces by `test/zap_command_test.dart`, exactly as [kZapPageRows] is.
+const int kZapWheelRows = 3;
+
 /// Which mode of the quick list's **mode stack** is on screen.
 ///
 /// The stack is the whole navigation model: Right/OK descends, Left/Back
@@ -313,6 +332,43 @@ int zapWindowStart({
   if (start < 0) start = 0;
   if (start > total - window) start = total - window;
   return start;
+}
+
+/// The signed `zap:move` delta that puts the cursor on the window row at
+/// [indexInWindow], or 0 when it is already there.
+///
+/// Pure, and the one piece of arithmetic a pointer gesture needs: the window
+/// is drawn cut out of a list the surface never holds, so a tap names a
+/// **window row** while the command it can send is a **delta** — and the row
+/// the user actually pressed may have moved under the pointer since the state
+/// was published, which is why the hit test carries the row's window offset
+/// and never an absolute index.
+///
+/// 0 is the honest "nothing to do" answer for the row under the cursor, which
+/// is what a plain click on it means: send the delta (a no-op the controller
+/// drops) and let `zap:activate` commit the channel that is already selected.
+int zapQuickListRowMoveDelta(ZapQuickListState state, int indexInWindow) {
+  if (indexInWindow < 0 || indexInWindow >= state.rows.length) return 0;
+  return (state.windowStart + indexInWindow) - state.selectedIndex;
+}
+
+/// The signed `zap:move` delta for one wheel notch: [kZapWheelRows] down the
+/// list, or up it, from a scroll event's vertical delta.
+///
+/// Takes the raw `dy` rather than a [PointerScrollEvent] so this stays a pure
+/// function of a number — the caller reads `event.scrollDelta.dy`, and a
+/// widget test needs no gesture recogniser to pin the sign rule.
+///
+/// Only the sign is read, deliberately. A high-resolution wheel reports
+/// fractional notches (20 on a 120-unit detent) and a trackpad reports
+/// arbitrary ones, so rounding would make a slow scroll crawl and a fast one
+/// skip rows; a whole notch of travel is the gesture, not its exact size. A
+/// horizontal scroll arrives as `0` and is ignored rather than treated as a
+/// vertical one: a sideways flick over a vertical list has no meaning here,
+/// and guessing one is how a gesture ends up switching channels sideways.
+int zapQuickListWheelDelta(double dy) {
+  if (dy == 0) return 0;
+  return dy > 0 ? kZapWheelRows : -kZapWheelRows;
 }
 
 String _pad2(int n) => n.toString().padLeft(2, '0');

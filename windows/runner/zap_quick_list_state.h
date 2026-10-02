@@ -151,6 +151,34 @@ inline int QuickListVisibleStart(int row_count, int selected, int visible) {
   return start;
 }
 
+// How far one mouse-wheel notch moves the quick-list cursor, in rows. Mirrors
+// `kZapWheelRows` (lib/player/zap_quick_list.dart). Named `kNative*` because
+// the Dart constant is the one the cross-surface test pins by name, and this
+// file's other constants are `QuickList*`-prefixed.
+constexpr int kNativeWheelRows = 3;
+
+/// Computes the signed `zap:move` delta needed to place the cursor on the
+/// window row at [index_in_window] (a position inside [state.rows], 0-based),
+/// or 0 if it is already there. Pure and symmetric with the Dart
+/// implementation's [`zapQuickListRowMoveDelta`] (`zap_quick_list.dart`).
+inline int QuickListRowMoveDelta(const QuickListState &state,
+                                 int index_in_window) {
+  if (index_in_window < 0 ||
+      index_in_window >= static_cast<int>(state.rows.size())) {
+    return 0;
+  }
+  return (state.window_start + index_in_window) - state.selected_index;
+}
+
+/// Returns the signed `zap:move` delta for one wheel notch given a vertical
+/// scroll delta [dy] in pixels/notch units (Windows `WM_MOUSEWHEEL` passes the
+/// raw wheel delta). Only the sign is read, mirroring the Dart-side
+/// [zapQuickListWheelDelta].
+inline int QuickListWheelDelta(int dy) {
+  if (dy == 0) return 0;
+  return dy > 0 ? kNativeWheelRows : -kNativeWheelRows;
+}
+
 } // namespace iptvs
 
 #endif // RUNNER_ZAP_QUICK_LIST_STATE_H_

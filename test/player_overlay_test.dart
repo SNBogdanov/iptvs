@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart' show kDoubleTapMinTime;
+import 'package:flutter/gestures.dart' show kDoubleTapMinTime, PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/player_overlay.dart';
@@ -45,6 +45,8 @@ void main() {
     ZapQuickListState? quickList,
     bool zapEnabled = false,
     VoidCallback? onOpenQuickList,
+    ValueChanged<String>? onQuickListCommand,
+    bool touch = false,
     GlobalKey<EmbeddedPlayerControlsState>? controlsKey,
   }) async {
     // Size the whole test surface (not a nested SizedBox) so the overlay fills
@@ -73,6 +75,7 @@ void main() {
               epgNow: epgNow,
               epgNext: epgNext,
               isLive: isLive,
+              touch: touch,
               canFavorite: canFavorite,
               favorite: favorite,
               liveSynced: liveSynced,
@@ -80,6 +83,7 @@ void main() {
               quickList: quickList,
               zapEnabled: zapEnabled,
               onOpenQuickList: onOpenQuickList,
+              onQuickListCommand: onQuickListCommand,
               dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
               onBack: () {},
               onToggleFavorite: onToggleFavorite ?? () {},
@@ -1108,6 +1112,138 @@ void main() {
       );
       expect(banner.opacity, 0);
     });
+
+    // The pointer half of the panel. A click is the keys' OK verbatim (put the
+    // cursor on the row, then commit it) and a wheel notch moves the cursor by
+    // [kZapWheelRows] - both on the shared vocabulary the natives speak, so the
+    // Flutter overlay, the GDI overlay and the Lua OSD cannot drift apart on
+    // what a pointer means.
+    group('mouse', () {
+      testWidgets('a click on an unselected row moves, then activates', (
+        tester,
+      ) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(
+            labels: const ['One', 'Two', 'Three'],
+            selectedIndex: 0,
+          ),
+        );
+        await tester.tap(find.text('Three'));
+        await tester.pump();
+        expect(
+          sent,
+          // Cursor at 0, row 2 is two down: the move has to precede the
+          // activation or the activation plays the row that was highlighted.
+          const ['zap:move:2', 'zap:activate'],
+        );
+      });
+
+      testWidgets('a click on the selected row only activates', (
+        tester,
+      ) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(
+            labels: const ['One', 'Two', 'Three'],
+            selectedIndex: 1,
+          ),
+        );
+        await tester.tap(find.text('Two'));
+        await tester.pump();
+        // A zero delta is dropped by the controller anyway, so the press does
+        // not send a no-op move.
+        expect(sent, const ['zap:activate']);
+      });
+
+      testWidgets('the wheel moves the cursor three rows and never plays', (
+        tester,
+      ) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(labels: const ['One', 'Two', 'Three']),
+        );
+        final row = find.text('Two');
+        await tester.sendEventToBinding(
+          PointerScrollEvent(
+            position: tester.getCenter(row),
+            scrollDelta: const Offset(0, 120),
+          ),
+        );
+        await tester.pump();
+        expect(sent, ['zap:move:$kZapWheelRows']);
+        // Scrolling must not change channel: the list is the thing on screen,
+        // and a wheel notch over it is a cursor move, not an OK.
+        expect(sent, isNot(contains('zap:activate')));
+      });
+
+      testWidgets('a wheel notch up moves the cursor the other way', (
+        tester,
+      ) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(labels: const ['One', 'Two', 'Three']),
+        );
+        await tester.sendEventToBinding(
+          PointerScrollEvent(
+            position: tester.getCenter(find.text('Two')),
+            scrollDelta: const Offset(0, -120),
+          ),
+        );
+        await tester.pump();
+        expect(sent, ['zap:move:-$kZapWheelRows']);
+      });
+
+      testWidgets('the heading and an empty list claim nothing', (
+        tester,
+      ) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(
+            heading: 'All channels',
+            labels: const [],
+            emptyLabel: 'No channels here',
+          ),
+        );
+        // A press in the panel's margin still belongs to the chrome, so only
+        // rows - and only when there are any - are pointer targets.
+        await tester.tapAt(tester.getCenter(find.text('No channels here')));
+        await tester.pump();
+        expect(sent, isEmpty);
+      });
+
+      testWidgets('the rows stay inert in touch mode', (tester) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          touch: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(labels: const ['One', 'Two']),
+        );
+        // The miss *is* the assertion here: the panel is behind an
+        // `IgnorePointer` in touch mode, so the press lands on the chrome
+        // beneath it and no command is emitted.
+        await tester.tap(find.text('Two'), warnIfMissed: false);
+        await tester.pump();
+        expect(sent, isEmpty);
+      });
+    });
   });
 
   // The app-wide ladder: menu → info → hide chrome → exit (CLAUDE.md,
@@ -1167,6 +1303,7 @@ ZapQuickListState _quickList({
   ZapQuickListMode mode = ZapQuickListMode.channels,
   List<String> labels = const ['One'],
   int selectedIndex = 0,
+  String? emptyLabel,
   int windowStart = 0,
   int? total,
 }) => ZapQuickListState(
@@ -1186,6 +1323,7 @@ ZapQuickListState _quickList({
   selectedIndex: selectedIndex,
   windowStart: windowStart,
   total: total ?? labels.length,
+  emptyLabel: emptyLabel,
 );
 
 ZapBannerState _zap({

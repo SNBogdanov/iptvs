@@ -660,7 +660,14 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   **window** of ~40 preformatted rows (`setQuickList`, `kZapWindowRows`) and send
   `zap:list`/`zap:close`/`zap:move:±n`/`zap:activate`/`zap:descend`/`zap:back`. The frozen payload
   is in docs/player.md "The quick list (Phase 6)"; the selection model and its Back rungs are
-  in docs/tv-navigation.md. **Every surface renders it** (Flutter overlay, Android Compose, Windows
+  in docs/tv-navigation.md. **The pointer speaks the same vocabulary**: a click on a row is the keys'
+  OK verbatim (`zap:move:<delta>` only when the row is not already under the cursor, then
+  `zap:activate`), and one wheel notch is `zap:move:±kZapWheelRows` — a cursor move, never a channel
+  change. That is a rule about *meaning*, not about focus: rows are still not focus targets, and a
+  press in the panel's margin is swallowed rather than reaching the chrome toggle underneath. On the
+  Windows native surface it costs `WS_EX_TRANSPARENT`, which the **banner keeps** and the open list
+  drops, and the wheel has to be handled on the native **video** surface too, because Win32 sends
+  `WM_MOUSEWHEEL` to the focus window rather than to the one under the cursor. **Every surface renders it** (Flutter overlay, Android Compose, Windows
   GDI, Linux Lua) and every renderer **prints, never formats or derives**; the highlight is drawn at
   `selectedIndex - windowStart`, never from a row's own `selected` flag, so scroll and highlight are
   one computation. **While the list is open, its surface claims the arrows and Back regardless of
@@ -907,7 +914,11 @@ Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when 
 decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR), Windows (native
 HWND surface, mpv d3d11 — for HDR; a same-channel **SDR** preview→fullscreen stays on the embedded
 texture for a seamless handoff via `preferWindowsEmbedded`, escalating embedded→native once on
-PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses), and iOS (**implemented,
+PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses). **Every Windows launch site
+passes `preferWindowsEmbedded` explicitly** (`Platform.isWindows` for VOD/catch-up/preview-less
+live): the default stays false because the *policy* belongs to the caller, and leaving it at the
+default is what made movies and series play in a second window — mpv's video goes to its own child
+HWND, the GDI controls to an owned `WS_POPUP`, and neither is the Flutter route on screen., and iOS (**implemented,
 on-device validation pending** — a presented `UIViewController` owning an `AVPlayerLayer`, the
 `HdrPlayerActivity` analogue: **AVPlayer default** for real HDR/PiP/AirPlay, **libmpv via
 `media_kit` fallback**, always SDR on iOS, for containers AVFoundation refuses; see docs/ios.md

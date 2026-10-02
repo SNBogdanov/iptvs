@@ -2440,6 +2440,62 @@ RECT QuickListRect(const RECT &client) {
                   kNativeQuickListMarginX + width, top + height);
 }
 
+// Whether a press landed on a **row** of the quick list, and how far the
+// cursor has to move to get there (0 when it is already on it).
+//
+// A row click is the one press on this surface that means *two* commands, and
+// `NativeControlCommandFromPoint` returns a single string by contract, so this
+// is asked separately by the `WM_LBUTTONDOWN` branch that emits them in order
+// - put the cursor on the row, then play it. That is the order the Flutter
+// overlay's row handler emits them in, and it is what makes a click on an
+// unselected row one gesture instead of two.
+//
+// The row band is taken from the **painted** geometry - `PaintQuickList`
+// starts its rows at `panel_top + kNativeMenuHeaderHeight` and steps by
+// `kNativeQuickListRowHeight` - rather than from restated constants, because a
+// hit test that disagrees with the paint by a couple of pixels is a row that
+// cannot be clicked at the place it is drawn. Everything outside the rows
+// (heading, padding, and the empty/loading body) is not a row: the caller
+// swallows those presses inside the panel rather than answering them, so a
+// press in the margin can never be read as a channel change.
+//
+// Returns false when the list is closed, empty or not under the point, leaving
+// the caller to decide between "swallow it as panel" and "not my hit at all".
+bool QuickListRowHit(const RECT &client, int x, int y, int *move_delta) {
+  *move_delta = 0;
+  if (!QuickListShown() || g_native_quick_list.rows.empty()) {
+    return false;
+  }
+  const RECT list_rect = QuickListRect(client);
+  if (RectWidth(list_rect) <= 0 || RectHeight(list_rect) <= 0 ||
+      !PointInRect(x, y, list_rect)) {
+    return false;
+  }
+  int start = 0;
+  int count = 0;
+  QuickListSlice(client, &start, &count);
+  if (count <= 0) {
+    return false;
+  }
+  // `PaintQuickList` lays the first row out at `panel_top +
+  // kNativeMenuHeaderHeight` and steps by the row height; a click below the
+  // last row is clamped onto it, since the panel's bottom padding is drawn
+  // over the same pixels.
+  const int rel = y - (static_cast<int>(list_rect.top) + kNativeMenuHeaderHeight);
+  if (rel < 0) {
+    return false;
+  }
+  int idx_in_window = rel / kNativeQuickListRowHeight;
+  if (idx_in_window >= count) {
+    idx_in_window = count - 1;
+  }
+  if (idx_in_window < 0 || idx_in_window >= count) {
+    return false;
+  }
+  *move_delta = iptvs::QuickListRowMoveDelta(g_native_quick_list, idx_in_window);
+  return true;
+}
+
 // One quick-list row. [row_rect] is the full-width slot; the row draws its own
 // highlight inside it.
 //
@@ -3103,6 +3159,12 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   if (l.has_quick_list && PointInRect(x, y, l.quick_list)) {
     return QuickListToggleCommand();
   }
+  // A press on an **open** quick list never reaches here: its rows and its
+  // margin are answered in `NativeControlsWndProc`'s `WM_LBUTTONDOWN`, which
+  // returns before this is called - a row needs two commands (move, then
+  // activate) and a panel press needs none, neither of which this
+  // one-string-per-point contract can express. Left out on purpose rather than
+  // half-implemented.
   return "show";
 }
 
@@ -3293,6 +3355,44 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
     return 0;
   case WM_LBUTTONDOWN: {
     g_native_keyboard_focus_visible = false;
+    // A press on a quick-list **row** is the one hit on this surface that
+    // means two commands - put the cursor on the row, then play it - and
+    // `NativeControlCommandFromPoint` returns a single string by contract, so
+    // the pair is emitted here, in that order, at the press. Same order as the
+    // Flutter overlay's row handler (`player_overlay.dart`), which is what
+    // makes a click on an unselected row one gesture instead of two, and what
+    // keeps "click a row" meaning the same thing on both Windows surfaces.
+    if (QuickListShown()) {
+      RECT client;
+      GetClientRect(hwnd, &client);
+      const int x = GET_X_LPARAM(lparam);
+      const int y = GET_Y_LPARAM(lparam);
+      int move_delta = 0;
+      if (QuickListRowHit(client, x, y, &move_delta)) {
+        if (HWND parent = NativeControlsOwner(hwnd)) {
+          if (move_delta != 0) {
+            PostMessage(parent, kNativeControlCommandMessage,
+                        reinterpret_cast<WPARAM>(new std::string(
+                            "zap:move:" + std::to_string(move_delta))),
+                        0);
+          }
+          PostMessage(parent, kNativeControlCommandMessage,
+                      reinterpret_cast<WPARAM>(
+                          new std::string("zap:activate")),
+                      0);
+        }
+        return 0;
+      }
+      // The panel itself is a target now, so a press on the header, the
+      // padding around the rows, or the empty/loading body is swallowed here
+      // instead of falling through as a press on nothing - it must not reach
+      // the chrome toggle underneath either, which is what a press in the
+      // shared Flutter overlay's margin does *only because its panel is still
+      // behind an `IgnorePointer`.
+      if (PointInRect(x, y, QuickListRect(client))) {
+        return 0;
+      }
+    }
     const int control_kind =
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     const std::string command = NativeControlCommandFromPoint(
@@ -3346,18 +3446,28 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
       break;
     }
     ScreenToClient(hwnd, &point);
-    if (g_native_control_state.open_menu == NativeMenuKind::kNone ||
-        !PointInRect(point.x, point.y, CurrentMenuRect(rect)) ||
-        MenuMaxScrollOffset() <= 0) {
-      break;
+    if (g_native_control_state.open_menu != NativeMenuKind::kNone &&
+        PointInRect(point.x, point.y, CurrentMenuRect(rect)) &&
+        MenuMaxScrollOffset() > 0) {
+      const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+      g_native_menu_scroll_offset += delta > 0 ? -1 : 1;
+      ClampMenuScrollOffset();
+      SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
     }
-    const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-    g_native_menu_scroll_offset += delta > 0 ? -1 : 1;
-    ClampMenuScrollOffset();
-    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(hwnd, nullptr, FALSE);
-    return 0;
+    if (QuickListShown() && PointInRect(point.x, point.y, QuickListRect(rect))) {
+      const int delta = iptvs::QuickListWheelDelta(
+          GET_WHEEL_DELTA_WPARAM(wparam));
+      if (delta != 0 && NativeControlsOwner(hwnd)) {
+        const std::string cmd = "zap:move:" + std::to_string(delta);
+        PostMessage(NativeControlsOwner(hwnd), kNativeControlCommandMessage,
+                    reinterpret_cast<WPARAM>(new std::string(cmd)), 0);
+      }
+      return 0;
+    }
+    break;
   }
   }
   return DefWindowProc(hwnd, message, wparam, lparam);
@@ -3411,9 +3521,44 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
       }
     }
     break;
+  case WM_MOUSEWHEEL: {
+    // Win32 sends WM_MOUSEWHEEL to the **focus** window, not to the one under
+    // the cursor - and the focus sits on this surface for as long as native
+    // playback runs (see the `SetFocus` in the chrome-visibility pass). So this,
+    // not the overlay window, is where a wheel over the quick list actually
+    // arrives. The overlay's own handler stays for the case where it does hold
+    // focus, and the two answer identically: both derive the panel rect from
+    // the client rect, and this surface fills it.
+    if (QuickListShown()) {
+      RECT rect;
+      GetClientRect(hwnd, &rect);
+      POINT point;
+      if (GetCursorPos(&point)) {
+        ScreenToClient(hwnd, &point);
+        if (PointInRect(point.x, point.y, QuickListRect(rect))) {
+          const int delta =
+              iptvs::QuickListWheelDelta(GET_WHEEL_DELTA_WPARAM(wparam));
+          if (delta != 0) {
+            if (HWND parent = GetParent(hwnd)) {
+              PostMessage(parent, kNativeControlCommandMessage,
+                          reinterpret_cast<WPARAM>(new std::string(
+                              "zap:move:" + std::to_string(delta))),
+                          0);
+            }
+          }
+          // Swallowed either way: the panel is open over the video, so a
+          // notch over it means "move the cursor", never "scroll the page".
+          return 0;
+        }
+      }
+    }
+    if (HWND parent = GetParent(hwnd)) {
+      PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+    }
+    break;
+  }
   case WM_RBUTTONDOWN:
   case WM_MBUTTONDOWN:
-  case WM_MOUSEWHEEL:
     if (HWND parent = GetParent(hwnd)) {
       PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
     }
@@ -4284,16 +4429,22 @@ void FlutterWindow::ApplyNativeControlsVisibility() {
     UpdateNativeControlsRegion();
   }
   const bool target_visible = NativeOverlayTargetVisible();
-  // While only the banner or the quick list is drawn the overlay is
-  // decoration, not chrome: neither has a hit target — the list is a
-  // selection model driven by the key ring, exactly as the shared Flutter
-  // overlay's panel is `IgnorePointer` — and swallowing the pointer over
-  // their band would stop a mouse move there from reaching the video
-  // surface, whose WM_MOUSEMOVE is the only thing that reveals the controls.
+  // While only the **banner** is drawn the overlay is decoration: it has no hit
+  // target, and swallowing the pointer over its band would stop a mouse move
+  // there from reaching the video surface, whose WM_MOUSEMOVE is the only thing
+  // that reveals the controls. **The quick list is the exception** - its rows are
+  // mouse targets now, the same press that plays a row on the shared Flutter
+  // overlay - so it must take the clicks, which means dropping
+  // WS_EX_TRANSPARENT for as long as it is up. Its rect is already in the window
+  // region (`UpdateNativeControlsRegion` ORs it in with the chrome down, or the
+  // panel would be clipped away entirely), so the rows stay reachable without it
+  // and nothing changes about the banner's pass-through.
+  const bool wants_transparent =
+      !native_controls_visible_ && !QuickListShown();
   const LONG_PTR ex_style =
       GetWindowLongPtr(native_controls_overlay_, GWL_EXSTYLE);
   const LONG_PTR wanted_ex_style =
-      (target_visible && !native_controls_visible_)
+      wants_transparent
           ? (ex_style | WS_EX_TRANSPARENT)
           : (ex_style & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
   if (wanted_ex_style != ex_style) {

@@ -451,6 +451,16 @@ class PlayerScreen extends StatefulWidget {
   /// HWND path (real D3D11 HDR, at the cost of the reinit beat) — the same
   /// "embedded by default, dedicated surface only when the stream needs it"
   /// policy Linux uses (SDR embedded, HDR native mpv). Ignored off Windows.
+  ///
+  /// **Every launch site now passes it explicitly** — the default stays false,
+  /// because the choice belongs to the caller (it knows whether a preview is
+  /// being adopted and whether the stream looks HDR) and the *policy* is the
+  /// launch path's, not the widget's: embedded by default on Windows, escalate
+  /// to the native HWND once on PQ/HLG ([_maybeEscalateWindowsNative]). It used
+  /// to be left at the default by the VOD, catch-up and preview-less live
+  /// launches, so **movies and series played in a second window** — mpv's video
+  /// goes to its own child HWND, the GDI controls to an owned `WS_POPUP`, and
+  /// neither is the Flutter route the window the user is looking at.
   final bool preferWindowsEmbedded;
 
   /// iOS only: stable content id for the per-session AVPlayer-failure memo
@@ -1417,6 +1427,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_zap == null || !_isLive) return false;
     if (!_usesSharedEmbeddedOverlay) return false;
     if (_usesWindowsNativeSurface || _separateEngineOwnsPlayback) return false;
+    // **Before** the chrome check, and this ordering is the whole point: an open
+    // list claims the arrows on screen even while the chrome is up, and the
+    // chrome can come back *underneath* it. A mouse hover reveals it (the
+    // reveal handler is what the pointer on the video triggers), and once
+    // `chromeVisible` is true the arrows below fall through to the ordinary
+    // fallback — Up/Down to volume, Left/Right to nothing on a live stream — so
+    // the panel on screen answered volume instead of the cursor. The native
+    // key ring already orders it this way (`zap_key_policy.h` checks
+    // `quick_list_open` before `controls_visible`); this is that rule, second
+    // implementation.
+    if (_zapListOpen) return true;
     return !(_embeddedSurfaceKey.currentState?.chromeVisible ?? false);
   }
 
@@ -1456,6 +1477,20 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// a zap session; the pointer/touch counterpart of the `G`/`GUIDE` keys,
   /// which is the only way a mouse or a finger can reach the list.
   bool get _zapEnabled => _zap != null && _isLive;
+
+  /// A `zap:` command string from the overlay's quick-list pointer gestures —
+  /// a row click, or a wheel notch.
+  ///
+  /// Parsed rather than cast, and through the **same** [_handleZapCommand] the
+  /// keys and the Windows GDI overlay's `nativeControl` post reach, so a mouse
+  /// press cannot become a second way into the controller. An unparseable
+  /// string is dropped exactly as the native path drops it; the overlay only
+  /// ever emits `zap:move:<delta>` and `zap:activate`.
+  void _handleQuickListPointerCommand(String raw) {
+    final command = parseZapCommand(raw);
+    if (command == null) return;
+    _handleZapCommand(command);
+  }
 
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
@@ -3373,6 +3408,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       quickList: _quickListState(),
       zapEnabled: _zapEnabled,
       onOpenQuickList: _zapEnabled ? _toggleQuickList : null,
+      onQuickListCommand: _zapEnabled ? _handleQuickListPointerCommand : null,
       dynamicRangeLabel: _dynamicRangeLabel,
       onBack: _back,
       onToggleFavorite: _toggleFavorite,

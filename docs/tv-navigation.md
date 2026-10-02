@@ -707,6 +707,20 @@ no way to open it at all. It is a focus stop like the favorite star wherever the
 focus ring; the glyph is each platform's own bulleted-list icon (Material
 `format_list_bulleted`, Compose `Icons.AutoMirrored.Filled.List`, Segoe MDL2 `\xE8FD`).
 
+**Once it is open the pointer drives it too** — a click on a row is the keys' OK verbatim (cursor
+to that row, then play it), and a wheel notch moves the cursor three rows. The opener was the first
+half; without this the panel on screen was readable but not usable without a keyboard, which on a
+desktop is the same as broken. **A row names itself — this is not geometry traversal**, and no
+focus ring moves: the selection model is unchanged, and rows are still not focus targets. Only the
+two surfaces that can host a Flutter or GDI overlay implement it today (the shared Flutter overlay
+and the Windows GDI one); Android Compose and the Lua OSD are keyboard/keyring surfaces and stay as
+they are. The arrows it *was* reached by are a separate matter, and the ordering there is
+load-bearing: **an open list claims them even while the chrome is visible**, because the chrome can
+come back *underneath* it — a mouse hover over the video reveals it — and a gate that asked
+"chrome hidden?" first handed Up/Down to volume instead of the cursor. The native key ring already
+ordered it `quick_list_open` before `controls_visible` (`zap_key_policy.h`); the Dart gate now
+matches.
+
 - **It is a selection model, and the strictest case of one in the app.** One cursor (an integer
   per mode), rows that are *not* focus targets, an explicit `itemExtent` so the reveal is exact
   `index * extent` arithmetic. That is not a stylistic choice here: the channels mode is routinely
@@ -795,15 +809,19 @@ nothing the second time reads as a dead remote.
 cluster**: quick list → "Go to live" → favourite star → speed/audio/CC → aspect → info →
 fullscreen (`FocusableItems`), matching the visual order. It is an ordinary focus stop, exactly
 like the star, and it is the one opener that **toggles** (`zap:list`/`zap:close`) — this surface
-keeps its chrome up over an open list, so the button stays reachable and is the only mouse-only
-way to close a panel that is not a hit target. Every other surface's opener only opens, because
+keeps its chrome up over an open list, so the button stays reachable under the pointer and is still
+the only way to *close* the panel from the mouse: a row press answers "play this row", and a press
+in the panel's margin is deliberately swallowed. Every other surface's opener only opens, because
 opening stands their chrome down.
 
-The rendered *panel* is a readout and a selection model, **never a pointer target**: the overlay
-window keeps `WS_EX_TRANSPARENT` while only the list (or the banner) is drawn, so a mouse move
-over its band still reaches the video surface's `WM_MOUSEMOVE`, which is the only thing that
-reveals the chrome — the same arrangement as the shared Flutter overlay's `IgnorePointer` panel.
-See docs/player.md "The quick list on the native HWND surface (Phase 6c)".
+The rendered *panel* is a **selection model**, never a focus target — and its rows are a pointer
+target and nothing more (a click names a row; it does not move a focus ring). That is what
+`WS_EX_TRANSPARENT` was doing before the rows became clickable: with only the list (or the banner)
+drawn, a mouse move over its band had to reach the video surface's `WM_MOUSEMOVE`, the only thing
+that reveals the chrome. The **banner keeps that pass-through; the open list does not** — it drops
+the style for as long as it is up so its rows take the press, and swallows a press in its margin
+rather than letting it fall through as a chrome toggle. See docs/player.md "The quick list on the
+native HWND surface (Phase 6c)".
 
 ### Android's key map (`ZapKeyPolicy`, implemented)
 

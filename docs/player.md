@@ -716,8 +716,15 @@ stream) **escalates once** via `_maybeEscalateWindowsNative`: it creates the HWN
 hot-swaps `vo` on the *same* player (no fresh resolve, unlike Linux's separate mpv process),
 flipping `_windowsNativeActive`/`_didWindowsHotSwap` true so exit discards+restarts the preview like
 a normal native open. This covers the cold/fast preview→fullscreen where the ahead-of-time
-colorimetry read missed HDR; the cost is a brief mid-playback switch. VOD/direct opens never set
-`preferWindowsEmbedded`, so they open native immediately.
+colorimetry read missed HDR; the cost is a brief mid-playback switch. **Every launch site now passes
+`preferWindowsEmbedded` explicitly** — the constructor default stays false, because the *policy*
+belongs to the caller: embedded by default on Windows, escalate to the native HWND once on PQ/HLG.
+VOD, catch-up and preview-less live opens used to leave it at the default, which meant **movies and
+series played in a second window**: mpv's video goes to its own child HWND, the GDI controls to an
+owned `WS_POPUP`, and neither is the Flutter route the window the user is looking at. Each of those
+three sites now passes `preferWindowsEmbedded: Platform.isWindows`, so an SDR movie/series/catch-up
+plays inline in the route and an HDR one still escalates to the real D3D11 surface — the same policy
+everywhere, with the seam only where HDR requires it.
 
 **A native surface taking over an already-fullscreen window must take over the fullscreen ownership
 in place, never by restoring the window.** The runner cannot read media_kit's saved pre-fullscreen
@@ -1192,14 +1199,43 @@ any value that *holds* a map, so a row needs no second set of helpers) and then 
   the clip region and the window's visibility cannot disagree. Both sit in the lower-left and both
   describe the cursor's channel, so drawn together they would print it twice from two cursors —
   the same rule Dart's `_zapBannerVisible` applies to the shared Flutter overlay.
-- **The list *panel* is not a mouse target**, deliberately (the control row's opener below is —
-  that is the distinction), and the `WS_EX_TRANSPARENT` rule is unchanged because of it: while only the banner *or* the list is drawn the overlay is decoration, so it
-  keeps that style and a mouse move over its band still reaches the video surface's
-  `WM_MOUSEMOVE` — the only thing that reveals the chrome. That matches the shared Flutter
-  overlay's panel, which is `IgnorePointer` for the same reason, and docs/tv-navigation.md's rule
-  that the list is a selection model driven by the surface's key ring, never a focus (or hit)
-  target. A hit test would also have to answer "which absolute row is this?" for a list whose
-  rows are two levels of window away from the real one.
+- **The list *panel* became a mouse target, and that is the one thing it costs the
+  surface.** The rows are the keys' OK verbatim — press one and the cursor goes to it, then plays
+  it, the same two commands in the same order the Flutter overlay's row handler sends
+  (`zap:move:<delta>` only when the row is not already selected, then `zap:activate`) — and one
+  wheel notch is `kZapWheelRows` rows of cursor movement (`QuickListWheelDelta`, `kNativeWheelRows`
+  on this side), never an activation. This needed three separate changes, because the panel was
+  previously *deliberately* pass-through:
+  - **`WS_EX_TRANSPARENT` is dropped while the list is up.** That style is what let a mouse move
+    over the banner's (and the list's) band reach the video surface's `WM_MOUSEMOVE`, the only
+    thing that reveals the chrome — so with it still set the press never reaches this window at
+    all. Only the **banner** stays transparent; the quick list's rect is already in the window
+    region (`UpdateNativeControlsRegion` ORs it in with the chrome down, or the panel would be
+    clipped away), so the rows are reachable without it.
+  - **The row click is handled in `WM_LBUTTONDOWN`, not in `NativeControlCommandFromPoint`.** One
+    press on an unselected row means *two* commands, and that function is one-string-per-point by
+    contract — a single-command version of it would have had to drop either the move or the
+    activation, and dropping the activation is what "click a row" is for. The branch returns before
+    `NativeControlCommandFromPoint` is reached, so that function no longer has any quick-list case
+    at all.
+  - **The wheel is handled twice, on purpose.** Win32 sends `WM_MOUSEWHEEL` to the **focus**
+    window, not to the one under the cursor, and the focus sits on the native *video* surface for
+    as long as native playback runs — so the video surface's WndProc is where a notch over the
+    panel actually arrives. The overlay's own handler stays for the case where it does hold focus.
+    Both derive the panel rect from the same client rect (the surface fills it) and answer
+    identically. A notch outside the panel still falls through to the reveal-and-ignore path it
+    always had.
+  - `QuickListRowHit` is the one hit test, and it asks for the **absolute** row behind the point:
+    `QuickListRowMoveDelta` is handed the index inside the pushed *window* and resolves it against
+    `selected_index`, because the panel draws 9 of the ~40 rows Dart shipped. Rows are hit-tested
+    from the painted geometry rather than restated constants; a click below the last row clamps
+    onto it, since the panel's bottom padding is drawn over the same pixels. A press inside the
+    panel that misses every row is swallowed rather than falling through — with the rows reachable,
+    "not a hit" inside the panel must not become "toggle the chrome", which is what the
+    `IgnorePointer`-behind-the-panel arrangement gives the shared Flutter overlay for free.
+  - docs/tv-navigation.md's rule that the list is a selection model driven by the surface's key
+  ring is unchanged: **rows are not focus targets and not navigable by geometry traversal.** A
+  pointer names a row directly, which is what a pointer is for; it never moves a focus ring.
 - **Closing repaints before hiding.** `UpdateQuickList` reuses `HideZapBanner`'s trap: a layered
   window keeps whatever was last composited into it, so taking the overlay down with the list
   still on its surface would flash the list for a frame the next time anything brought the window
@@ -2664,8 +2700,14 @@ up to 1.6x) so the reveal is exact `index * extent` arithmetic, and the row's te
 `ClipRect` → `OverflowBox` so a `RenderFlex` overflow is structurally impossible whatever the font
 metrics do — the same split the live tab's fixed-extent rows use, swept with the real Inter font in
 `test/layout_overflow_test.dart`. The selection ring is a `foregroundDecoration`, never a laid-out
-border. The panel is `IgnorePointer`, so it can't swallow the background tap the touch Back ladder
-depends on.
+border. The panel is behind an `IgnorePointer` on its **heading and margins** — a press there still
+reaches the background tap the touch Back ladder depends on — while its **rows** are pointer targets
+where the platform is a pointer at all: `zapQuickListRowMoveDelta` then `zap:activate` for a click
+(the keys' OK verbatim), `zapQuickListWheelDelta` (`kZapWheelRows`, 3) for a notch, which moves the
+cursor and never plays. Rows only build that handler when `onQuickListCommand` is wired, and the
+whole thing is skipped in `touch` mode. The `zap:move` is dropped by the controller when it is 0, so
+a click on the row already under the cursor sends the activation alone rather than needing a special
+case.
 
 #### Android's quick list (Phase 6b)
 

@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -179,6 +180,22 @@ class PlayerVideoSurface extends StatefulWidget {
   /// Sends `zap:list` (open the quick list). Null off a zapping route.
   final VoidCallback? onOpenQuickList;
 
+  /// Sends a `zap:` command string — the panel's own click and wheel gestures.
+  ///
+  /// A **string**, not a [ZapCommand], and that is the whole point: the
+  /// Windows GDI overlay posts the identical vocabulary to the same inbound
+  /// method, so a mouse press and a key press are provably one input to the
+  /// controller instead of a second, Dart-only path into it (docs/player.md
+  /// "every surface speaks one command vocabulary"). The values are
+  /// `zap:move:<delta>` and `zap:activate`, built by
+  /// [zapQuickListRowMoveDelta] and [kZapWheelRows] — a click moves the
+  /// cursor and commits it, a wheel only moves.
+  ///
+  /// Null on a touch route and off a zapping route: the touch ladder needs
+  /// every press over the panel to fall through to the background (see
+  /// [_quickListPanel]), and there is nothing to point at without a zap.
+  final ValueChanged<String>? onQuickListCommand;
+
   /// Label of the aspect mode playback is *currently* in ("Fit"/"Fill"/"16:9"/
   /// "4:3"). Rendered as the aspect control's text, exactly as all four native
   /// overlays do — Dart owns the mode sequence (`PlayerScreen._aspectModes`),
@@ -235,6 +252,7 @@ class PlayerVideoSurface extends StatefulWidget {
     this.quickList,
     this.zapEnabled = false,
     this.onOpenQuickList,
+    this.onQuickListCommand,
     required this.aspectLabel,
     required this.videoFit,
     required this.dynamicRangeLabel,
@@ -352,6 +370,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             quickList: widget.quickList,
             zapEnabled: widget.zapEnabled,
             onOpenQuickList: widget.onOpenQuickList,
+            onQuickListCommand: widget.onQuickListCommand,
             aspectLabel: widget.aspectLabel,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
@@ -497,6 +516,7 @@ class EmbeddedPlayerControls extends StatefulWidget {
     this.quickList,
     this.zapEnabled = false,
     this.onOpenQuickList,
+    this.onQuickListCommand,
     required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
@@ -533,6 +553,10 @@ class EmbeddedPlayerControls extends StatefulWidget {
 
   /// Sends `zap:list`. See [PlayerVideoSurface.onOpenQuickList].
   final VoidCallback? onOpenQuickList;
+
+  /// Sends a `zap:` command from a panel click or wheel notch. See
+  /// [PlayerVideoSurface.onQuickListCommand].
+  final ValueChanged<String>? onQuickListCommand;
 
   /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
   final String aspectLabel;
@@ -2263,10 +2287,15 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       top: 24 + _barInsets.top,
       bottom: 24 + _barInsets.bottom,
       width: width,
-      // Never a pointer target: the list is driven by the route's key
-      // bindings, and absorbing taps here would swallow the background
-      // reveal the touch Back ladder depends on.
+      // Pointer-transparent as a whole on **touch**, where a finger has no
+      // hover and the Back ladder is a tap: absorbing presses over the panel
+      // would strand a press that is meant to reach the background layer.
+      // On a pointer platform the rows opt back in (see [_quickListRowTile]),
+      // and only the rows — the header and the empty/loading bodies below stay
+      // transparent, so a press in the panel's margin still toggles the chrome
+      // the way a press on the video does.
       child: IgnorePointer(
+        ignoring: widget.touch || widget.onQuickListCommand == null,
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: AppColors.panel.withValues(alpha: 0.96),
@@ -2275,8 +2304,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+              IgnorePointer(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
                 child: Row(
                   children: [
                     Icon(
@@ -2312,6 +2342,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                       ),
                   ],
                 ),
+                ),
               ),
               Expanded(child: _quickListBody(state)),
             ],
@@ -2323,20 +2354,24 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   Widget _quickListBody(ZapQuickListState state) {
     if (state.loading && state.rows.isEmpty) {
-      return const Center(
-        child: SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2),
+      return const IgnorePointer(
+        child: Center(
+          child: SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
         ),
       );
     }
     if (state.rows.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        child: Text(
-          state.emptyLabel ?? 'Nothing here',
-          style: const TextStyle(color: AppColors.textLo),
+      return IgnorePointer(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Text(
+            state.emptyLabel ?? 'Nothing here',
+            style: const TextStyle(color: AppColors.textLo),
+          ),
         ),
       );
     }
@@ -2347,23 +2382,44 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       // every selection model in this app follows.
       itemExtent: _quickListRowExtent,
       itemCount: state.rows.length,
-      itemBuilder: (context, i) => _quickListRowTile(state.rows[i]),
+      itemBuilder: (context, i) =>
+          _quickListRowTile(state.rows[i], state: state, indexInWindow: i),
     );
   }
 
-  Widget _quickListRowTile(ZapQuickListRow row) {
-    final selected = row.selected;
-    return Padding(
+  /// A row, wired for the two pointer gestures a mouse adds to the keys.
+  ///
+  /// Both wrappers sit **outside** the row's padding so the whole `itemExtent`
+  /// is a target (the 2px gaps are part of the row, not dead space), and both
+  /// are layout-neutral — a pointer affordance that changes constraints is the
+  /// poster-reload bug this panel's foreground ring already avoids.
+  ///
+  /// The wheel is handled on the row rather than on an ancestor of the
+  /// [ListView] on purpose: `PointerSignalResolver` lets exactly one
+  /// `Listener` per signal have it, and the hit-test path is walked leaf-first,
+  /// so only a listener *below* the `Scrollable` keeps the wheel from scrolling
+  /// the window as well. That is all this placement buys — a `Listener`'s
+  /// `onPointerSignal` is a `void` callback, so there is no "handled" flag to
+  /// return; being the innermost listener *is* the claim. The cursor move then
+  /// re-centres the viewport through [_revealQuickListRow], so the two scrolls
+  /// never compound.
+  Widget _quickListRowTile(
+    ZapQuickListRow row, {
+    required ZapQuickListState state,
+    required int indexInWindow,
+  }) {
+    final send = widget.onQuickListCommand;
+    final rowWidget = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
       child: Container(
         decoration: BoxDecoration(
-          color: selected ? AppColors.panelHi : Colors.transparent,
+          color: row.selected ? AppColors.panelHi : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
         ),
         // The accent ring is painted over the child, never laid out as a
         // border — a selection affordance that changes constraints is the
         // poster-reload bug (docs/tv-navigation.md, `FocusableCard`).
-        foregroundDecoration: selected
+        foregroundDecoration: row.selected
             ? BoxDecoration(
                 border: Border.all(color: AppColors.accent, width: 2),
                 borderRadius: BorderRadius.circular(10),
@@ -2399,9 +2455,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: selected ? Colors.white : AppColors.textHi,
+                          color: row.selected
+                              ? Colors.white
+                              : AppColors.textHi,
                           fontSize: 14,
-                          fontWeight: selected
+                          fontWeight: row.selected
                               ? FontWeight.w700
                               : FontWeight.w600,
                         ),
@@ -2426,6 +2484,33 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               ],
             ),
           ),
+        ),
+      ),
+    );
+    if (send == null) return rowWidget;
+    return MouseRegion(
+      // The one place in the panel that claims to be clickable, so it says so
+      // before the press does.
+      cursor: SystemMouseCursors.click,
+      child: Listener(
+        onPointerSignal: (event) {
+          if (event is! PointerScrollEvent) return;
+          final delta = zapQuickListWheelDelta(event.scrollDelta.dy);
+          if (delta == 0) return;
+          send('zap:move:$delta');
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          // A click is the keys' OK, verbatim: put the cursor on the row the
+          // pointer named, then commit it. The delta is a no-op the controller
+          // drops when the click landed on the selected row, so this needs no
+          // special case for "already there".
+          onTap: () {
+            final delta = zapQuickListRowMoveDelta(state, indexInWindow);
+            if (delta != 0) send('zap:move:$delta');
+            send('zap:activate');
+          },
+          child: rowWidget,
         ),
       ),
     );
