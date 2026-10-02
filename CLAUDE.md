@@ -1312,10 +1312,26 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   surfaces a failure to the error/reconnect path — `fatal`/`no` starves recovery. One notch
   deliberately higher than Android's native `ffmpeg=fatal` (`player/MpvController.kt`), since a
   real decode failure prints at error (`Failed setup for format d3d11`, `no frame!`). Logging
-  only: it never changes what mpv decodes — `hwdec` is decided separately, and a stale
-  `hwdec_override.txt` beside the exe silently wins over `auto-safe`. Pinned by
+  only: it never changes what mpv decodes — `hwdec` is decided separately (the embedded Windows
+  surface defaults to `auto-copy`, Linux to `auto-safe` — see docs/player.md "The embedded Windows
+  surface asks for `hwdec=auto-copy`"), and a stale
+  `hwdec_override.txt` beside the exe silently wins over that default. Pinned by
   `test/mpv_log_filter_test.dart`. Detail: docs/player.md "mpv's own log, and why FFmpeg's is
   filtered out of it".
+- **`media_kit_video` is vendored and patched — `packages/media_kit_video`, a `path:` dependency, not
+  pub.dev 2.0.1.** Its Windows texture callbacks run **inside the Flutter engine** on the raster
+  thread, where a C++ exception has no handler and is `std::terminate` by definition; upstream's
+  `pixel_buffer_textures_.at(texture_id_)` threw `std::out_of_range` there whenever a resize or
+  teardown erased the entry while `texture_id_` was still live (it was cleared outside the mutex),
+  killing the process with `0xC0000409` and **no Dart-side log at all**. Every lookup is now a
+  non-throwing `find()`, the id is cleared under the lock, and the `Post`/promise paths around
+  teardown can't throw. Re-applying this on a version bump is a documented checklist —
+  `packages/media_kit_video/VENDORED.md`, every edit marked `// iptvs patch:` in place — and
+  **`app.so` cannot witness it**, since no Dart changed: verify the `.text` section of
+  `build/windows/x64/runner/Release/media_kit_video_plugin.dll` (a whole-file hash is useless, the PE
+  `TimeDateStamp` differs between builds of identical source). Also set the file's mtime after copying
+  a new version in: a pub-cache timestamp is older than the object file, MSBuild skips the recompile,
+  and the build reports success while shipping the old DLL. Detail: docs/player.md "Windows".
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in

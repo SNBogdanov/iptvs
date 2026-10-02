@@ -35,7 +35,14 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   media_kit: ^1.2.6
-  media_kit_video: ^2.0.1
+  # Vendored copy of pub.dev media_kit_video 2.0.1 (packages/media_kit_video).
+  # Its Windows renderer threw std::out_of_range on the Flutter raster thread
+  # from inside the engine-called texture callback, where nothing catches C++
+  # exceptions — std::terminate, and the whole player dies mid-zap. Upstream has
+  # no fix, so the patch lives here: see packages/media_kit_video/VENDORED.md
+  # for exactly what differs and how to re-apply it on a version bump.
+  media_kit_video:
+    path: packages/media_kit_video
   media_kit_libs_video: ^1.0.7
   sqflite: ^2.4.4
   sqflite_common_ffi: ^2.4.3
@@ -71,7 +78,8 @@ dependencies:
 # resolve without an override. Upstream main still self-declares
 # `version: 1.2.6`, so only the source conflicts, not the version — the
 # override below is the minimum needed to unblock resolution. Only
-# media_kit is pinned; media_kit_video/media_kit_libs_video stay on pub.dev.
+# media_kit is pinned to a ref; media_kit_video is a vendored path dependency
+# (see its own comment above) and media_kit_libs_video stays on pub.dev.
 dependency_overrides:
   media_kit:
     git:

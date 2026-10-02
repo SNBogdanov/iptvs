@@ -19,8 +19,14 @@ void main() {
   // left to media_kit's own default — see the file's doc comment for the field
   // report that moved Windows onto the same policy as every other path.
   group('embedded hwdec policy', () {
-    test('desktop asks for auto-safe, mobile defers to media_kit', () {
-      if (Platform.isWindows || Platform.isLinux) {
+    test('Windows asks for auto-copy, Linux auto-safe, mobile defers', () {
+      if (Platform.isWindows) {
+        // auto-safe negotiates d3d11va *zero-copy*, which is exactly the path
+        // that lost the last band on HEVC 1080p. auto-copy keeps the decoder on
+        // the GPU but copies frames back, so the present path is not handed a
+        // surface it can leave half-drawn.
+        expect(embeddedHwdec(), 'auto-copy');
+      } else if (Platform.isLinux) {
         expect(embeddedHwdec(), 'auto-safe');
       } else {
         expect(embeddedHwdec(), isNull);

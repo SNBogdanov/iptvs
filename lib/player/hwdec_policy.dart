@@ -51,6 +51,26 @@ import 'dart:io' show File, Platform;
 /// for the one surface a user watches most. Reach for [embeddedHwdec] rather
 /// than a literal, and treat an unset `hwdec` on any surface as a bug.
 ///
+/// **Windows then needed the second half of the same fix: `auto-safe` is not
+/// sufficient, because it does not exclude zero-copy.** A return of the identical
+/// band on an install already carrying the `auto-safe` fix was bisected with the
+/// override file above, one arm per launch, on a 1080p HEVC channel: `hwdec=no`
+/// (software) clean, default `auto-safe` banded — and `auto-safe` had selected
+/// `d3d11va`, so the "safe" list was never the thing keeping the frames
+/// zero-copy-free. `hwdec=auto-copy` negotiated `d3d11va-copy` (`video format=nv12`,
+/// hardware decode intact) and the band was gone. Hence Windows asks for
+/// `auto-copy`, not `auto-safe`, and the two differ by exactly the copy mpv makes
+/// when a surface cannot be handed over directly.
+///
+/// **Linux deliberately keeps `auto-safe`,** and this is not an oversight: its
+/// embedded path renders through vaapi/drm where zero-copy is the whole point and
+/// a forced copy would spend real memory bandwidth on a TV box for a defect
+/// never reported there. The *native* Windows HWND surface also keeps
+/// `auto-safe` (`player_screen.dart`'s `_configureNativePlayer`) — mpv owns both
+/// ends of that context, so its zero-copy never crosses an interop boundary, and
+/// forcing a copy there would tax the surface that exists for HDR throughput.
+/// The defect is specific to *media_kit*'s texture surface on Windows.
+///
 /// The marker file rather than the variable alone because the environment
 /// variable is easy to lose: it is inherited only by a process launched *from*
 /// the shell that set it, so a double-click on the exe runs the default policy
@@ -59,7 +79,9 @@ import 'dart:io' show File, Platform;
 /// user can create in Explorer has neither problem.
 String? embeddedHwdec() =>
     _overrides()['hwdec'] ??
-    ((Platform.isWindows || Platform.isLinux) ? 'auto-safe' : null);
+    (Platform.isWindows
+        ? 'auto-copy'
+        : (Platform.isLinux ? 'auto-safe' : null));
 
 /// Extra mpv properties for this run, from the same override source.
 ///

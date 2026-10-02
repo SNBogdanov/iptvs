@@ -701,6 +701,32 @@ reachable after any long fullscreen session that reconnects.
 
 ## Windows
 
+**The Windows video renderer is a vendored, patched copy of `media_kit_video` 2.0.1
+(`packages/media_kit_video`, wired as a `path:` dependency).** Its texture callbacks are
+`std::function`s **the Flutter engine calls directly** on the raster thread, and upstream reached
+into a map with `at()` there. `VideoOutput::Resize` unregisters the old texture, its release callback
+erases the map entry, and `texture_id_` was cleared *outside* `textures_mutex_` — so a frame callback
+taking the lock inside that window saw a live id whose entry was already gone,
+`pixel_buffer_textures_.at()` threw `std::out_of_range`, and the exception crossed into engine C++
+that has no handler for C++ exceptions: `std::terminate` → `abort()`. The process died with
+`0xC0000409` mid-zap, with **nothing in the Dart diagnostics log**, because no Dart code ran. Six
+identical WER minidumps on the owner's machine, every one the same stack
+(`media_kit_video_plugin` → `std::_Xout_of_range` → `CxxThrowException` →
+`flutter_windows!terminate` → `abort`). There is a second instance of the same window between
+`RegisterTexture` returning and the new entry being emplaced.
+
+The patch (`find()` in both callbacks returning the `nullptr` they already used for "no texture";
+`texture_id_` cleared under the mutex; the same non-throwing lookup in `Render`/`CheckAndResize`,
+whose upstream throw was *silently swallowed* by the discarded `Post` future and so dropped frames
+without a trace; the `ThreadPool::Post` calls in `NotifyRender`/`~VideoOutput` guarded, since `Post`
+throws once the pool is stopped, `NotifyRender` is mpv callback C code and a throwing destructor *is*
+`terminate`; `~VideoOutput` waiting on its teardown promise only when a texture existed, because
+upstream blocked forever otherwise; the `const` `width()`/`height()` accessors; and a catch around
+`task()` in the pool's worker loop). Full rationale, the exact diff, and the re-apply procedure for a
+version bump are in `packages/media_kit_video/VENDORED.md`; every edit is marked `// iptvs patch:`
+in place. Do **not** point this dependency back at pub.dev without re-applying that patch — nothing in
+Dart will fail, the player will just die on zap again.
+
 **Surface policy mirrors Linux: embedded for SDR, the native HWND only for HDR.** HDR playback
 renders into a native HWND surface (`createSurface`) so mpv presents directly through D3D11 (real
 HDR) instead of round-tripping through Flutter's SDR texture (`vo=gpu-next`,
@@ -725,6 +751,22 @@ owned `WS_POPUP`, and neither is the Flutter route the window the user is lookin
 three sites now passes `preferWindowsEmbedded: Platform.isWindows`, so an SDR movie/series/catch-up
 plays inline in the route and an HDR one still escalates to the real D3D11 surface — the same policy
 everywhere, with the seam only where HDR requires it.
+
+**The embedded Windows surface asks for `hwdec=auto-copy`, not `auto-safe`.** `auto-safe` negotiates
+d3d11va *zero-copy*, which is exactly the path that lost the bottom band on 1080p HEVC: the decoder
+hands libplacebo a surface whose last rows are never written, so the chroma plane's unwritten bytes
+show green along the bottom of the texture — reported on the windowed preview and the fullscreen
+surface alike, and in every aspect mode including Stretch (so it is inside the texture, not a `BoxFit`
+framing issue). `auto-copy` keeps the decoder on the GPU (`active hwdec=d3d11va-copy`,
+`video format=nv12`) but copies each frame back to system memory before it reaches the renderer —
+the copy the zero-copy path was omitting. The *native* HWND surface above keeps `auto-safe` (mpv owns
+both ends of its D3D11 context, so its zero-copy never crosses an interop boundary), and Linux's
+embedded path keeps `auto-safe` (vaapi/drm zero-copy is the whole point there and the band was never
+reported). The decision lives in `lib/player/hwdec_policy.dart` (`embeddedHwdec()`), consulted by
+every embedded `VideoController`; bisect a future rendering defect with the `hwdec_override.txt`
+marker beside the exe rather than a rebuild per arm. A stale marker left over from a bisection
+silently wins over the default, so the `preview mpv overrides: …` line in the log is the first thing
+to check.
 
 **A native surface taking over an already-fullscreen window must take over the fullscreen ownership
 in place, never by restoring the window.** The runner cannot read media_kit's saved pre-fullscreen
