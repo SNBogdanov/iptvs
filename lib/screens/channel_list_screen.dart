@@ -1952,6 +1952,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               // portal-side kill.
               resolveAgain: () => repo.resolve(channel),
               iosEngineKey: channel.id,
+              preferWindowsEmbedded: Platform.isWindows,
             ),
           ),
         );
@@ -2610,6 +2611,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             // AVPlayer failure permanently downgrade the live channel to SDR
             // (or vice versa).
             iosEngineKey: 'catchup:${channel.id}',
+            preferWindowsEmbedded: Platform.isWindows,
           ),
         ),
       );
@@ -2711,6 +2713,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               resumeFrom: resume?.position,
             ),
             iosEngineKey: item.id,
+            preferWindowsEmbedded: Platform.isWindows,
           ),
         ),
       );
