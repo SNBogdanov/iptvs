@@ -225,7 +225,7 @@ void main() {
       required bool withNames,
     }) => xmltvGuideFeed(
       url: url,
-      download: (_) async => _xmltv(body),
+      download: (_, file) => file.writeAsBytes(_xmltv(body)),
       tvgIdToChannelId: buildTvgIdIndex(channels),
       nameToChannelIds: withNames
           ? epgNameIndexFor(channels, extraCount: 1)
