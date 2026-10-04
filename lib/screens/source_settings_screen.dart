@@ -296,6 +296,23 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     await _save(_config.copyWith(settings: settings));
   }
 
+  /// Turns metadata enrichment off, or back on.
+  ///
+  /// The same "only `false` is ever written" shape as the resume toggle: a
+  /// source nobody touched keeps serializing exactly as it did before the
+  /// setting existed. `enrichMetadata` is a constructor argument on the
+  /// repository, so the toggle takes effect when the source is next loaded —
+  /// the same "applies on next load" contract the EPG guides have.
+  Future<void> _toggleEnrichMetadata() async {
+    final settings = <String, dynamic>{..._config.settings};
+    if (_config.enrichMetadata) {
+      settings['enrichMetadata'] = false;
+    } else {
+      settings.remove('enrichMetadata');
+    }
+    await _save(_config.copyWith(settings: settings));
+  }
+
   Future<void> _saveEpgGuides() async {
     final urls = <String>[];
     for (final controller in _epgControllers) {
@@ -388,8 +405,9 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   /// agree on which stored values count as a choice — they disagreed on case
   /// and surrounding whitespace before, so a hand-edited `'TS'` read as unset
   /// here and as a choice there.
-  String? get _streamExtension =>
-      validatedXtreamStreamExtension(_config.settings['streamExtension']?.toString());
+  String? get _streamExtension => validatedXtreamStreamExtension(
+    _config.settings['streamExtension']?.toString(),
+  );
 
   /// Cycles Automatic → .ts → .m3u8 → Automatic. Only ever called from a user
   /// tap, so opening this screen never writes a value that pins a source away
@@ -650,6 +668,17 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                                 _config.channelDwellSeconds,
                               ),
                               onTap: _cycleChannelDwell,
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'Metadata',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            _EnrichMetadataTile(
+                              enabled: _config.enrichMetadata,
+                              onTap: _toggleEnrichMetadata,
                             ),
                             // Extra XMLTV guides. Here rather than on the
                             // add/edit source form because it is an ongoing
@@ -1160,6 +1189,66 @@ class _BufferPresetTile extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(
                     bufferPresetHint(preset),
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Toggles per-source metadata enrichment (`SourceConfig.enrichMetadata`).
+///
+/// The same one-focus-target shape as [_ResumeOnLaunchTile]: OK/tap flips it,
+/// so a D-pad needs no sub-menu. Off means this source's movies and series are
+/// shown exactly as the panel lists them — no TMDB/TVDB lookups for posters,
+/// overviews or ratings. The global `MetadataConfig.autoEnrich` still gates the
+/// whole pipeline; this is the per-source switch beside it.
+class _EnrichMetadataTile extends StatelessWidget {
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _EnrichMetadataTile({required this.enabled, required this.onTap});
+
+  static const _hint =
+      'Enrich movies and series with posters, descriptions and ratings from '
+      'TMDB/TVDB. Off shows this source exactly as the provider lists it.';
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      semanticsLabel:
+          'Metadata enrichment: ${enabled ? 'on' : 'off'}. $_hint '
+          'Activate to turn it ${enabled ? 'off' : 'on'}.',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              enabled ? Icons.auto_awesome : Icons.auto_awesome_outlined,
+              size: 20,
+              color: enabled ? null : AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Metadata enrichment: ${enabled ? 'On' : 'Off'}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _hint,
                     style: const TextStyle(
                       color: AppColors.textLo,
                       fontSize: 12,

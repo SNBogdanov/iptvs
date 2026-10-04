@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/diagnostics_log.dart';
 
 /// The Windows runner's native channel, registered in `flutter_window.cpp`'s
 /// `RegisterNativeHdrPlayerChannel`. The tray-icon controls (`setCloseToTray`,
@@ -43,11 +44,36 @@ void requestResume() {
 /// playback-state change. Loaded at boot and updated by the settings toggle.
 final ValueNotifier<bool> alwaysOnTopEnabled = ValueNotifier<bool>(false);
 
+/// Pushes a window-style/preference setting to the Windows runner, tolerating a
+/// build where that handler does not exist.
+///
+/// Both the boot-time preference push and the always-on-top sync run
+/// unconditionally on Windows — the first outside any widget, the second from a
+/// post-frame callback — so a runner without these methods would otherwise
+/// surface an *unhandled* `MissingPluginException` rather than degrading to
+/// "this preference isn't applied here". Widget tests are exactly such a runner,
+/// which is how the always-on-top sync was caught.
+Future<void> _pushRunnerSetting(String method, Object? value) async {
+  try {
+    await const MethodChannel(
+      kWindowsRunnerChannel,
+    ).invokeMethod<void>(method, value);
+  } on MissingPluginException {
+    // No runner handler on this platform (or in a test) — the caller's
+    // preference stays in [AppSettingsStore] and takes effect on a build that
+    // implements it.
+  } on PlatformException catch (e) {
+    DiagnosticsLog.instance.add(
+      'player',
+      'runner setting $method failed: ${e.code}',
+    );
+  }
+}
+
 /// Applies the X-button policy to the Windows runner. A no-op off Windows —
-/// the method simply is not implemented there, so the invoke is ignored.
+/// the method simply is not implemented there.
 Future<void> applyCloseToTray(bool closeToTray) =>
-    const MethodChannel(kWindowsRunnerChannel)
-        .invokeMethod<void>('setCloseToTray', closeToTray);
+    _pushRunnerSetting('setCloseToTray', closeToTray);
 
 /// Reads the persisted close-to-tray preference and pushes it to the runner.
 /// The runner defaults to true; this makes a saved "off" reach it on boot.
@@ -71,8 +97,7 @@ Future<void> hideToTray() =>
 /// Sets/clears the always-on-top window style on the Windows runner. A no-op off
 /// Windows — the method simply is not implemented there.
 Future<void> applyAlwaysOnTop(bool on) =>
-    const MethodChannel(kWindowsRunnerChannel)
-        .invokeMethod<void>('setAlwaysOnTop', on);
+    _pushRunnerSetting('setAlwaysOnTop', on);
 
 /// Reads the persisted always-on-top preference into [alwaysOnTopEnabled], so
 /// the notifier reflects the saved value from the first frame.

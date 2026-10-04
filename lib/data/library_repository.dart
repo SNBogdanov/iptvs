@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../sources/release_date.dart';
 import '../sources/source.dart';
 import 'app_database.dart';
 import 'diagnostics_log.dart';
@@ -174,7 +175,8 @@ class LibraryRepository {
     // fetched rather than the one now cached. Nothing is lost by skipping:
     // `epg_synced_at` is only advanced by a refresh that actually landed, so
     // the next load still finds the guide stale and re-runs it.
-    if (!(token?.isCancelled ?? false) && await _epgNeedsRefresh(forceRefresh)) {
+    if (!(token?.isCancelled ?? false) &&
+        await _epgNeedsRefresh(forceRefresh)) {
       unawaited(
         _scheduleEpgRefresh(snapshot.channels, forceRefresh: forceRefresh),
       );
@@ -211,7 +213,8 @@ class LibraryRepository {
     // load's.
     final refresh = db.epgIngest.start(
       source.id,
-      (token) => _refreshEpg(channels, forceRefresh: forceRefresh, token: token),
+      (token) =>
+          _refreshEpg(channels, forceRefresh: forceRefresh, token: token),
     );
     _pendingEpgRefresh = refresh;
     return refresh;
@@ -463,6 +466,7 @@ class LibraryRepository {
     String? categoryId,
     MediaItem? parent,
     bool forceRefresh = false,
+    bool loadAll = false,
   }) async {
     final token = loadToken;
     await source.connect();
@@ -524,6 +528,7 @@ class LibraryRepository {
       categories,
       categoryId: categoryId,
       parent: parent,
+      loadAll: loadAll,
     );
     final fetchedItems = parent == null
         ? fetched.items
@@ -575,6 +580,7 @@ class LibraryRepository {
     List<MediaCategory> categories, {
     String? categoryId,
     MediaItem? parent,
+    bool loadAll = false,
   }) async {
     final out = <MediaItem>[];
     final seen = <String>{};
@@ -586,7 +592,8 @@ class LibraryRepository {
       }
     }
 
-    for (var page = 1; page <= _initialMediaPages; page++) {
+    final maxPages = loadAll ? 100000 : _initialMediaPages;
+    for (var page = 1; page <= maxPages; page++) {
       final fetched = await source.mediaItemsPage(
         kind,
         categoryId: categoryId,
@@ -976,7 +983,9 @@ class LibraryRepository {
           ratingsOnly || metadata.overview == null || metadata.overview!.isEmpty
           ? item.description
           : metadata.overview,
-      year: ratingsOnly ? item.year : metadata.year ?? item.year,
+      year: ratingsOnly
+          ? item.year
+          : _mergeReleaseDate(item.year, metadata.year),
       rating: metadata.rating ?? item.rating,
       providerId: ratingsOnly || metadata.providerKey.isEmpty
           ? item.providerId
@@ -1136,4 +1145,30 @@ class LibraryRepository {
   /// Reveal point — see [resolve].
   Future<StreamInfo> resolveMedia(MediaItem item) async =>
       source.resolveMedia(await db.revealMediaItem(item));
+}
+
+/// Picks the more precise of two release dates for the merged row.
+///
+/// `MediaItem.year` holds whatever precision the source reported - the full date
+/// when the portal gave one, a bare year when it did not (see the sort contract
+/// in `sources/release_date.dart`). TMDB and TVDB truncate their date to four
+/// digits before handing it over, so a plain `metadata.year ?? item.year` would
+/// let a *less* precise value overwrite a better one: the portal said
+/// `2026-09-29`, enrichment wrote `2026`, and every film in that year collapsed
+/// into one tie - permanently, in the cache, until the source was force-refreshed.
+///
+/// The rule is the same idea as the "must not blank what the provider already
+/// knew" rule the other display fields follow: a metadata date wins only when it
+/// is not less precise than what is already there. Compared on the parsed key,
+/// not string length, so `1999-12-31` correctly beats `2026` - the date that
+/// sorts later can still be the more precise answer. Null on either side falls
+/// back to the plain `??` semantics.
+String? _mergeReleaseDate(String? fromSource, String? fromMetadata) {
+  if (fromMetadata == null) return fromSource;
+  if (fromSource == null) return fromMetadata;
+  final sourceKey = releaseSortKey(fromSource);
+  final metadataKey = releaseSortKey(fromMetadata);
+  if (sourceKey == null) return fromMetadata;
+  if (metadataKey == null) return fromSource;
+  return metadataKey >= sourceKey ? fromMetadata : fromSource;
 }

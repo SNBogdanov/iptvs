@@ -9,6 +9,7 @@ import '../data/load_token.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
+import 'media_sort.dart';
 
 /// Pseudo-category id for the "Favorites" view (live and media). Not a provider
 /// category — it loads the full "All" set and is filtered client-side.
@@ -93,6 +94,16 @@ class MediaTabController extends ChangeNotifier {
 
   /// Last item played from this tab; autofocused on return when still visible.
   String? lastPlayedId;
+
+  /// How this tab's grid is ordered. Per-tab and session-scoped, like
+  /// [categoryId]: switching tabs keeps each one's choice, and a fresh app start
+  /// is back to [kDefaultMediaSort] — which is the requested order anyway, so
+  /// persisting a preference would only add a question about whose it is (this
+  /// device, this profile, or synced to the panel).
+  ///
+  /// The screen's visible-list memo keys on this, so changing it re-sorts
+  /// without touching the snapshot or the database.
+  MediaSort sort = kDefaultMediaSort;
 
   /// First-item focus node (the D-pad "home" of the grid) and the grid's own
   /// scroll controller — per-tab so scroll position is independent.
@@ -239,6 +250,7 @@ class MediaTabController extends ChangeNotifier {
           kind,
           categoryId: categoryToLoad,
           forceRefresh: forceRefresh,
+          loadAll: sort != MediaSort.providerOrder,
         ),
         onRetry: (error, nextAttempt) {
           DiagnosticsLog.instance.add(
@@ -396,6 +408,23 @@ class MediaTabController extends ChangeNotifier {
 
   void setLastPlayed(String id) {
     lastPlayedId = id; // no rebuild needed; read on next build
+  }
+
+  /// Reorder this tab's grid. Purely a display change — the snapshot, the
+  /// database rowids and the catalog order it *came* in are untouched, so this
+  /// needs no reload and cannot disturb Favorites' catalog-derived order.
+  ///
+  /// Idempotent: a repeat of the current mode is dropped rather than published,
+  /// so a caller that ever ends up on a rebuild path can't re-sort the whole
+  /// grid per frame.
+  void setSort(MediaSort value) {
+    if (sort == value) return;
+    _set(() => sort = value);
+    // When changing to a non-provider sort, load all pages to get correct global sort
+    // without reshuffling on loadMore. If already fully loaded, no need.
+    if (value != MediaSort.providerOrder && snapshot?.hasMore == true) {
+      unawaited(load());
+    }
   }
 
   /// Explicit "refresh displayed metadata" action over the given visible items.

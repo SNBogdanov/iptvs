@@ -52,7 +52,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   LibraryRepository? _repo;
   bool _loading = true;
 
-/// The [MetadataConfig] the current [_repo] was built with, so `_loadActive`
+  /// The [MetadataConfig] the current [_repo] was built with, so `_loadActive`
   /// can tell a settings-only source edit (reuse the repository) from a metadata
   /// edit (rebuild it — its providers are `final`).
   MetadataConfig? _metadataConfig;
@@ -250,6 +250,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final cfg = await widget.store.activeConfig();
     if (cfg != null) await migrateSourceIdentity(widget.db, cfg);
     final metadata = await widget.store.metadataConfig();
+    // The per-source enrichment switch is ANDed with the global one. It is a
+    // constructor argument on the repository, so a flip must rebuild it — the
+    // `reusable` predicate below compares this against the repository it
+    // already holds rather than leaving a stale flag in flight.
+    final wantsEnrich = metadata.autoEnrich && (cfg?.enrichMetadata ?? true);
 
     // A settings-only edit — a hidden category, a catch-up override, a renamed
     // label, the Xtream direct-URL/extension levers — leaves every cached
@@ -271,7 +276,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         _config != null &&
         _config!.hasSameCatalogInputs(cfg) &&
         _metadataConfig != null &&
-        _metadataConfig!.sameConfiguration(metadata);
+        _metadataConfig!.sameConfiguration(metadata) &&
+        repo.autoEnrichMetadata == wantsEnrich;
     if (reusable) {
       // The common case by far: a hidden category, an aspect or buffer choice,
       // the resume preference. None of those reach the built [Source], so the

@@ -1408,7 +1408,13 @@ ending in the same `HideToTray`. **Always on top in fullscreen** (`AppSettingsSt
 toggled in Settings) raises the window via `setAlwaysOnTop` only while `_resolving` — the fullscreen
 player route — is up; the windowed preview deliberately stays normal. The preference is mirrored in
 the `alwaysOnTopEnabled` notifier so a Settings toggle reaches the live screen without re-reading the
-keychain on every state change.
+keychain on every state change. Both window-style pushes (`setCloseToTray`, `setAlwaysOnTop`) go
+through one helper that **swallows a missing or failing handler**, because both run unconditionally on
+Windows — the close-to-tray preference at boot, the always-on-top sync from a post-frame callback — and
+an unhandled `MissingPluginException` there is an *unhandled async error* rather than "this preference
+isn't applied on this build". That is not hypothetical: it broke a widget test that merely mounted the
+channel list. The sync's applied-state sentinel also starts at `false`, so mounting a channel list with
+nothing playing touches neither the window style nor the log. Pinned by `test/tray_settings_test.dart`.
 
 ## Linux
 

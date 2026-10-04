@@ -1648,9 +1648,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      if (_item.year != null)
+                      if (_item.year case final date?)
                         Text(
-                          _item.year!,
+                          date,
                           style: const TextStyle(color: AppColors.textLo),
                         ),
                       if (_item.year != null && _hasRating(_item))

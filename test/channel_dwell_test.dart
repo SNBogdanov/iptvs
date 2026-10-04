@@ -131,4 +131,24 @@ void main() {
       );
     });
   });
+
+  group('SourceConfig.enrichMetadata', () {
+    test('on unless explicitly off, and only false is ever stored', () {
+      // Same shape as autoResumeLastChannel: absent means on, so a source nobody
+      // touched serializes byte-for-byte as it did before the setting existed —
+      // no cloud churn, no migration.
+      expect(_config().enrichMetadata, isTrue);
+      expect(_config(settings: {'enrichMetadata': false}).enrichMetadata, isFalse);
+    });
+
+    test('a stray value reads as on, never silently off', () {
+      // The failure mode of a mangled preference is the default behaviour, not a
+      // silent loss of enrichment.
+      expect(_config(settings: {'enrichMetadata': 'no'}).enrichMetadata, isTrue);
+    });
+
+    test('an untouched source carries no key at all', () {
+      expect(_config().settings.containsKey('enrichMetadata'), isFalse);
+    });
+  });
 }

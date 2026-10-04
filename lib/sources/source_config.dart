@@ -68,9 +68,7 @@ class SourceConfig {
   /// unchanged cache — a new repository re-runs the whole channel load and EPG
   /// refresh, which is the multi-second wait a category toggle should never cost.
   bool hasSameCatalogInputs(SourceConfig other) =>
-      id == other.id &&
-      kind == other.kind &&
-      _sameFields(fields, other.fields);
+      id == other.id && kind == other.kind && _sameFields(fields, other.fields);
 
   /// Settings keys [build] turns into constructor arguments, i.e. the ones a
   /// *built* [Source] can never learn later. Keep in step with [build]: a key
@@ -249,6 +247,20 @@ class SourceConfig {
   /// `LastChannelStore` for why a last-watched channel is device-local and must
   /// never ride the source row into the cloud.
   bool get autoResumeLastChannel => settings['autoResumeLastChannel'] != false;
+
+  /// Whether this source's VOD items are enriched from TMDB/TVDB/MDBList.
+  ///
+  /// **On unless explicitly off**, like [autoResumeLastChannel]: a source nobody
+  /// touched keeps serializing byte-for-byte, and only `false` is ever written —
+  /// so it adds no cloud churn and needs no migration.
+  ///
+  /// This is the per-source off-switch; the global `MetadataConfig.autoEnrich`
+  /// still gates the whole pipeline, and the two are ANDed by `HomeShell` when
+  /// it builds the repository. Exists because a provider whose catalogue already
+  /// carries posters/overviews — or one the user does not want a TMDB round-trip
+  /// for — has no reason to spend the lookups, and the result is cached
+  /// per-item so turning it off later is not just cosmetic.
+  bool get enrichMetadata => settings['enrichMetadata'] != false;
 
   /// How long the auto-switch shortcut rests on each channel, in seconds, as
   /// the stored number (see `player/channel_dwell.dart` for the ladder and

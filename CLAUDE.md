@@ -78,8 +78,17 @@ actually run has been rebuilt from the current source. Green tests are not a bui
 The script prints `FRESH OK`; confirm the change is really in there before handing over:
 
 ```powershell
-Select-String -Path build\windows\x64\runner\Release\data\app.so -Pattern '<new literal>' -Encoding Default
+# `Select-String ... -Encoding Default` does NOT work here and must not be used:
+# on a 10 MB binary it silently fails to decode whole regions, so a string that is
+# provably present reports 0 matches — the inverse of this section's stale-binary
+# trap, a *correct* build that looks stale. Search the bytes instead.
+$latin = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes(
+    'build\windows\x64\runner\Release\data\app.so'))
+'<new literal>'.Contains($latin)   # $true when the change really is in the artifact
 ```
+
+A negative answer is worth double-checking against a **known-present** literal (e.g.
+`iptvs/native_hdr_player`) before believing it: the failure mode above is a false *negative*.
 
 **`app.so`'s timestamp is *not* a freshness proof on its own, and treating it as one is actively
 harmful.** Flutter caches the AOT snapshot **by content** and the copy keeps the *original*
@@ -270,7 +279,25 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   episode -> season -> series by `readSeriesTitlesForEpisodes` — an episode row's own
   `title` is the *episode* name, so a rail of those read as unrelated titles. The tile has exactly
   two single-line runs and its rail height is derived from that, so the episode name lives in the
-  semantics label rather than a third line), `live_focus_coordinator.dart` (the live D-pad selection model),
+  semantics label rather than a third line). **The movie and series grids are
+   reorderable; live, the Continue Watching rail and the season/episode lists
+   deliberately are not** (`media_sort.dart`, `MediaTabController.sort`). The five modes are
+   release date both ways (default: newest first), name both ways, and **"As provided"** — the escape
+   hatch back to the panel's own arrangement, since a portal with deliberate grouping has a reason for
+   its order. The choices are **per VOD tab and session-scoped**, not persisted: no preference key, no
+   cloud surface, nothing for another device to agree about. Dates come from `MediaItem.year`, a
+   provider-supplied **`String?`** holding ISO `2026-09-29`, dotted/slashed `29.09.2026`, a bare
+   `2026`, or something unparseable — so `releaseSortKey` normalises shape into one integer
+   (`yyyyMMdd`) and **an unparseable row sorts last in both directions**, never as year 1: "unknown"
+   dragging a name sort or reading as ancient is worse than admitting the provider said nothing.
+   Day-first vs month-first slash dates is genuinely ambiguous, and `releaseSortKey` picks **day-first
+   for every row**, never per row — a convention misread uniformly still leaves relative order intact,
+   while guessing per row does not. A row with only a year takes part in both directions. **Ties keep
+   their incoming order** (`favorites_order.dart`'s explicit-last rule, same reason: `List.sort` is not
+   stable), which is why Favorites is `orderedByCatalog`-grouped *first* and sorted after — and the
+   visible-list memo keys on `sort`, since the snapshot itself is never reloaded. Pinned by
+   `test/media_sort_test.dart` and the "grid ordering" group in `test/media_tab_controller_test.dart`
+   (`setSort` is idempotent and `_set`-gated, like every other controller publish), `live_focus_coordinator.dart` (the live D-pad selection model),
   `epg_grid_screen.dart` (the TV-guide timeline, selection-cursor model) — both navigation models
   are documented in docs/tv-navigation.md. `sources_screen.dart` manages provider configs
   (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`); `source_settings_screen.dart`

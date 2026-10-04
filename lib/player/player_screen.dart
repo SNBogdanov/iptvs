@@ -3628,6 +3628,24 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
         : embeddedVideoOptionsForPlatform();
 
+    // The marker file / `IPTVS_HWDEC` env var is the app's only supported way
+    // to A/B a decode or present path without shipping a build per arm. It was
+    // wired into the preview controller only, which left the surface that
+    // actually regressed (VOD on the embedded texture, after `0767d78` moved
+    // it off the native HWND surface) with no way to bisect at all: no override
+    // reached mpv and no override line reached the exportable log. Scoped to
+    // the embedded path, matching its name and the native surface's "mpv owns
+    // both ends" argument in hwdec_policy.dart.
+    final overrideOptions = nativeWindowHandle == null
+        ? embeddedMpvOverrides()
+        : const <String, String>{};
+    // Unconditional on the embedded path, including `none`: "did my change
+    // take effect" has already cost this investigation several wrong turns, and
+    // an absent line is indistinguishable from a build that never read it.
+    if (nativeWindowHandle == null) {
+      _logPlayback('mpv overrides: ${embeddedOverrideSummary()}');
+    }
+
     final nativeWindowOptions = nativeWindowHandle == null
         ? const <String, String>{}
         : <String, String>{
@@ -3646,6 +3664,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       ...options,
       ...nativeWindowOptions,
       ...videoOptions,
+      ...overrideOptions,
       // Last, so it can't be shadowed by the maps above and lands on the
       // player whatever the live/VOD split decided.
       ...kMpvLogFilter,

@@ -46,6 +46,7 @@ import 'live_controller.dart';
 import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
 import 'live_tab_view.dart';
+import 'media_sort.dart';
 import 'media_tab_controller.dart';
 import 'media_tab_view.dart';
 
@@ -984,13 +985,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// preview engine must keep playing through it.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final backgrounded = state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden;
+    final backgrounded =
+        state == AppLifecycleState.paused || state == AppLifecycleState.hidden;
     if (!backgrounded) return;
     if (_resolving) return;
     if (_preview.channelId != null) {
       DiagnosticsLog.instance.add(
-          'library', 'lifecycle ${state.name}: preview stop');
+        'library',
+        'lifecycle ${state.name}: preview stop',
+      );
       unawaited(_preview.stop(clearSelection: true));
     }
   }
@@ -1002,7 +1005,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// the restore leg can resume it instead of leaving a blank panel.
   void _onSilenceRequested() {
     if (_preview.channelId != null || _preview.nativeActive) {
-      DiagnosticsLog.instance.add('library', 'silence requested: preview pause');
+      DiagnosticsLog.instance.add(
+        'library',
+        'silence requested: preview pause',
+      );
       unawaited(_preview.pause());
     }
   }
@@ -1022,8 +1028,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// up** (`_resolving` spans the whole player route) and dropped back to
   /// normal the moment it closes; the windowed preview deliberately does not
   /// raise it. Idempotent: the native call is skipped when the state is
-  /// unchanged.
-  bool? _lastAlwaysOnTopApplied;
+  /// unchanged, and it starts at [false] — a screen with nothing playing is
+  /// already in the normal state, so mounting one must not touch the window
+  /// style at all (or log a transition that never happened).
+  bool _lastAlwaysOnTopApplied = false;
 
   void _syncAlwaysOnTop() {
     if (!Platform.isWindows) return;
@@ -1596,6 +1604,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     ContentKind,
     MediaTabController,
     String?, // controller.categoryId
+    MediaSort, // controller.sort
     String, // trimmed query (the lowercased form is derived from it)
     String?, // controller.searchQuery
     MediaLibrarySnapshot?,
@@ -1611,6 +1620,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       kind,
       controller,
       controller.categoryId,
+      controller.sort,
       _query.trim(),
       controller.searchQuery,
       controller.snapshot,
@@ -1631,10 +1641,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final hidden = _hiddenCategories(kind);
     if (q.length >= 2 && controller.searchQuery == _query.trim()) {
       final results = controller.searchResults;
-      return results.where((item) {
-        if (favoritesView) return favs!.contains(item.id);
-        return !hidden.contains(item.categoryId);
-      }).toList();
+      // Sorted like the catalogue: a search is the same grid with a filter on
+      // it, and a relevance-ordered result set that reshuffles when the user
+      // picks a sort would be answering two questions at once.
+      return sortedMedia(
+        results.where((item) {
+          if (favoritesView) return favs!.contains(item.id);
+          return !hidden.contains(item.categoryId);
+        }).toList(),
+        controller.sort,
+      );
     }
     final items = controller.snapshot?.items ?? const <MediaItem>[];
     final matched = items.where((item) {
@@ -1646,16 +1662,22 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
-    if (!favoritesView) return matched;
+    if (!favoritesView) return sortedMedia(matched, controller.sort);
     // Same rule as the live Favorites view — see `_computeVisible`.
     final categoryRanks = catalogRanks(
       (controller.snapshot?.categories ?? const <MediaCategory>[]).map(
         (c) => c.id,
       ),
     );
-    return orderedByCatalog(
-      matched,
-      categoryRank: (item) => rankOf(categoryRanks, item.categoryId),
+    // Catalog order first, so it is the tie-break the sort falls back to: a
+    // Favorites row whose title ties, or that has no release date, keeps the
+    // reading order the user already agreed to.
+    return sortedMedia(
+      orderedByCatalog(
+        matched,
+        categoryRank: (item) => rankOf(categoryRanks, item.categoryId),
+      ),
+      controller.sort,
     );
   }
 
@@ -1861,12 +1883,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final favoritesView = categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
     final hidden = _hiddenCategories(ContentKind.live);
-    final matched = _live.channels.where((c) {
-      if (favoritesView) return favs!.contains(c.id);
-      if (hidden.contains(c.categoryId)) return false;
-      if (categoryId != null && c.categoryId != categoryId) return false;
-      return true;
-    }).toList(growable: false);
+    final matched = _live.channels
+        .where((c) {
+          if (favoritesView) return favs!.contains(c.id);
+          if (hidden.contains(c.categoryId)) return false;
+          if (categoryId != null && c.categoryId != categoryId) return false;
+          return true;
+        })
+        .toList(growable: false);
     if (!favoritesView) return matched;
     final categoryRanks = catalogRanks(_live.categories.map((c) => c.id));
     return orderedByCatalog(
@@ -1899,25 +1923,26 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final range = _zapRangeFor(channel, explicit: explicit);
     final random = await const AppSettingsStore().randomZapping();
     return LiveZapController(
-      entries: range.entries,
-      initialIndex: range.index,
-      rangeCategoryId: range.categoryId,
-      rangeLabel: range.label,
-      catalog: _ChannelListZapCatalog(this),
-      random: random,
-    )..onChannelChanged = (entry) {
-      // Keeps the toolbar's "last channel" target and the post-playback
-      // selection restore pointed at the channel the session is really on.
-      // The record is keyed by (sourceId, channelId) and a zap can cross
-      // sources from the cross-source Favorites view, so this is the *entry's*
-      // owning source — never the active one.
-      if (mounted) {
-        _notePlayedChannel(entry.channelId, sourceId: entry.sourceId);
+        entries: range.entries,
+        initialIndex: range.index,
+        rangeCategoryId: range.categoryId,
+        rangeLabel: range.label,
+        catalog: _ChannelListZapCatalog(this),
+        random: random,
+      )
+      ..onChannelChanged = (entry) {
+        // Keeps the toolbar's "last channel" target and the post-playback
+        // selection restore pointed at the channel the session is really on.
+        // The record is keyed by (sourceId, channelId) and a zap can cross
+        // sources from the cross-source Favorites view, so this is the *entry's*
+        // owning source — never the active one.
+        if (mounted) {
+          _notePlayedChannel(entry.channelId, sourceId: entry.sourceId);
+        }
       }
-    }
-    ..onRandomChanged = (value) {
-      unawaited(const AppSettingsStore().setRandomZapping(value));
-    };
+      ..onRandomChanged = (value) {
+        unawaited(const AppSettingsStore().setRandomZapping(value));
+      };
   }
 
   Future<void> _play(Channel channel) async {
@@ -2115,7 +2140,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // reads through it while it is up, and the return leg below reads where
     // the session *ended* — which is not where it started as soon as the user
     // zaps.
-      final zap = await _zapControllerFor(channel, explicit: zapChannels);
+    final zap = await _zapControllerFor(channel, explicit: zapChannels);
     ({ZapEntry entry, Programme programme})? pendingCatchup;
     try {
       DiagnosticsLog.instance.add(
@@ -3503,6 +3528,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                       ? _media(_tab).cancelEnrich
                       : () => _media(_tab).enrichVisible(_visibleMedia(_tab)),
                 ),
+          // Live rows have no release date to sort by, so this is VOD-only.
+          sortControl: _tab == ContentKind.live
+              ? null
+              : MediaSortDropdown(
+                  value: _media(_tab).sort,
+                  onChanged: _media(_tab).setSort,
+                ),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
@@ -3735,12 +3767,11 @@ class _ChannelListZapCatalog implements ZapCatalog {
       _screen._repoFor(entry.config).resolve(entry.channel);
 
   @override
-  ({Programme? now, Programme? next}) epgFor(ZapEntry entry) =>
-      _screen._epgFor(
-        entry.channel,
-        foreign: !_isActiveSource(entry),
-        sourceId: entry.sourceId,
-      );
+  ({Programme? now, Programme? next}) epgFor(ZapEntry entry) => _screen._epgFor(
+    entry.channel,
+    foreign: !_isActiveSource(entry),
+    sourceId: entry.sourceId,
+  );
 
   @override
   bool isFavorite(ZapEntry entry) {
@@ -3751,14 +3782,12 @@ class _ChannelListZapCatalog implements ZapCatalog {
     // row is answered from the cross-source list instead.
     return _screen._globalFavorites.items.any(
       (item) =>
-          item.sourceId == entry.sourceId &&
-          item.channel.id == entry.channelId,
+          item.sourceId == entry.sourceId && item.channel.id == entry.channelId,
     );
   }
 
   @override
-  Future<void> setFavorite(ZapEntry entry, bool value) =>
-      _isActiveSource(entry)
+  Future<void> setFavorite(ZapEntry entry, bool value) => _isActiveSource(entry)
       ? _screen._setLiveFavorite(entry.channelId, value)
       : _screen._setForeignFavorite(entry.sourceId, entry.channelId, value);
 
@@ -3871,6 +3900,7 @@ class _ChannelListZapCatalog implements ZapCatalog {
 /// [_ChannelListZapCatalog], and only for a range that has no provider
 /// categories at all.
 const String _kZapSourcePrefix = 'zapsrc:';
+
 /// Window title composed like the channel-list rows: a provider-assigned
 /// channel number first when one exists, then the name (and an optional
 /// programme title suffix for catch-up entries).

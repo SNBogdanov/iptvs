@@ -4,6 +4,7 @@ import 'package:flutter/services.dart' show KeyEvent, KeyRepeatEvent;
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/tv_text_field.dart';
+import 'media_sort.dart';
 
 const _toolbarControlHeight = 40.0;
 
@@ -149,6 +150,7 @@ class ChannelToolbar extends StatelessWidget {
   final FocusNode? searchCellFocusNode;
   final KeyEventResult Function(FocusNode, KeyEvent)? onSearchCellKeyEvent;
   final Widget? categoryControl;
+  final Widget? sortControl;
   final Widget? actionControl;
 
   const ChannelToolbar({
@@ -161,6 +163,7 @@ class ChannelToolbar extends StatelessWidget {
     this.searchCellFocusNode,
     this.onSearchCellKeyEvent,
     this.categoryControl,
+    this.sortControl,
     this.actionControl,
   });
 
@@ -210,6 +213,10 @@ class ChannelToolbar extends StatelessWidget {
                         const SizedBox(width: 12),
                         categoryControl!,
                       ],
+                      if (sortControl != null) ...[
+                        const SizedBox(width: 8),
+                        sortControl!,
+                      ],
                       if (actionControl != null) ...[
                         const SizedBox(width: 8),
                         actionControl!,
@@ -223,13 +230,18 @@ class ChannelToolbar extends StatelessWidget {
   }
 
   Widget? _trailingControls() {
-    if (categoryControl == null) return actionControl;
-    if (actionControl == null) return categoryControl;
+    final controls = <Widget>[?categoryControl, ?sortControl, ?actionControl];
+    if (controls.isEmpty) return null;
+    if (controls.length == 1) return controls.single;
+    // The category picker takes the slack; the rest are fixed-width, so on a
+    // narrow window it is the one control that can usefully shrink.
     return Row(
       children: [
-        Expanded(child: categoryControl!),
-        const SizedBox(width: 8),
-        actionControl!,
+        Expanded(child: controls.first),
+        for (final control in controls.skip(1)) ...[
+          const SizedBox(width: 8),
+          control,
+        ],
       ],
     );
   }
@@ -407,10 +419,60 @@ class MediaCategoryDropdown extends StatelessWidget {
   }
 }
 
+/// The movies/series grid's ordering picker.
+///
+/// A dropdown beside the category picker rather than an icon + menu, because the
+/// active order has to be answerable **without opening anything**: the same grid
+/// silently reshuffled by a setting nobody can see is what this replaces, so the
+/// current mode is the control's own label.
+class MediaSortDropdown extends StatelessWidget {
+  final MediaSort value;
+  final ValueChanged<MediaSort> onChanged;
+
+  const MediaSortDropdown({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _DropdownFrame(
+      // Narrower than the category picker: the longest label is "Oldest first".
+      maxWidth: 150,
+      builder: (focusNode) => DropdownButton<MediaSort>(
+        focusNode: focusNode,
+        focusColor: Colors.transparent,
+        isDense: true,
+        isExpanded: true,
+        value: value,
+        dropdownColor: AppColors.panelHi,
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        icon: const Icon(Icons.expand_more, color: AppColors.textLo),
+        items: [
+          for (final mode in MediaSort.values)
+            DropdownMenuItem<MediaSort>(
+              value: mode,
+              child: Text(
+                mode.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
+        onChanged: (mode) {
+          if (mode != null) onChanged(mode);
+        },
+      ),
+    );
+  }
+}
+
 class _DropdownFrame extends StatefulWidget {
   final Widget Function(FocusNode focusNode) builder;
+  final double maxWidth;
 
-  const _DropdownFrame({required this.builder});
+  const _DropdownFrame({required this.builder, this.maxWidth = 220});
 
   @override
   State<_DropdownFrame> createState() => _DropdownFrameState();
@@ -443,7 +505,7 @@ class _DropdownFrameState extends State<_DropdownFrame> {
   Widget build(BuildContext context) {
     return Container(
       height: _toolbarControlHeight,
-      constraints: const BoxConstraints(maxWidth: 220),
+      constraints: BoxConstraints(maxWidth: widget.maxWidth),
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
         color: _focused ? AppColors.panelHi : AppColors.panel,

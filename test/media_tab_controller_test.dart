@@ -20,6 +20,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/screens/media_tab_controller.dart';
+import 'package:iptvs/screens/media_sort.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source.dart';
 
@@ -69,9 +70,12 @@ class _GatedRepo extends LibraryRepository {
     String? categoryId,
     MediaItem? parent,
     bool forceRefresh = false,
-  }) {
-    final key = '${categoryId ?? '<all>'}${forceRefresh ? '|refresh' : ''}';
-    return _next(_loadGates, key).future;
+    bool loadAll = false,
+  }) async {
+    final key = '$kind:$categoryId:${parent?.id}:$forceRefresh:$loadAll';
+    final completer = _next(_loadGates, key);
+    final snap = await completer.future;
+    return snap;
   }
 
   @override
@@ -126,6 +130,23 @@ MediaLibrarySnapshot _snapshot(List<MediaItem> items, {String? categoryId}) =>
 /// gate's `await`) run before assertions.
 Future<void> _flush() => Future<void>.delayed(Duration.zero);
 
+/// Removes the temp dir, tolerating Windows still holding the sqlite
+/// `-wal`/`-shm` files open when `close()` completes: a bare recursive delete
+/// then races and fails with ERROR_DIR_NOT_EMPTY (errno 145). A leftover
+/// directory under the OS temp path is not a test failure, so this retries and
+/// finally gives up quietly rather than failing an otherwise green test.
+Future<void> _deleteTempDir(Directory dir) async {
+  for (var attempt = 0; attempt < 5; attempt++) {
+    if (!dir.existsSync()) return;
+    try {
+      dir.deleteSync(recursive: true);
+      return;
+    } on FileSystemException {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+}
+
 void main() {
   late Directory tempDir;
   late AppDatabase db;
@@ -142,7 +163,7 @@ void main() {
   tearDown(() async {
     controller.dispose();
     await db.close();
-    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    if (tempDir.existsSync()) await _deleteTempDir(tempDir);
   });
 
   test(
@@ -152,9 +173,9 @@ void main() {
       unawaited(controller.setCategory('B'));
 
       // B is now current; complete it first, then let the stale A land late.
-      repo.loadGate('B').complete(_snapshot([_item('b1')], categoryId: 'B'));
+      repo.loadGate('ContentKind.movie:B:null:false:true').complete(_snapshot([_item('b1')], categoryId: 'B'));
       await _flush();
-      repo.loadGate('A').complete(_snapshot([_item('a1')], categoryId: 'A'));
+      repo.loadGate('ContentKind.movie:A:null:false:true').complete(_snapshot([_item('a1')], categoryId: 'A'));
       await _flush();
 
       expect(controller.categoryId, 'B');
@@ -166,7 +187,7 @@ void main() {
     // Prime a snapshot.
     unawaited(controller.load());
     await _flush();
-    repo.loadGate('<all>').complete(_snapshot([_item('p1')]));
+    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('p1')]));
     await _flush();
 
     unawaited(controller.loadMore());
@@ -175,7 +196,7 @@ void main() {
     await _flush();
 
     // Complete the refresh first, then let the superseded pagination land.
-    repo.loadGate('<all>|refresh').complete(_snapshot([_item('r1')]));
+    repo.loadGate('ContentKind.movie:null:null:true:true').complete(_snapshot([_item('r1')]));
     await _flush();
     repo.loadMoreGate('<all>').complete(_snapshot([_item('p1'), _item('lm1')]));
     await _flush();
@@ -193,7 +214,7 @@ void main() {
     expect(repo.loadMoreCallCount, callsBefore);
 
     // Drain the outstanding gate so nothing dangles past the test.
-    repo.loadGate('<all>').complete(_snapshot(const []));
+    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot(const []));
     await _flush();
   });
 
@@ -209,7 +230,7 @@ void main() {
 
       controller.dispose();
 
-      repo.loadGate('<all>').complete(_snapshot([_item('x1')]));
+      repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('x1')]));
       await _flush();
 
       expect(notifications, countBeforeDispose);
@@ -227,12 +248,12 @@ void main() {
 
     unawaited(controller.setCategory('A'));
     await _flush();
-    repo.loadGate('A').complete(_snapshot([_item('a1', categoryId: 'A')]));
+    repo.loadGate('ContentKind.movie:A:null:false:true').complete(_snapshot([_item('a1', categoryId: 'A')]));
     await _flush(); // let the auto-enrich for A start (and block on its gate)
 
     unawaited(controller.setCategory('B'));
     await _flush();
-    repo.loadGate('B').complete(_snapshot([_item('b1', categoryId: 'B')]));
+    repo.loadGate('ContentKind.movie:B:null:false:true').complete(_snapshot([_item('b1', categoryId: 'B')]));
     await _flush();
 
     // Late-arriving enrichment for the abandoned A load must not land.
@@ -252,7 +273,7 @@ void main() {
 
     unawaited(controller.setCategory('B'));
     await _flush();
-    repo.loadGate('B').complete(_snapshot([_item('b1')], categoryId: 'B'));
+    repo.loadGate('ContentKind.movie:B:null:false:true').complete(_snapshot([_item('b1')], categoryId: 'B'));
     await _flush();
 
     // The search resolves after the category switch superseded it.
@@ -273,7 +294,7 @@ void main() {
 
     // The in-flight load's terminal update must land even though a search
     // started after it — search no longer bumps the load generation.
-    repo.loadGate('<all>').complete(_snapshot([_item('l1')]));
+    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('l1')]));
     await _flush();
 
     expect(controller.loading, isFalse);
@@ -295,7 +316,7 @@ void main() {
     unawaited(controller.search('ab'));
     await _flush();
 
-    repo.loadGate('<all>').complete(_snapshot([_item('l1')]));
+    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('l1')]));
     await _flush();
 
     expect(controller.snapshot!.items.map((i) => i.id), ['l1']);
@@ -305,5 +326,46 @@ void main() {
 
     expect(controller.searchResults, isEmpty);
     expect(controller.snapshot!.items.map((i) => i.id), ['l1']);
+  });
+
+  group('grid ordering', () {
+    test('a fresh tab is newest-first', () {
+      // The requested default lives on the controller, so a tab that never
+      // loaded still answers "how is this grid ordered".
+      expect(controller.sort, MediaSort.releaseDateDesc);
+      expect(controller.sort, kDefaultMediaSort);
+    });
+
+    test('setSort notifies, and re-setting the same mode does not', () async {
+      // One notification per change: the screen's visible-list memo keys on
+      // `sort`, so a redundant notify would re-sort the whole grid for nothing.
+      var notified = 0;
+      controller.addListener(() => notified++);
+
+      controller.setSort(MediaSort.titleAsc);
+      expect(notified, 1);
+      expect(controller.sort, MediaSort.titleAsc);
+
+      controller.setSort(MediaSort.titleAsc);
+      expect(notified, 1, reason: 'an unchanged mode must not re-sort');
+    });
+
+    test('a disposed controller swallows the sort, as it does every publish', () {
+      // Its own controller, so `tearDown` still disposes the shared one.
+      final gone = MediaTabController(kind: ContentKind.series, repo: repo);
+      var notified = 0;
+      gone.addListener(() => notified++);
+      gone.dispose();
+
+      gone.setSort(MediaSort.titleDesc);
+
+      expect(notified, 0);
+      expect(
+        gone.sort,
+        kDefaultMediaSort,
+        reason:
+            'neither published nor mutated - `_set` runs nothing once disposed',
+      );
+    });
   });
 }
