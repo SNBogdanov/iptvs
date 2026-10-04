@@ -285,7 +285,14 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
    release date both ways (default: newest first), name both ways, and **"As provided"** — the escape
    hatch back to the panel's own arrangement, since a portal with deliberate grouping has a reason for
    its order. The choices are **per VOD tab and session-scoped**, not persisted: no preference key, no
-   cloud surface, nothing for another device to agree about. Dates come from `MediaItem.year`, a
+   cloud surface, nothing for another device to agree about. **One "load more" press is exactly one
+   page** (`_mediaPagesPerLoad` = 1), because the control is labelled `Load page ${loadedPages + 1}` —
+   at 3 it advanced by three, so a Stalker portal (15 rows a page) appended ~40 cards and the button
+   then offered page 5, the label and the request disagreeing in plain sight. Note the two load paths
+   still record the page differently, and must not be "tidied" into agreement: `loadMedia` stores the
+   **requested** page (`loadedPages = page`) while `loadMoreMedia` stores the page the provider
+   **echoed** (`fetched.page`), because a portal that renumbers is authoritative only mid-stream. Pinned
+   by `test/media_paging_test.dart`. Dates come from `MediaItem.year`, a
    provider-supplied **`String?`** holding ISO `2026-09-29`, dotted/slashed `29.09.2026`, a bare
    `2026`, or something unparseable — so `releaseSortKey` normalises shape into one integer
    (`yyyyMMdd`) and **an unparseable row sorts last in both directions**, never as year 1: "unknown"

@@ -87,7 +87,18 @@ class LibraryRepository {
   /// EPG is re-fetched if older than this (or on a forced refresh).
   static const _epgMaxAge = Duration(hours: 3);
   static const _initialMediaPages = 1;
-  static const _mediaPagesPerLoad = 3;
+
+  /// One page per "load more", because that is what the button promises.
+  ///
+  /// The control reads `Load page ${loadedPages + 1}`, so a single press must
+  /// advance `loadedPages` by one. At 3 it advanced by three: the first press
+  /// on a Stalker portal (15 rows a page) appended ~40 cards and the button
+  /// then offered page 5 - the label and the request had nothing to do with
+  /// each other, and the count read as a bug rather than as batching. The cost
+  /// is one round trip per page instead of one per three, which only shows up
+  /// on the long tail of a catalogue the user is scrolling past anyway.
+  static const _mediaPagesPerLoad = 1;
+
   static const _fallbackCategoryPages = 1;
   static const _fallbackCategoryLimit = 8;
 
