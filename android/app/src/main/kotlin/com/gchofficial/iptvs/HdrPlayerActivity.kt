@@ -432,6 +432,12 @@ class HdrPlayerActivity : ComponentActivity() {
         // unused/absent for our purposes on most TVs. That's a platform limitation, not a bug:
         // the button below simply won't show on devices that report the feature missing.
         uiState.supportsPip = supportsPip()
+        // Device-wide chrome preferences, set once here so they apply to both the
+        // fresh PlayerUiState and an adopted preview state. Absent extras keep the
+        // field's default (true) — i.e. an older Dart build that doesn't send them
+        // draws exactly the chrome it draws today, rather than losing a badge.
+        uiState.showClock = intent.getBooleanExtra(EXTRA_SHOW_CLOCK, true)
+        uiState.showPlaybackTimes = intent.getBooleanExtra(EXTRA_SHOW_TIMES, true)
         // Favorite toggle (live only): seeded from the Dart store, read back on
         // exit (see finish) so the channel list reflects it on return.
         // Opens on the mode Dart is already in (the user's stored choice, or a
@@ -1413,6 +1419,16 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_CAN_FAVORITE = "can_favorite"
         const val EXTRA_IS_FAVORITE = "is_favorite"
         const val EXTRA_ZAP_ENABLED = "zap_enabled"
+
+        /**
+         * Device-wide chrome preferences from Settings, sent on the `open` Intent
+         * because this Activity has no inbound control-state channel (see
+         * `PlayerScreen._drivesNativeControlState`, which deliberately excludes
+         * Android). Defaults to true on read, matching `PlayerUiState`'s own
+         * defaults, so an older Dart build keeps the chrome it draws today.
+         */
+        const val EXTRA_SHOW_CLOCK = "show_clock"
+        const val EXTRA_SHOW_TIMES = "show_times"
 
         /** Result extras: final position/duration + favorite, for the Dart stores. */
         const val RESULT_POSITION_MS = "position_ms"

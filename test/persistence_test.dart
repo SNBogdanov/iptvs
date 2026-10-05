@@ -1057,6 +1057,114 @@ void main() {
       },
     );
 
+    test(
+      'readPlaybackProgress answers a fraction for every unfinished title',
+      () async {
+        // The data behind the green bar on a poster card. Three properties are
+        // load-bearing and all three are invisible without a query of their own:
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 12),
+          duration: const Duration(minutes: 90),
+        );
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm2',
+          position: const Duration(minutes: 45),
+          duration: const Duration(minutes: 60),
+        );
+        // A different kind: the series tab's rows are episodes, and the movie
+        // map must not answer with them.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.episode,
+          'e1',
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 42),
+        );
+        // Another source's movie: keyed by source too.
+        await db.savePlaybackPosition(
+          'other',
+          ContentKind.movie,
+          'm9',
+          position: const Duration(minutes: 5),
+          duration: const Duration(minutes: 100),
+        );
+        // Just under the finish threshold: this one *does* get a bar, and it is
+        // the highest any card can ever show — [savePlaybackPosition] deletes
+        // the row at [AppDatabase.kFinishedFraction], so no poster can end up
+        // with a full bar, and none is missing one it should have.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm3',
+          position: const Duration(minutes: 84),
+          duration: const Duration(minutes: 90),
+        );
+
+        final progress = await db.readPlaybackProgress(
+          'src',
+          ContentKind.movie,
+        );
+        expect(progress.keys, unorderedEquals(['m1', 'm2', 'm3']));
+        expect(progress['m1'], closeTo(12 / 90, 0.001));
+        expect(progress['m2'], closeTo(45 / 60, 0.001));
+        expect(progress['m3'], lessThan(AppDatabase.kFinishedFraction));
+        expect(
+          await db.readPlaybackProgress('src', ContentKind.episode),
+          contains('e1'),
+        );
+        expect(await db.readPlaybackProgress('other', ContentKind.movie),
+            contains('m9'));
+        await db.close();
+      },
+    );
+
+    test(
+      'a finished title has no bar, and an unusable duration draws nothing',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        // Past the finished threshold: the row is *deleted*, so this title's
+        // card must come back with no entry at all rather than a ~100% bar.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'done',
+          position: const Duration(minutes: 88),
+          duration: const Duration(minutes: 90),
+        );
+        // A zero duration cannot produce a fraction at all (SQLite answers NULL
+        // for the division), so it is absent rather than 0.0 — a zero-width bar
+        // draws nothing, and an entry would cost every card a Stack child.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'noDuration',
+          position: const Duration(minutes: 5),
+          duration: Duration.zero,
+        );
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'real',
+          position: const Duration(minutes: 5),
+          duration: const Duration(minutes: 100),
+        );
+
+        final progress = await db.readPlaybackProgress(
+          'src',
+          ContentKind.movie,
+        );
+        expect(progress.keys, ['real']);
+        expect(progress['real'], closeTo(0.05, 0.001));
+        await db.close();
+      },
+    );
+
     test('v10 database gains the playback_positions table on upgrade', () async {
       // Simulate a pre-v11 install: open at v10 (no positions table), then
       // reopen through AppDatabase so the oldV < 11 repair branch runs.

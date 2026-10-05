@@ -22,9 +22,10 @@ void main() {
     test('Windows asks for auto-copy, Linux auto-safe, mobile defers', () {
       if (Platform.isWindows) {
         // auto-safe negotiates d3d11va *zero-copy*, which is exactly the path
-        // that lost the last band on HEVC 1080p. auto-copy keeps the decoder on
-        // the GPU but copies frames back, so the present path is not handed a
-        // surface it can leave half-drawn.
+        // that lost the last band on HEVC 1080p (the green stripe) on the
+        // embedded live/preview surface. auto-copy keeps the decoder on the GPU
+        // but copies frames back, so the present path is not handed a surface it
+        // can leave half-drawn.
         expect(embeddedHwdec(), 'auto-copy');
       } else if (Platform.isLinux) {
         expect(embeddedHwdec(), 'auto-safe');

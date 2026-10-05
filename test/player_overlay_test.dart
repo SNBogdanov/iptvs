@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/gestures.dart' show kDoubleTapMinTime, PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/player/player_chrome_prefs.dart';
 import 'package:iptvs/player/player_overlay.dart';
 import 'package:iptvs/player/zap_quick_list.dart';
 import 'package:iptvs/sources/source.dart';
@@ -1294,6 +1295,171 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
       expect(state.chromeVisible, isFalse);
       expect(state.handleBackPeel(), isFalse);
+    });
+  });
+
+  // The two device-wide chrome preferences (Settings → "Clock in the player" /
+  // "Playback time in the player"). Read from the notifier synchronously, so a
+  // test flips the notifier and rebuilds — there is no listener to pump.
+  group('chrome preferences', () {
+    // `HH:mm`, which is what the bare (touch) clock prints. Anchored, so it cannot
+    // match the EPG strip's `20:00 - 21:00` or the `pos / total` label; matched
+    // through a predicate because `find.text` takes a String in this Flutter.
+    final bareClock = find.byWidgetPredicate(
+      (w) =>
+          w is Text && RegExp(r'^\d{1,2}:\d{2}$').hasMatch(w.data ?? ''),
+      description: 'a bare HH:mm clock badge',
+    );
+    final timeLabel = find.textContaining(' / ');
+
+    setUp(() {
+      showPlayerClock.value = true;
+      showPlaybackTimes.value = true;
+    });
+
+    tearDown(() {
+      // Never leak a "off" into another test in this file.
+      showPlayerClock.value = true;
+      showPlaybackTimes.value = true;
+    });
+
+    testWidgets('the clock badge is drawn when the preference is on', (
+      tester,
+    ) async {
+      await pumpOverlay(tester, isLive: true, touch: true);
+
+      expect(bareClock, findsOneWidget);
+    });
+
+    testWidgets('turning the clock off removes the badge, live and VOD', (
+      tester,
+    ) async {
+      // Both kinds, because the badge is drawn from the same `_badges()` for a
+      // live channel and a film: a gate that only covered one of them would
+      // leave the clock on screen in exactly the mode it was meant to hide it
+      // from. Live is where users actually notice it.
+      showPlayerClock.value = false;
+      await pumpOverlay(tester, isLive: true, touch: true);
+      expect(bareClock, findsNothing);
+
+      await pumpOverlay(tester, isLive: false, touch: true);
+      expect(bareClock, findsNothing);
+    });
+
+    testWidgets('the VOD time readout is drawn when the preference is on', (
+      tester,
+    ) async {
+      await pumpOverlay(tester, isLive: false);
+
+      expect(timeLabel, findsOneWidget);
+    });
+
+    testWidgets('turning the readout off removes it and keeps the bar', (
+      tester,
+    ) async {
+      await pumpOverlay(tester, isLive: false);
+      // Counted, not asserted as a number: the VOD transport row carries the
+      // scrubber *and* the volume slider, both `Slider`s, and what matters is
+      // that hiding the readout takes neither of them with it.
+      final barsWithLabel = tester.widgetList(find.byType(Slider)).length;
+      expect(barsWithLabel, greaterThan(0));
+
+      showPlaybackTimes.value = false;
+      await pumpOverlay(tester, isLive: false);
+
+      expect(timeLabel, findsNothing);
+      expect(
+        tester.widgetList(find.byType(Slider)).length,
+        barsWithLabel,
+        reason: 'hiding the position/duration text must leave every bar in place',
+      );
+    });
+
+    testWidgets('neither preference disturbs live, which has no readout', (
+      tester,
+    ) async {
+      // Live keeps its EPG strip either way; the readout gate is inert there
+      // because the label only exists for VOD in the first place.
+      showPlayerClock.value = false;
+      showPlaybackTimes.value = false;
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        epgNow: _programme('News at Nine'),
+        epgNext: _programme('Late Film', startHour: 21, stopHour: 23),
+      );
+
+      expect(bareClock, findsNothing);
+      expect(timeLabel, findsNothing);
+      // The live strip is untouched by either preference — asserted on the
+      // programme title, which this file already pins elsewhere.
+      expect(find.text('News at Nine'), findsOneWidget);
+    });
+
+    // The persistent HUD: same information, drawn while the chrome is hidden,
+    // so it survives the auto-hide during playback rather than only existing
+    // while the mouse is moving.
+    testWidgets('the clock stays on screen once the chrome auto-hides', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        touch: true,
+        // Only a playing state schedules the auto-hide; a paused player keeps
+        // its chrome (and with it the badge).
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      // Chrome is down, the HUD is up.
+      expect(bareClock, findsOneWidget);
+    });
+
+    testWidgets('turning the clock off also empties the hidden-chrome HUD', (
+      tester,
+    ) async {
+      showPlayerClock.value = false;
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        touch: true,
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      expect(bareClock, findsNothing);
+    });
+
+    testWidgets('the VOD readout stays on screen once the chrome auto-hides', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      expect(timeLabel, findsOneWidget);
+    });
+
+    testWidgets('turning the readout off empties both the row and the HUD', (
+      tester,
+    ) async {
+      showPlaybackTimes.value = false;
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      expect(timeLabel, findsNothing);
     });
   });
 }

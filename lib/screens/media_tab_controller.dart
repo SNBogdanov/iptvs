@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
@@ -135,15 +136,57 @@ class MediaTabController extends ChangeNotifier {
   ContentKind get _resumeKind =>
       kind == ContentKind.movie ? ContentKind.movie : ContentKind.episode;
 
+  /// Watched fraction (0..1) per in-progress item, keyed by item id — the
+  /// progress bar on a poster card. Published by [loadContinueWatching], which
+  /// is already the single "what have I started" read: it runs on every
+  /// [load], on every return from the player (the position it reflects was just
+  /// saved), and after a Remove/Undo.
+  ///
+  /// **Movie tab only, and that is a property of the data, not a shortcut.** A
+  /// row here is one `[PlaybackPosition]`, whose `itemId` is the movie itself —
+  /// so the map answers exactly the grid's ids. On the series tab the rows are
+  /// *episodes* while the grid lists *series*, and nothing joins them: a series
+  /// has no position of its own. Any bar there would have to be an invented
+  /// aggregate ("how much of the started episodes you have on average" reads as
+  /// "half the show done" when you have watched one of twenty-four), so the
+  /// series grid deliberately has no bar and the episodes you are actually in
+  /// stay in the rail, which leads with the series name.
+  ///
+  /// Empty map means "nothing started", which is the common case and draws
+  /// nothing at all.
+  Map<String, double> resumeProgress = const {};
+
+  /// The largest number of items this tab has revealed for the current dataset.
+  ///
+  /// A **floor**, not a page counter: `MediaTabView` never lets the display
+  /// window shrink below it, so resizing the window smaller cannot unmount an
+  /// already-shown card — which is what made the focus jump back to the first
+  /// row (the focused node was removed and Flutter re-focused the autofocus
+  /// node). Reset on every dataset-replacing operation, where a fresh
+  /// arrangement legitimately starts at one screen.
+  int shownCountFloor = 0;
+
+  /// Raises [shownCountFloor] to [count]. Called by the view after each build;
+  /// never notifies (it changes no rendered state).
+  void noteShownCount(int count) {
+    if (count > shownCountFloor) shownCountFloor = count;
+  }
   /// Rebuild [continueWatching] from the saved positions, resolving ids
   /// against the cached media items (unknown ids — e.g. items whose category
   /// was never cached — are skipped rather than shown title-less).
+  ///
+  /// Publishes [resumeProgress] immediately afterwards, off the same read: both
+  /// come from `playback_positions`, and a card bar that lagged the rail by a
+  /// reload would show a title the rail had already dropped.
   Future<void> loadContinueWatching() async {
     final positions = await repo.db.readRecentPositions(repo.source.id);
     final wanted = positions.where((p) => p.kind == _resumeKind).toList();
     if (wanted.isEmpty) {
-      if (continueWatching.isNotEmpty) {
-        _set(() => continueWatching = const []);
+      if (continueWatching.isNotEmpty || resumeProgress.isNotEmpty) {
+        _set(() {
+          continueWatching = const [];
+          resumeProgress = const {};
+        });
       }
       return;
     }
@@ -167,6 +210,44 @@ class MediaTabController extends ChangeNotifier {
             ),
       ];
     });
+    // **After** the rail, deliberately, and this ordering is the point rather
+    // than a convenience. [load] calls this unawaited on every load, so an
+    // extra round trip *before* the rail would push the rail's own publish one
+    // tick later - and the grid bars would then arrive later still. The rail is
+    // what the user sees first on a return from the player, so it keeps the
+    // await depth it always had; the bar is an additive publish guarded by
+    // [mapEquals], which costs nothing when the fraction has not moved.
+    await _loadResumeProgress();
+  }
+
+  /// The grid's per-title fractions, read once per [loadContinueWatching].
+  ///
+  /// Fails soft: a bar missing is a card with no progress line, which is
+  /// exactly what it looked like before this existed - while letting a failed
+  /// read throw would take the rail down with it, since it runs in the same
+  /// unawaited call from [load].
+  ///
+  /// **Movie tab only.** Not because episodes have no progress - they do, this
+  /// read answers them fine - but because those keys are *episode* ids while that
+  /// tab's grid lists *series*, so not one of them can match a card. An
+  /// always-populated-but-unmatchable map is worse than an empty one: it looks
+  /// like the feature is working there and invites someone to "fix" it with an
+  /// invented aggregate later.
+  Future<void> _loadResumeProgress() async {
+    Map<String, double> progress;
+    try {
+      progress = _resumeKind == ContentKind.movie
+          ? await repo.db.readPlaybackProgress(repo.source.id, _resumeKind)
+          : const <String, double>{};
+    } catch (error) {
+      DiagnosticsLog.instance.add(
+        'library',
+        'resume progress unavailable: ${redactText('$error')}',
+      );
+      return;
+    }
+    if (_disposed || mapEquals(progress, resumeProgress)) return;
+    _set(() => resumeProgress = progress);
   }
 
   /// Series names for the rail's episodes, or an empty map.
@@ -196,11 +277,15 @@ class MediaTabController extends ChangeNotifier {
   /// position so it won't reappear, and updates the in-memory list
   /// immediately rather than waiting on a full [loadContinueWatching] reload.
   Future<void> removeFromContinueWatching(ContinueWatchingEntry entry) async {
-    _set(
-      () => continueWatching = continueWatching
-          .where((e) => e.item.id != entry.item.id)
-          .toList(),
-    );
+    final id = entry.item.id;
+    // Both halves, in memory, before the write: a bar that outlives the rail
+    // entry it belongs to would offer to resume a title the rail just dropped.
+    _set(() {
+      continueWatching = continueWatching
+          .where((e) => e.item.id != id)
+          .toList();
+      resumeProgress = Map.of(resumeProgress)..remove(id);
+    });
     await repo.db.clearPlaybackPosition(
       repo.source.id,
       entry.position.kind,
@@ -241,6 +326,7 @@ class MediaTabController extends ChangeNotifier {
       loadingMore = false;
       searching = false;
       error = null;
+      shownCountFloor = 0;
     });
     unawaited(loadContinueWatching());
     try {
@@ -419,7 +505,10 @@ class MediaTabController extends ChangeNotifier {
   /// grid per frame.
   void setSort(MediaSort value) {
     if (sort == value) return;
-    _set(() => sort = value);
+    _set(() {
+      sort = value;
+      shownCountFloor = 0;
+    });
     // When changing to a non-provider sort, load all pages to get correct global sort
     // without reshuffling on loadMore. If already fully loaded, no need.
     if (value != MediaSort.providerOrder && snapshot?.hasMore == true) {

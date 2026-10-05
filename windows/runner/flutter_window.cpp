@@ -285,6 +285,17 @@ struct NativeControlState {
   // grid's own play path) must keep them, or Dart would decline the command
   // and they would become dead keys.
   bool zap_enabled = false;
+  // Device-wide chrome preferences (Settings → "Clock in the player" / "Playback
+  // time in the player"), pushed on every setControlState. Both default to
+  // **true**, which is what this overlay draws today — so a Dart build that
+  // predates the keys, or a push that omits them, leaves the chrome unchanged
+  // rather than silently losing a badge. Mirrors `showPlayerClock` /
+  // `showPlaybackTimes` in lib/player/player_chrome_prefs.dart, and the
+  // same two names appear in PlayerUiState.kt and PlayerChromeState.swift.
+  bool show_clock = true;
+  // VOD only: hides the position/duration text either side of the scrubber and
+  // leaves the scrubber itself alone, so seeking still works without it.
+  bool show_playback_times = true;
   // Live EPG now/next snapshot (epoch ms; 0 = absent).
   std::wstring epg_now_title;
   double epg_now_start_ms = 0.0;
@@ -2712,6 +2723,36 @@ void PaintQuickList(HDC hdc, uint32_t *pixels, int width, int height,
   ApplyRoundRectAlphaMask(pixels, width, height, panel, kNativeMenuRadius);
 }
 
+// The persistent clock / VOD time readout drawn over the video while the chrome
+// is hidden (Settings → "Clock in the player" / "Playback time in the player").
+// Mirrors the shared Flutter overlay's `_persistentHud`: the clock top-right,
+// the VOD position/duration bottom-right. On the native Windows surface the VOD
+// route runs *here* (mpv presents straight to the D3D11 child window, not the
+// Flutter texture), so without this the two preferences had no effect on a movie
+// at all — the Flutter HUD is only built for the embedded surface.
+bool NativeHudShown() {
+  if (g_native_controls_chrome_visible) return false;
+  return g_native_control_state.show_clock ||
+         (!g_native_control_state.is_live &&
+          g_native_control_state.show_playback_times);
+}
+
+// The click-through bands the HUD is clipped to (see UpdateNativeControlsRegion).
+// Sized generously for the longest strings: the desktop clock is **dated**
+// (`Sat 8 Aug · 16:02`), and the VOD readout can be `1:23:45 / 2:00:00`, so a
+// tight band cut the badge's left edge off — which reads as the text being
+// punched out (the clipped glyphs show the video through them). The badge itself
+// is drawn centred inside.
+RECT NativeHudClockRect(const RECT &rect) {
+  return RectFrom(rect.right - NativeScale(340), rect.top, rect.right,
+                  rect.top + NativeScale(56));
+}
+
+RECT NativeHudTimeRect(const RECT &rect) {
+  return RectFrom(rect.right - NativeScale(360), rect.bottom - NativeScale(56),
+                  rect.right, rect.bottom);
+}
+
 void PaintNativeControlBar(HWND hwnd, int control_kind) {
   PAINTSTRUCT paint;
   HDC hdc = BeginPaint(hwnd, &paint);
@@ -2752,6 +2793,22 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     if (RectWidth(quick_list) > 0 && RectHeight(quick_list) > 0) {
       current_rects.push_back(quick_list);
     }
+    // The persistent clock / VOD time readout (see NativeHudShown).
+    const bool hud = NativeHudShown();
+    const RECT hud_clock = (hud && g_native_control_state.show_clock)
+                               ? NativeHudClockRect(rect)
+                               : RectFrom(0, 0, 0, 0);
+    const RECT hud_time =
+        (hud && !g_native_control_state.is_live &&
+         g_native_control_state.show_playback_times)
+            ? NativeHudTimeRect(rect)
+            : RectFrom(0, 0, 0, 0);
+    if (RectWidth(hud_clock) > 0 && RectHeight(hud_clock) > 0) {
+      current_rects.push_back(hud_clock);
+    }
+    if (RectWidth(hud_time) > 0 && RectHeight(hud_time) > 0) {
+      current_rects.push_back(hud_time);
+    }
     std::vector<RECT> dirty_rects = current_rects;
     dirty_rects.insert(dirty_rects.end(), buffer.prev_rects.begin(),
                        buffer.prev_rects.end());
@@ -2764,6 +2821,32 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     }
     if (RectWidth(quick_list) > 0 && RectHeight(quick_list) > 0) {
       PaintQuickList(paint_hdc, pixels, width, height, quick_list);
+    }
+    const COLORREF hud_bg = RGB(30, 33, 45);
+    const COLORREF hud_fg = RGB(206, 210, 224);
+    if (RectWidth(hud_clock) > 0 && RectHeight(hud_clock) > 0) {
+      DrawBadge(paint_hdc, hud_clock.right - NativeScale(12),
+                hud_clock.top + NativeScale(23), FormatClock(), hud_bg, hud_fg);
+    }
+    if (RectWidth(hud_time) > 0 && RectHeight(hud_time) > 0) {
+      const std::wstring label =
+          FormatTime(g_native_control_state.position_ms) + L" / " +
+          FormatTime(g_native_control_state.duration_ms);
+      DrawBadge(paint_hdc, hud_time.right - NativeScale(12),
+                hud_time.bottom - NativeScale(23), label, hud_bg, hud_fg);
+    }
+    // GDI leaves the alpha byte 0 on everything it draws, and the compositor
+    // treats alpha 0 as transparent — so the badge text needs the same
+    // normalization the chrome bars get, or only the rounded background shows
+    // and the glyphs are punched out. The transparent margin inside the band is
+    // pure black and reads as `background_color` with alpha 0, i.e. left alone.
+    if (RectWidth(hud_clock) > 0 && RectHeight(hud_clock) > 0) {
+      NormalizeNativeControlBitmapAlpha(pixels, width, height, hud_clock,
+                                        RGB(0, 0, 0), 0);
+    }
+    if (RectWidth(hud_time) > 0 && RectHeight(hud_time) > 0) {
+      NormalizeNativeControlBitmapAlpha(pixels, width, height, hud_time,
+                                        RGB(0, 0, 0), 0);
     }
     CompositeOverlayBands(hwnd, hdc, paint_hdc, width, height, dirty_rects);
     buffer.prev_rects = std::move(current_rects);
@@ -2853,7 +2936,7 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                              RGB(150, 102, 24), RGB(255, 236, 196));
   }
   const std::wstring clock = FormatClock();
-  if (!clock.empty()) {
+  if (g_native_control_state.show_clock && !clock.empty()) {
     badge_right -=
         DrawBadge(paint_hdc, badge_right, top_cy, clock, kNeutralBg, kNeutralFg);
   }
@@ -2917,10 +3000,17 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
 
   if (l.has_scrubber) {
     HFONT time_font = UiFont(13, FW_SEMIBOLD);
-    DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.position_ms),
-                     l.position_text,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, time_font,
-                     RGB(184, 190, 204));
+    // The two readouts and the bar between them are separable on purpose: the
+    // device-wide "Playback time in the player" preference hides the text and
+    // keeps the scrubber, so a user who wants the picture cleaner can still
+    // seek. Same rule as Kotlin's `Scrubber` and iOS's `positionLabel` /
+    // `durationLabel`, which are hidden rather than the row being dropped.
+    if (g_native_control_state.show_playback_times) {
+      DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.position_ms),
+                       l.position_text,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE, time_font,
+                       RGB(184, 190, 204));
+    }
     const double duration = std::max(1.0, g_native_control_state.duration_ms);
     // While the scrubber is being dragged the thumb follows the pointer; the
     // seek itself is committed on release.
@@ -2929,10 +3019,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                    ? g_native_seek_preview
                    : g_native_control_state.position_ms / duration,
                6);
-    DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.duration_ms),
-                     l.duration_text,
-                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE, time_font,
-                     RGB(184, 190, 204));
+    if (g_native_control_state.show_playback_times) {
+      DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.duration_ms),
+                       l.duration_text,
+                       DT_RIGHT | DT_VCENTER | DT_SINGLELINE, time_font,
+                       RGB(184, 190, 204));
+    }
     DeleteObject(time_font);
   }
 
@@ -3754,6 +3846,123 @@ void FlutterWindow::SetAlwaysOnTop(bool on) {
                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+flutter::EncodableMap FlutterWindow::CurrentWindowPlacement() {
+  flutter::EncodableMap out;
+  HWND hwnd = GetHandle();
+  if (!hwnd) {
+    return out;
+  }
+  // GetWindowRect, not GetClientRect: what the user positions is the frame, and
+  // restoring client coordinates would shave the border off the window on every
+  // run and ratchet it smaller. Physical pixels, matching SetWindowPos below.
+  RECT frame;
+  if (!GetWindowRect(hwnd, &frame)) {
+    return out;
+  }
+  out[flutter::EncodableValue("x")] =
+      flutter::EncodableValue(static_cast<int64_t>(frame.left));
+  out[flutter::EncodableValue("y")] =
+      flutter::EncodableValue(static_cast<int64_t>(frame.top));
+  out[flutter::EncodableValue("width")] = flutter::EncodableValue(
+      static_cast<int64_t>(frame.right - frame.left));
+  out[flutter::EncodableValue("height")] = flutter::EncodableValue(
+      static_cast<int64_t>(frame.bottom - frame.top));
+  out[flutter::EncodableValue("maximized")] =
+      flutter::EncodableValue(IsZoomed(hwnd) != FALSE);
+  return out;
+}
+
+bool FlutterWindow::ApplyWindowPlacement(const flutter::EncodableMap& args) {
+  HWND hwnd = GetHandle();
+  if (!hwnd) {
+    return false;
+  }
+  auto number = [&args](const char* key, int64_t fallback) -> int64_t {
+    auto it = args.find(flutter::EncodableValue(key));
+    if (it == args.end()) {
+      return fallback;
+    }
+    // Flutter's standard codec encodes a Dart int as **int32** when it fits in
+    // 32 bits (`StandardMessageCodec.writeValue`), so the window geometry
+    // usually arrives as `int32_t`, not `int64_t`. Reading only `int64_t` made
+    // every field fall back to 0, `width < 320` then refused the restore, and
+    // the saved position never came back. Accept both widths.
+    if (const auto* v32 = std::get_if<int32_t>(&it->second)) {
+      return *v32;
+    }
+    if (const auto* v64 = std::get_if<int64_t>(&it->second)) {
+      return *v64;
+    }
+    return fallback;
+  };
+  const int64_t width = number("width", 0);
+  const int64_t height = number("height", 0);
+  // A degenerate size from a corrupt record is not worth restoring: it produces
+  // a window the user cannot resize its way out of easily. 320x240 is below any
+  // layout this app has to be usable at.
+  if (width < 320 || height < 240) {
+    return false;
+  }
+  const RECT wanted{static_cast<LONG>(number("x", 0)),
+                    static_cast<LONG>(number("y", 0)),
+                    static_cast<LONG>(number("x", 0) + width),
+                    static_cast<LONG>(number("y", 0) + height)};
+
+  // A monitor can be gone by the time the app is reopened: an undocked dock, a
+  // projector left behind, a docking station on the other side of the building.
+  // Restoring the rectangle anyway parks the window where the user cannot reach
+  // it, and an unreachable window is the one failure that needs no bug report to
+  // explain - the app looks like it simply did not start. So require the saved
+  // rect to still land on a monitor; MONITOR_DEFAULTTONULL means "no", where
+  // NEAREST would silently accept one. A partially offscreen rect passes on
+  // purpose: the user can drag it back, a fully detached one cannot.
+  HMONITOR monitor = MonitorFromRect(&wanted, MONITOR_DEFAULTTONULL);
+  if (monitor == nullptr) {
+    return false;
+  }
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(monitor, &info)) {
+    return false;
+  }
+
+  // Clamp to the work area, so a size remembered on a 4K panel does not open
+  // larger than the monitor actually in use.
+  const RECT& work = info.rcWork;
+  LONG x = wanted.left;
+  LONG y = wanted.top;
+  LONG w = static_cast<LONG>(width);
+  LONG h = static_cast<LONG>(height);
+  if (w > work.right - work.left) {
+    w = work.right - work.left;
+  }
+  if (h > work.bottom - work.top) {
+    h = work.bottom - work.top;
+  }
+  if (x + w < work.left) {
+    x = work.left;
+  }
+  if (y + h < work.top) {
+    y = work.top;
+  }
+
+  bool maximized = false;
+  auto it = args.find(flutter::EncodableValue("maximized"));
+  if (it != args.end()) {
+    const auto* value = std::get_if<bool>(&it->second);
+    maximized = value != nullptr && *value;
+  }
+  if (maximized) {
+    // Let the window manager place it: SW_MAXIMIZE ignores the rectangle anyway,
+    // and forcing the style with the wrong metrics is how a maximized window ends
+    // up restored to a size it never had.
+    ShowWindow(hwnd, SW_MAXIMIZE);
+    return true;
+  }
+  SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+  return true;
+}
+
 void FlutterWindow::ShowTrayMenu() {
   HMENU menu = CreatePopupMenu();
   if (!menu) {
@@ -4434,10 +4643,11 @@ void FlutterWindow::ResizeNativeControls() {
 
 // Whether the overlay *window* should be on screen. Wider than
 // native_controls_visible_, which is the chrome: with the chrome hidden the
-// window is still up while the zap banner has something to say, or while the
-// quick list is open.
+// window is still up while the zap banner has something to say, while the quick
+// list is open, or while the persistent HUD is showing.
 bool FlutterWindow::NativeOverlayTargetVisible() const {
-  return native_controls_visible_ || ZapBannerShown() || QuickListShown();
+  return native_controls_visible_ || ZapBannerShown() || QuickListShown() ||
+         NativeHudShown();
 }
 
 void FlutterWindow::BringNativeControlsToFront() {
@@ -4484,6 +4694,25 @@ void FlutterWindow::UpdateNativeControlsRegion() {
           kNativeMenuRadius * 2, kNativeMenuRadius * 2);
       CombineRgn(banner_region, banner_region, list_region, RGN_OR);
       DeleteObject(list_region);
+    }
+    // The persistent HUD rides in the same hidden-chrome region: the clock
+    // top-right and, on VOD, the time readout bottom-right.
+    if (NativeHudShown()) {
+      if (g_native_control_state.show_clock) {
+        const RECT clock = NativeHudClockRect(rect);
+        HRGN clock_region =
+            CreateRectRgn(clock.left, clock.top, clock.right, clock.bottom);
+        CombineRgn(banner_region, banner_region, clock_region, RGN_OR);
+        DeleteObject(clock_region);
+      }
+      if (!g_native_control_state.is_live &&
+          g_native_control_state.show_playback_times) {
+        const RECT time = NativeHudTimeRect(rect);
+        HRGN time_region =
+            CreateRectRgn(time.left, time.top, time.right, time.bottom);
+        CombineRgn(banner_region, banner_region, time_region, RGN_OR);
+        DeleteObject(time_region);
+      }
     }
     SetWindowRgn(native_controls_overlay_, banner_region, FALSE);
     native_controls_region_dirty_ = false;
@@ -4745,6 +4974,13 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "sourceName", g_native_control_state.source_name);
   g_native_control_state.zap_enabled =
       EncodableBoolArg(args, "zapEnabled", g_native_control_state.zap_enabled);
+  // Absent key keeps the previous value, so the default-true init above is what
+  // an older Dart build renders (and what a native route opened before the first
+  // push ever drew).
+  g_native_control_state.show_clock =
+      EncodableBoolArg(args, "showClock", g_native_control_state.show_clock);
+  g_native_control_state.show_playback_times = EncodableBoolArg(
+      args, "showPlaybackTimes", g_native_control_state.show_playback_times);
   // EPG now/next ride along on every setControlState, so default to empty: that
   // clears them for VOD and keeps live in sync.
   g_native_control_state.epg_now_title =
@@ -5359,6 +5595,24 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
           }
           SetAlwaysOnTop(on);
           result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "getWindowPlacement") {
+          result->Success(flutter::EncodableValue(CurrentWindowPlacement()));
+          return;
+        }
+
+        if (call.method_name() == "setWindowPlacement") {
+          bool applied = false;
+          const auto* args = call.arguments();
+          if (args && std::holds_alternative<flutter::EncodableMap>(*args)) {
+            applied =
+                ApplyWindowPlacement(std::get<flutter::EncodableMap>(*args));
+          }
+          // A refusal is an answer, not an error: the caller keeps the runner's
+          // own startup placement, and there is nothing for Dart to recover.
+          result->Success(flutter::EncodableValue(applied));
           return;
         }
 

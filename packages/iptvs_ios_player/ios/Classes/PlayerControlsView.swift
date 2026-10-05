@@ -628,7 +628,7 @@ final class PlayerControlsView: UIView {
     // strip's time ranges use, and the same 24-hour zero-padded shape Kotlin's
     // `formatClock`/`clockHm`, the Windows `FormatClock` and Dart's `_hm` all
     // produce. Never nil, so unlike its neighbours the badge never collapses.
-    clockBadge.apply(playerClockHm(ms: nowMs))
+    clockBadge.apply(state.showClockBadge ? playerClockHm(ms: nowMs) : nil)
 
     liveBadge.isHidden = !state.showLiveBadge
     if state.showLiveBadge {
@@ -643,8 +643,17 @@ final class PlayerControlsView: UIView {
   private func renderProgress(_ state: PlayerChromeState, nowMs: Int64) {
     scrubberRow.isHidden = !state.showScrubber
     if state.showScrubber {
-      positionLabel.text = state.positionLabel
-      durationLabel.text = state.durationLabel
+      // The two labels are hidden independently of `scrubberRow`, and on purpose:
+      // the device-wide "Playback time in the player" preference removes the
+      // readout while leaving the bar draggable. Same shape as Kotlin's
+      // `Scrubber` and the Windows GDI scrubber row. Their widths are
+      // unconstrained, so an empty one collapses and the bar takes the slack.
+      positionLabel.isHidden = !state.showTimeLabels
+      durationLabel.isHidden = !state.showTimeLabels
+      if state.showTimeLabels {
+        positionLabel.text = state.positionLabel
+        durationLabel.text = state.durationLabel
+      }
       // Never fight the finger: while a drag is in flight the thumb follows the
       // touch, not the (pre-seek) player position.
       if !scrubber.isTracking {

@@ -40,6 +40,8 @@ import 'package:iptvs/screens/media_tab_view.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
 import 'package:iptvs/data/profile_pin.dart';
+import 'package:iptvs/data/vod_card_orientation.dart';
+import 'package:iptvs/widgets/focusable_card.dart';
 import 'package:iptvs/widgets/pin_entry.dart';
 
 /// Registers the app's bundled Inter faces under the family name the theme
@@ -480,6 +482,176 @@ void main() {
     // The rail is the surface that produced the reported
     // `BOTTOM OVERFLOWED BY 1.6 PIXELS`; the grid tiles are swept alongside it
     // because they share the same fixed-reservation design.
+    //
+    // Swept in **both** card shapes, which is the point of adding the sweep: a
+    // 16:9 band is a much shorter poster, so the cell's height budget changes
+    // shape rather than just scaling — and this is the only test in the suite
+    // with real font metrics, so anything that depends on a line actually
+    // measuring taller than its reservation is invisible everywhere else.
+    for (final orientation in VodCardOrientation.values) {
+      for (final size in const [
+        Size(1256, 705),
+        Size(1280, 720),
+        Size(1000, 600),
+        Size(1920, 1080),
+      ]) {
+        for (final textScale in const [1.0, 1.3]) {
+          testWidgets(
+              'grid + continue-watching rail at $size, text scale '
+              '$textScale, ${orientation.label} cards', (tester) async {
+            debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+            vodCardOrientation.value = orientation;
+            addTearDown(
+              () => vodCardOrientation.value = VodCardOrientation.portrait,
+            );
+            useWindow(tester, size, textScale);
+
+            final items = [
+              for (var i = 0; i < 24; i++)
+                MediaItem(
+                  id: 'm$i',
+                  title: 'A Rather Long Movie Title Number $i pygjq 1080p MULTI',
+                  kind: ContentKind.movie,
+                  year: '20${10 + i}',
+                  rating: 8.5,
+                ),
+            ];
+            final scroll = ScrollController();
+            addTearDown(scroll.dispose);
+
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: AppTheme.dark,
+                home: Scaffold(
+                  body: SafeArea(
+                    top: false,
+                    child: MediaTabView(
+                      kind: ContentKind.movie,
+                      visible: items,
+                      snapshot: null,
+                      loading: false,
+                      // Puts the "load more" cell in the grid alongside the tiles.
+                      loadingMore: true,
+                      error: null,
+                      showingSearch: false,
+                      lastPlayedId: null,
+                      scrollController: scroll,
+                      firstFocusNode: null,
+                      isFavorite: (id) => id == 'm1',
+                      onOpenMedia: (_) {},
+                      onLoadMore: () {},
+                      onRetry: () {},
+                      continueWatching: [
+                        for (var i = 0; i < 3; i++)
+                          ContinueWatchingEntry(
+                            item: items[i],
+                            position: PlaybackPosition(
+                              kind: ContentKind.movie,
+                              itemId: items[i].id,
+                              position: const Duration(minutes: 12),
+                              duration: const Duration(hours: 1, minutes: 40),
+                              updatedAt: DateTime(2024, 1, 1),
+                            ),
+                          ),
+                      ],
+                      onResume: (_) {},
+                      onRemoveContinueWatching: (_) {},
+                    ),
+                  ),
+                ),
+              ),
+            );
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 400));
+
+            expect(tester.takeException(), isNull);
+            debugDefaultTargetPlatformOverride = null;
+          });
+        }
+      }
+    }
+
+    testWidgets('flipping the card shape redraws the grid in place',
+        (tester) async {
+      // The tile is toggled from the Settings route pushed *over* this one, so
+      // nothing in the media tab rebuilds on its own. This is the test that says
+      // the grid listens to the preference rather than reading it once — without
+      // the `ListenableBuilder`, the cards would keep the old shape until some
+      // unrelated rebuild, and every test above would still pass.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final size = Size(1280, 720);
+      useWindow(tester, size, 1.0);
+
+      final items = [
+        for (var i = 0; i < 12; i++)
+          MediaItem(
+            id: 'm$i',
+            title: 'Title $i',
+            kind: ContentKind.movie,
+            year: '2020',
+          ),
+      ];
+      final scroll = ScrollController();
+      addTearDown(scroll.dispose);
+
+      Future<void> mount() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.dark,
+            home: Scaffold(
+              body: SafeArea(
+                top: false,
+                child: MediaTabView(
+                  kind: ContentKind.movie,
+                  visible: items,
+                  snapshot: null,
+                  loading: false,
+                  loadingMore: false,
+                  error: null,
+                  showingSearch: false,
+                  lastPlayedId: null,
+                  scrollController: scroll,
+                  firstFocusNode: null,
+                  isFavorite: (_) => false,
+                  onOpenMedia: (_) {},
+                  onLoadMore: () {},
+                  onRetry: () {},
+                  onResume: (_) {},
+                  onRemoveContinueWatching: (_) {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+      }
+
+      await mount();
+      Size portraitCard() => tester.getSize(find.byType(FocusableCard).first);
+      final portrait = portraitCard();
+      addTearDown(
+        () => vodCardOrientation.value = VodCardOrientation.portrait,
+      );
+
+      vodCardOrientation.value = VodCardOrientation.landscape;
+      await tester.pump();
+
+      final landscape = portraitCard();
+      expect(
+        landscape.height,
+        lessThan(portrait.height),
+        reason: 'a 16:9 card must be shorter than a 2:3 one',
+      );
+      // The *width* has to be identical: `memCacheWidth` is part of the image
+      // cache key, so a width that moved here would re-decode every poster in
+      // the catalogue for a preference that only claims to change height.
+      expect(landscape.width, closeTo(portrait.width, 0.01));
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
+
+  group('the media tab fits its cells (portrait cards only)', () {
     for (final size in const [
       Size(1256, 705),
       Size(1280, 720),

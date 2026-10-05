@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'demo_source.dart';
 import 'm3u_source.dart';
+import 'refresh_interval.dart';
 import 'source.dart';
 import 'stalker_source.dart';
 import 'xtream_source.dart';
@@ -261,6 +262,16 @@ class SourceConfig {
   /// for — has no reason to spend the lookups, and the result is cached
   /// per-item so turning it off later is not just cosmetic.
   bool get enrichMetadata => settings['enrichMetadata'] != false;
+
+  /// How often this source's catalogue (live channels + VOD) is refreshed
+  /// automatically. **Channels and VOD only — never the EPG**, which has its own
+  /// freshness window; see [SourceRefreshInterval].
+  ///
+  /// Read at scheduling time, never by [build], so changing it does not invalidate
+  /// the loaded catalogue and keeps the repository's identity (see
+  /// [hasSameCatalogInputs]). Absent reads as the default (every 24 hours).
+  SourceRefreshInterval get refreshInterval =>
+      SourceRefreshInterval.parse(settings['refreshInterval']);
 
   /// How long the auto-switch shortcut rests on each channel, in seconds, as
   /// the stored number (see `player/channel_dwell.dart` for the ladder and

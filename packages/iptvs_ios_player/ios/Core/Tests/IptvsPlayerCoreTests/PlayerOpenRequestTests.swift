@@ -184,6 +184,47 @@ final class PlayerOpenRequestTests: XCTestCase {
     XCTAssertEqual(request?.isFavorite, true)
   }
 
+  // MARK: - Chrome preferences
+
+  /// Absent keys must decode to "draw the chrome", i.e. exactly what this
+  /// platform rendered before the preferences existed. Both hide chrome that is
+  /// already there, so the failure direction that matters is a missing or
+  /// mistyped key reading as *hidden* — a Dart build older than Settings, or a
+  /// payload that lost a key in transit, would otherwise silently drop the clock
+  /// badge and the VOD time readout for everyone on that side.
+  func testChromePreferencesDefaultToVisibleWhenAbsent() {
+    let request = PlayerOpenRequest(arguments: arguments())
+    XCTAssertEqual(request?.showClock, true)
+    XCTAssertEqual(request?.showPlaybackTimes, true)
+  }
+
+  func testChromePreferencesParseAnExplicitFalse() {
+    let request = PlayerOpenRequest(
+      arguments: arguments(["showClock": false, "showPlaybackTimes": false])
+    )
+    XCTAssertEqual(request?.showClock, false)
+    XCTAssertEqual(request?.showPlaybackTimes, false)
+  }
+
+  /// A mistyped value fails open, exactly like an absent one — the string
+  /// `"false"` Dart would stringify is not a boolean, and reading it as a
+  /// decision would hide the chrome behind a typo.
+  func testAMistypedChromePreferenceFailsOpen() {
+    let request = PlayerOpenRequest(
+      arguments: arguments(["showClock": "false", "showPlaybackTimes": "no"])
+    )
+    XCTAssertEqual(request?.showClock, true)
+    XCTAssertEqual(request?.showPlaybackTimes, true)
+  }
+
+  /// The memberwise init keeps the same default-on, so every existing call site
+  /// (tests, and the plugin's own re-open path) draws the chrome it always did.
+  func testTheMemberwiseInitDefaultsBothPreferencesToVisible() {
+    let request = PlayerOpenRequest(url: "https://example.test/live/1.m3u8")
+    XCTAssertEqual(request.showClock, true)
+    XCTAssertEqual(request.showPlaybackTimes, true)
+  }
+
   // MARK: - Buffer preset
 
   func testBufferPresetParsesTheThreeNames() {

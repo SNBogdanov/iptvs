@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 
+import '../data/net.dart' show cleanImageUrl;
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/favorite_controls.dart';
@@ -1070,11 +1071,10 @@ class _LivePreviewPanel extends StatelessWidget {
                         child: IgnorePointer(child: previewVideo),
                       )
                     else if (!debugDisableNetworkChannelLogos &&
-                        channel.logo != null &&
-                        channel.logo!.isNotEmpty)
+                        cleanImageUrl(channel.logo) != null)
                       LayoutBuilder(
                         builder: (context, constraints) => CachedNetworkImage(
-                          imageUrl: channel.logo!,
+                          imageUrl: cleanImageUrl(channel.logo)!,
                           // `contain`, not `cover`: a channel logo is artwork of
                           // arbitrary aspect, and the row's own tile
                           // ([_Logo]) already draws it contained. `cover` here

@@ -230,7 +230,10 @@ public enum PlayerErrorMessages {
 ///   the Flutter overlay on mpv-routed channels — which shows an `HH:mm` badge
 ///   unconditionally — so gating it here would mean the *same device* showing a
 ///   clock on a Stalker channel and not on an HLS one. It is rendered straight
-///   from the `nowMs` the view is already handed, so it needs no state field.
+///   from the `nowMs` the view is already handed, so it needs no *time* field.
+  ///   It does carry one **boolean** (`showClock`), because "should this user see
+  ///   a clock at all" is a different question from "what time is it", and only
+  ///   the first is a preference.
 /// - `volume` (the volume *slider* is dropped on iOS: the hardware buttons and
 ///   the AirPlay route picker cover it — docs/ios.md "Plugin-package layout").
 ///   `muted` stays, since a mute toggle has no hardware equivalent.
@@ -305,6 +308,24 @@ public struct PlayerChromeState: Equatable, Sendable {
   /// on Android and Windows.
   public var liveSynced: Bool = true
 
+  // MARK: Chrome preferences
+
+  /// Device-wide player-chrome preferences, decoded from the `open` payload
+  /// (Dart's `showClock`/`showPlaybackTimes`, Settings → "Clock in the player" /
+  /// "Playback time in the player"). **Default `true` on both**: these hide
+  /// chrome that is already drawn, so a Dart build that predates the keys — or
+  /// an `open` payload missing them — must render exactly what it renders today
+  /// rather than silently lose a badge.
+  ///
+  /// Constant for the life of a controller, which is why they arrive on `open`
+  /// and not through `applyControlState`: a player route cannot reach Settings,
+  /// so there is nothing that could change them mid-session.
+  public var showClock: Bool = true
+  /// VOD only. Hides ``positionLabel``/``durationLabel`` and keeps the scrubber
+  /// draggable — the same trade the Windows GDI overlay and Kotlin's `Scrubber`
+  /// make, for the same reason.
+  public var showPlaybackTimes: Bool = true
+
   // MARK: Favorite
   //
   // The Dart host owns the favorites store: it seeds these through the `open`
@@ -371,6 +392,8 @@ public struct PlayerChromeState: Equatable, Sendable {
     epgNext = request.epgNext
     canFavorite = request.canFavorite
     isFavorite = request.isFavorite
+    showClock = request.showClock
+    showPlaybackTimes = request.showPlaybackTimes
   }
 
   // MARK: - Derived visibility
@@ -397,6 +420,22 @@ public struct PlayerChromeState: Equatable, Sendable {
   /// the fourth reason stock `AVPlayerViewController` was rejected, since its
   /// `requiresLinearPlayback` infers scrubbability from the item).
   public var showScrubber: Bool { !isLive }
+
+  /// Whether the position/duration text flanks the scrubber. A **third**
+  /// condition on top of ``showScrubber``, and the reason this is its own rule:
+  /// the bar and its readouts are separable everywhere (Android's `Scrubber`
+  /// drops two `Text`s and keeps the `SlimSlider`, the Windows GDI overlay drops
+  /// two `DrawTextWithFont` calls and keeps `DrawSlider`), so hiding one must not
+  /// take the other and with it the ability to seek.
+  public var showTimeLabels: Bool { showScrubber && showPlaybackTimes }
+
+  /// Whether the top bar draws its wall-clock badge.
+  ///
+  /// Not TV-gated, unlike Android's (`PlayerUiState.isTv`) — see the type-level
+  /// note on why this platform draws the badge unconditionally. Android needs
+  /// two flags where iOS needs one, because its badge is absent on phones to
+  /// begin with; here the only question is whether the user hid it.
+  public var showClockBadge: Bool { showClock }
 
   /// The live EPG strip sits where the VOD scrubber would be.
   public var showLiveEpgStrip: Bool { isLive && epgNow != nil }

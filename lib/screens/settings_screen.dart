@@ -4,7 +4,10 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/vod_card_orientation.dart';
+import '../player/player_chrome_prefs.dart';
 import '../player/tray.dart';
+import '../player/window_placement.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 
@@ -26,6 +29,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool? _closeToTray;
   bool? _randomZapping;
   bool? _alwaysOnTop;
+  bool? _rememberPlacement;
+  bool? _showClock;
+  bool? _showPlaybackTimes;
+  VodCardOrientation? _cards;
 
   @override
   void initState() {
@@ -37,11 +44,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final closeToTray = await widget.store.closeToTray();
     final randomZapping = await widget.store.randomZapping();
     final alwaysOnTop = await widget.store.alwaysOnTop();
+    final rememberPlacement = await widget.store.rememberWindowPlacement();
+    final showClock = await widget.store.showPlayerClock();
+    final showPlaybackTimes = await widget.store.showPlaybackTimes();
+    final cards = VodCardOrientation.parse(
+      await widget.store.rawVodCardOrientation(),
+    );
     if (mounted) {
       setState(() {
         _closeToTray = closeToTray;
         _randomZapping = randomZapping;
         _alwaysOnTop = alwaysOnTop;
+        _rememberPlacement = rememberPlacement;
+        _showClock = showClock;
+        _showPlaybackTimes = showPlaybackTimes;
+        _cards = cards;
       });
     }
   }
@@ -70,6 +87,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!next) {
       await applyAlwaysOnTop(false);
     }
+  }
+
+  Future<void> _toggleRememberPlacement() async {
+    final next = !(_rememberPlacement ?? true);
+    setState(() => _rememberPlacement = next);
+    // Turning it on records the window where it is *now*, rather than waiting
+    // for the next hide - otherwise the first run after the switch opens where
+    // Windows put it, which is the one run the user is watching for the effect.
+    await widget.store.setRememberWindowPlacement(next);
+    if (next) {
+      await recordWindowPlacement(store: widget.store);
+    }
+  }
+
+  /// Two shapes only, so this cycles rather than opening a picker: one less
+  /// stop for a remote to reach, and the tile's trailing label already prints
+  /// which one is current.
+  Future<void> _cycleCardOrientation() async {
+    final next = otherVodCardOrientation(
+      _cards ?? VodCardOrientation.portrait,
+    );
+    setState(() => _cards = next);
+    // Publishes through the notifier the grid listens to, so the cards behind
+    // this route redraw straight away instead of on some later rebuild.
+    await setVodCardOrientation(next, store: widget.store);
+  }
+
+  Future<void> _toggleShowClock() async {
+    final next = !(_showClock ?? true);
+    setState(() => _showClock = next);
+    // Publishes to the notifier every chrome surface reads, so the next player
+    // opened draws the badge the user just asked for. Nothing is listening while
+    // this route is up (Settings is unreachable from a player), so a running
+    // playback is deliberately left alone rather than repainted mid-session.
+    showPlayerClock.value = next;
+    await widget.store.setShowPlayerClock(next);
+  }
+
+  Future<void> _toggleShowPlaybackTimes() async {
+    final next = !(_showPlaybackTimes ?? true);
+    setState(() => _showPlaybackTimes = next);
+    showPlaybackTimes.value = next;
+    await widget.store.setShowPlaybackTimes(next);
   }
 
   @override
@@ -110,6 +170,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 trailing: (_alwaysOnTop ?? false) ? 'On' : 'Off',
                 onTap: _toggleAlwaysOnTop,
               ),
+            if (Platform.isWindows)
+              _SettingTile(
+                icon: Icons.crop_free,
+                title: 'Remember window position and size',
+                subtitle:
+                    'Reopen the window where you left it. If the monitor it '
+                    'was on is gone, Windows decides where it opens instead.',
+                trailing: (_rememberPlacement ?? true) ? 'On' : 'Off',
+                onTap: _toggleRememberPlacement,
+              ),
+            _SettingTile(
+              icon: Icons.grid_view_outlined,
+              title: 'VOD and series card shape',
+              subtitle:
+                  'Portrait shows whole 2:3 posters; landscape crops them to a '
+                  '16:9 band and fits far more titles on screen. The Continue '
+                  'watching thumbnails stay landscape either way.',
+              trailing: (_cards ?? VodCardOrientation.portrait).label,
+              onTap: _cycleCardOrientation,
+            ),
+            _SettingTile(
+              icon: Icons.schedule_outlined,
+              title: 'Clock in the player',
+              subtitle:
+                  'Show the wall clock in the player\'s top bar, on every '
+                  'surface. Hides the badge while the controls are up; nothing '
+                  'draws a clock over the picture itself.',
+              trailing: (_showClock ?? true) ? 'On' : 'Off',
+              onTap: _toggleShowClock,
+            ),
+            _SettingTile(
+              icon: Icons.timelapse_outlined,
+              title: 'Playback time in the player',
+              subtitle:
+                  'Show how far into a film or episode you are, beside the '
+                  'progress bar. Live channels have no progress bar, so this '
+                  'changes nothing there.',
+              trailing: (_showPlaybackTimes ?? true) ? 'On' : 'Off',
+              onTap: _toggleShowPlaybackTimes,
+            ),
           ],
         ),
       ),

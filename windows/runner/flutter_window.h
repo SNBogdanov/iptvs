@@ -75,6 +75,15 @@ private:
   LRESULT HandleTrayCallback(LPARAM lparam);
   void SetAlwaysOnTop(bool on);
 
+  // Window placement persistence (docs/player.md "System tray icon"): the last
+  // position and size, kept by Dart in the keychain and applied here on boot.
+  // Dart owns the preference because the keychain is Dart's; the runner owns
+  // the HWND, so these two calls are the whole native surface.
+  // `CurrentWindowPlacement` is read back when the window hides or the app
+  // quits - never on WM_MOVE, which would keychain-write on every drag frame.
+  flutter::EncodableMap CurrentWindowPlacement();
+  bool ApplyWindowPlacement(const flutter::EncodableMap& args);
+
   // The project to run.
   flutter::DartProject project_;
 

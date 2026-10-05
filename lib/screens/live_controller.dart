@@ -165,6 +165,56 @@ class LiveController extends ChangeNotifier {
     }
   }
 
+  /// The scheduled auto-refresh path: re-fetches the live catalogue **without
+  /// touching the EPG**.
+  ///
+  /// Mirrors [load]'s generation/token discipline (a newer load supersedes this
+  /// one), but goes through [LibraryRepository.refreshCatalog] so no guide
+  /// download is forced behind it, and it **fails soft**: this runs in the
+  /// background at start-up, so a provider error must leave the working,
+  /// already-cached list on screen rather than replace it with an error body.
+  Future<void> refreshCatalog() async {
+    final gen = ++_loadGeneration;
+    _loadToken?.cancel();
+    final token = LoadToken();
+    _loadToken = token;
+    try {
+      repo.loadToken = token;
+      final snap = await retryTransientNetworkOperation(
+        () => repo.refreshCatalog(),
+        onRetry: (error, nextAttempt) {
+          DiagnosticsLog.instance.add(
+            'library',
+            'retrying live auto-refresh attempt=$nextAttempt '
+                'reason=${error.runtimeType}',
+          );
+        },
+      );
+      if (_disposed || gen != _loadGeneration) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'auto-refreshed live source=${repo.source.name} '
+            'channels=${snap.channels.length}',
+      );
+      _set(() {
+        categories = snap.categories;
+        channels = snap.channels;
+        syncedAt = snap.syncedAt;
+        fromCache = snap.fromCache;
+      });
+      await refreshNowNext();
+    } catch (e) {
+      if (_disposed || gen != _loadGeneration) return;
+      // No `error =`: see the doc comment — a background refresh that failed
+      // leaves the cached list and its chrome exactly as they were.
+      DiagnosticsLog.instance.add(
+        'library',
+        'live auto-refresh failed source=${repo.source.name} '
+            'reason=${e.runtimeType} detail=${redactText(e.toString())}',
+      );
+    }
+  }
+
   /// Records how the background guide refresh ended.
   ///
   /// Re-reads now/next **before** clearing [epgRefreshing], rather than after,

@@ -580,3 +580,31 @@ Keep the two predicates in step with `build()` and with the settings keys
 `source_settings_screen` writes. A key `build()` reads that is missing from `_sourceReadSettings`
 leaves a stale source until the next rebuild; a settings key wrongly listed there costs a needless
 source swap (retirement churn), not correctness.
+
+## Scheduled catalogue refresh
+
+Each source carries an optional **catalogue refresh interval** — `settings['refreshInterval']`, one
+of `startup` / `6` / `12` / `24` / `48` hours, default 24, edited in the source-settings screen's
+"Catalogue refresh" tile (`lib/sources/refresh_interval.dart` for the enum and the pure
+`planSourceRefresh`, `SourceConfig.refreshInterval` for the read). It refreshes **channels and VOD,
+never the EPG**: the guide has its own freshness window and its own ingest coordinator, and forcing a
+large XMLTV download behind every catalogue refresh is exactly the coupling that separation exists to
+avoid. `LibraryRepository.refreshCatalog` is the no-EPG channel path (`load`'s `forceRefresh` makes
+`_epgNeedsRefresh` return true, so reusing it would force a guide fetch), and the VOD halves reuse
+`loadMedia(forceRefresh: true)`.
+
+**The schedule runs after the cached load, never instead of it** (`ChannelListScreen`): the cached
+catalogue paints first, then `_maybeAutoRefresh` decides whether a refresh is due and runs it in the
+background, one shot per screen — a launch must never show a spinner for a refresh the user did not
+ask for. A failed background refresh leaves the cached list and its chrome untouched (fail soft); the
+live half goes through `LiveController.refreshCatalog`, which deliberately sets no `error`.
+
+**When the last refresh ran is device-local, never `settings`.** `settings` rides the source row into
+the cloud, so a last-run timestamp there would push a rewrite on every refresh, advance
+`profiles.updated_at`, and hand a paired device a clock reading that describes *this* device's
+schedule. `SourceRefreshStore` (`lib/data/source_refresh_store.dart`) keeps a `{sourceId: epochMs}`
+map in the keychain beside the expiry cache, and **a manual refresh resets it** — pressing Refresh
+records "now" so the scheduled one does not immediately fire again. An absent/unreadable record reads
+as *never refreshed*, which the planner treats as due: the safe direction, since a missing record
+must not silently disable the feature.
+

@@ -104,6 +104,15 @@ local state = {
     liveSynced = true,
     aspectLabel = 'Fit',
     reconnecting = false,
+    -- Device-wide chrome preferences (Settings -> "Clock in the player" /
+    -- "Playback time in the player"), pushed in `iptvs-state` as the same two
+    -- names Dart sends (lib/player/player_chrome_prefs.dart). Both default to
+    -- true: they hide chrome this OSD already draws, so before the first push --
+    -- and for a Dart build that predates the keys -- the OSD renders exactly
+    -- what it renders today. That is the opposite of the canFavorite/favorite
+    -- defaults, which fail closed because a dead button is worse than no button.
+    showClock = true,
+    showPlaybackTimes = true,
 }
 local visible = true
 local info_open = false
@@ -1095,7 +1104,7 @@ local function render()
     add_text_badge(resolution_badge(vw, vh))
     add_text_badge(hdr_badge(dr))
     add_text_badge(fps_badge(fps))
-    add_text_badge(clock_badge())
+    if state.showClock ~= false then add_text_badge(clock_badge()) end
 
     local bx = w - pad
     for i = #badge_items, 1, -1 do
@@ -1186,7 +1195,13 @@ local function render()
     add_hitbox(vol_x1, row2_cy - px(14), vol_x2, row2_cy + px(14), 'volume')
     x = vol_x2 + px(14)
 
-    if not state.isLive then
+    -- The 'pos / total' readout, VOD only. The seek bar itself is drawn above
+    -- and is deliberately untouched: the device-wide "Playback time in the
+    -- player" preference removes this label and leaves the bar draggable, the
+    -- same trade Kotlin's Scrubber and the Windows/iOS scrubber rows make.
+    -- `~= false` rather than a plain truthiness check so an `iptvs-state` push
+    -- that predates the key (or omits it) still draws the OSD it draws today.
+    if not state.isLive and state.showPlaybackTimes ~= false then
         local label = duration_label(position) .. ' / ' .. duration_label(duration)
         ass:new_event()
         ass:append(string.format(

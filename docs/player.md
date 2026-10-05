@@ -759,14 +759,22 @@ show green along the bottom of the texture — reported on the windowed preview 
 surface alike, and in every aspect mode including Stretch (so it is inside the texture, not a `BoxFit`
 framing issue). `auto-copy` keeps the decoder on the GPU (`active hwdec=d3d11va-copy`,
 `video format=nv12`) but copies each frame back to system memory before it reaches the renderer —
-the copy the zero-copy path was omitting. The *native* HWND surface above keeps `auto-safe` (mpv owns
-both ends of its D3D11 context, so its zero-copy never crosses an interop boundary), and Linux's
-embedded path keeps `auto-safe` (vaapi/drm zero-copy is the whole point there and the band was never
-reported). The decision lives in `lib/player/hwdec_policy.dart` (`embeddedHwdec()`), consulted by
-every embedded `VideoController`; bisect a future rendering defect with the `hwdec_override.txt`
-marker beside the exe rather than a rebuild per arm. A stale marker left over from a bisection
-silently wins over the default, so the `preview mpv overrides: …` line in the log is the first thing
-to check.
+the copy the zero-copy path was omitting. Linux's embedded path keeps `auto-safe` (vaapi/drm
+zero-copy is the whole point there and the band was never reported). The decision lives in
+`lib/player/hwdec_policy.dart` (`embeddedHwdec()`), consulted by every embedded `VideoController`;
+bisect a future rendering defect with the `hwdec_override.txt` marker beside the exe rather than a
+rebuild per arm. A stale marker left over from a bisection silently wins over the default, so the
+`preview mpv overrides: …` line in the log is the first thing to check. (The native HWND surface
+that VOD/catch-up open on runs `auto-copy` on Windows too — see the paragraph below.)
+
+**The native Windows path asks for `auto-copy` too.** VOD, catch-up and preview-less live open on the
+native HWND surface (they do **not** pass `preferWindowsEmbedded`, matching the 0.1.63 behaviour that
+plays correctly), and that surface's `_configureNativePlayer` also negotiates d3d11va **zero-copy**
+under `auto-safe` — the same lost-bottom-band green stripe, now seen on a movie instead of the
+preview. So `player_screen.dart`'s native `hwdec` is `Platform.isWindows ? 'auto-copy' : 'auto-safe'`.
+The embedded surface keeps `embeddedHwdec()` → `auto-copy` on Windows for the live preview and the
+SDR adopted-to-fullscreen handoff. Both halves are the same one-copy trade; Linux keeps `auto-safe`
+throughout (vaapi/drm zero-copy is the point there and the band was never reported).
 
 **A native surface taking over an already-fullscreen window must take over the fullscreen ownership
 in place, never by restoring the window.** The runner cannot read media_kit's saved pre-fullscreen
@@ -1415,6 +1423,180 @@ an unhandled `MissingPluginException` there is an *unhandled async error* rather
 isn't applied on this build". That is not hypothetical: it broke a widget test that merely mounted the
 channel list. The sync's applied-state sentinel also starts at `false`, so mounting a channel list with
 nothing playing touches neither the window style nor the log. Pinned by `test/tray_settings_test.dart`.
+
+**Window placement is remembered across runs** (`lib/player/window_placement.dart`, `AppSettingsStore`,
+toggled in Settings; Windows only). The split is the same one the tray already has: **Dart owns the
+record** (it is in the keychain with the other global preferences, `app_window_placement`) and **the
+runner owns the HWND**, so the whole native surface is `getWindowPlacement`/`setWindowPlacement` on
+`iptvs/native_hdr_player` beside `setAlwaysOnTop`. The map is the window's **frame** rect in physical
+pixels (`GetWindowRect`, not `GetClientRect` — restoring client coordinates shaves the border off the
+window on every run and ratchets it smaller) plus a `maximized` flag from `IsZoomed`. The record is
+stored as `x,y,width,height,maximized`, not JSON: one keychain value, read once at boot, written when
+the window goes away.
+
+Four decisions here are load-bearing, and each one is a failure mode rather than a style preference:
+
+- **Recording is driven by *moments*, never by `WM_MOVE`.** A keychain write per drag frame is not a
+  cost worth paying. It writes on the two moments where the geometry is about to stop being observable:
+  `silenceRequest` (the tray hide, where `GetWindowRect` still answers — a hidden window keeps its rect)
+  and the `paused`/`detached`/`hidden` lifecycle. A redundant trigger writes the same value again and
+  costs nothing; a *missed* one is the bug.
+- **A monitor can be gone by the time the app reopens** — an undocked dock, a projector left behind. So
+  the runner requires the saved rect to still land on a monitor, with `MonitorFromRect` +
+  **`MONITOR_DEFAULTTONULL`**: `NEAREST` would silently accept one, and restoring onto a detached monitor
+  is the one failure that needs no bug report to explain, because the app looks like it did not start. A
+  *partially* offscreen rect passes on purpose — the user can drag it back, a fully detached one cannot.
+  A refusal is answered as `false`, not an exception: the runner's own startup placement stands, which is
+  always better than a window on a monitor that isn't there. Sizes are clamped to the work area so a
+  window remembered on a 4K panel doesn't open larger than the monitor in use.
+- **A malformed record is discarded whole, never half-applied** — restoring a window with the
+  dimensions that happened to parse and inventing the rest is worse than not restoring. So `decode`
+  demands exactly five fields with numeric bounds, `fromRunner` refuses a missing width rather than
+  defaulting it (a 0 means the call failed), and **`maximized` must arrive as a real `bool`**: it
+  chooses between `SW_MAXIMIZE` and an explicit rect, so reading a corrupted value as `false` would open
+  a maximized window as a resizable one occupying the maximized rect — silently the wrong answer instead
+  of a refused one. Sizes below 320x240 are refused on **both** sides, so a hand-edited keychain cannot
+  produce an unresizable window.
+- **The preference is the authority, not the record.** Absent means **on** (only an explicit `false` is
+  written, matching the other toggles — a feature nobody notices is not a feature), turning it off
+  *deletes* the record rather than keeping one the setting claims no longer applies, and a record that
+  somehow survives the toggle is still not applied. Turning it *on* records where the window is **now**,
+  so the effect is visible on the run the user is watching for it rather than the next one.
+
+Both channel calls swallow a missing or failing handler for the reason `setAlwaysOnTop` does: the apply
+runs unconditionally at boot on Windows, off Windows there's no handler at all, and a widget test has
+none either. Pinned by `test/window_placement_test.dart` (encode/decode incl. the negative origin a
+left-of-primary monitor reports, the reject cases, and both directions against a real `AppSettingsStore`
+over the mocked keychain plus a mocked runner).
+
+### Player chrome preferences: the clock and the VOD time readout
+
+Two **device-wide** preferences (Settings → "Clock in the player" / "Playback time in the player",
+`AppSettingsStore`, `lib/player/player_chrome_prefs.dart`) hide chrome every surface already draws,
+so an absent key reads as **on** and only an explicit `false` is ever written — the same
+no-surprise rule the tray toggles use. Both reach a session synchronously from a notifier
+(`showPlayerClock` / `showPlaybackTimes`) rather than through a listener: the only writer is
+Settings, and a player route cannot reach Settings, so a listener could never fire. They arrive on
+the `open`/`setControlState` payload natively (`showClock` / `showPlaybackTimes`) or from the
+notifier in the shared Flutter overlay, and are constant for the life of the session.
+
+**They gate two separable things.** The clock is one badge in the top bar; the playback readout is
+the two texts either side of the VOD scrubber. `showPlaybackTimes` hides the **labels only** — the
+scrubber stays draggable, so a user who wants a cleaner picture keeps the ability to seek (the same
+split Android's `Scrubber`, the Windows GDI overlay and iOS's `positionLabel`/`durationLabel`
+make). Live has no readout, so the key is inert there and can never switch a scrubber *on*.
+
+**The clock and readout do not disappear with the chrome.** When the chrome auto-hides, the shared
+Flutter overlay draws a **persistent HUD** (`player_overlay.dart`'s `_persistentHud`): the clock
+top-right, the VOD readout bottom-right, in the same corners the chrome uses, gated by the same two
+preferences and wrapped in `IgnorePointer` so a press in the corner still reaches the
+tap-to-reveal layer. That is what keeps them readable *during playback* instead of only while the
+mouse is moving. It is scoped to the embedded/shared surface today; applying the same HUD to the
+native surfaces (Windows GDI/HDR, Android Compose, iOS, the Linux Lua OSD — which currently apply
+the preferences to their chrome badge/readout only) is outstanding. Pinned by
+`test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
+
+### VOD/series card shape
+
+The media grid's cards are **portrait (2:3) or landscape (16:9)**, one global
+device preference (`VodCardOrientation`, `lib/data/vod_card_orientation.dart`,
+`AppSettingsStore`, toggled in Settings — tile cycles, trailing label prints the
+current shape). A device preference rather than a per-source one because it is how
+*this screen* draws artwork, and portrait is the default so nothing has to be
+written for the overwhelmingly common case: `storageValue` for portrait is null,
+`AppSettingsStore` therefore never stores it, and `parse` maps anything unknown to
+portrait — a key written by a **newer** build must not fail the grid on an older
+one.
+
+The whole setting is **one number in one place**: `MediaGridMetrics.posterAspectRatio`
+was a `static const`, and is now an instance field set by `MediaGridMetrics.forSize`'s
+`orientation` argument — which **defaults to portrait**, deliberately, because the
+column ladder and every pinned metric below it were established against 2:3 and a
+silent default flip would change the grid on every untouched install. `childAspectRatio`
+already derived the cell height from that ratio and a fixed `textBudget`, so the
+landscape cell is just a shorter cell; nothing else in the layout moves.
+
+Three consequences worth stating because they are decisions, not accidents:
+
+- **The column ladder is unchanged** (`MediaGridMetrics.forSize`'s columns come from
+  `kMediaPosterTargetWidth`, a width-only rule). Changing tile *width* along with the
+  shape would re-decode every poster in the catalogue — `memCacheWidth` is part of the
+  image cache key (CLAUDE.md, `lib/widgets/image_utils.dart`) — for a preference that
+  only claims to change height. Pinned: the ladder is asserted identical in both shapes.
+- **The grid listens to the preference; it does not read it once.** The tile is toggled
+  from the Settings route pushed *over* the media tab, so nothing in the media tab
+  rebuilds on its own and a plain read would leave the cards in the old shape until
+  some unrelated rebuild came along. `ListenableBuilder` on `vodCardOrientation` wraps
+  the `SliverGrid` only — the Continue-watching rail and the narrow-layout list are
+  not cards and keep their own shapes.
+- **The rail stays 16:9 in both modes, and the narrow list thumbnail stays 2:3.** The
+  rail's thumbnails are video-frame screenshots and backdrop stills — already landscape
+  by nature, and cropping them into a portrait box is what it was fixed for — while the
+  list row's 58x84 thumb is sized to the two-line text block beside it; a 16:9 thumb
+  there would be 33 px tall next to 60 px of text. Neither is a card.
+
+Pinned by `test/vod_card_orientation_test.dart` (encoding, fail-closed `parse`,
+publish-then-persist, and the notifier surviving a simulated reboot) and, in
+`test/media_grid_metrics_test.dart`, the shape group; the **overflow** sweep in
+`test/layout_overflow_test.dart` runs in both shapes, because a 16:9 band changes the
+height budget's *shape* and that file is the only one in the suite with real font
+metrics.
+
+### The card's watched-progress bar
+
+A movie card that has been started and not finished carries a **4 px green bar across
+the bottom of its poster** (`AppColors.success`), inset 12 px on the narrow-layout list
+row and flush on the grid tile. One widget, `WatchProgressBar` in
+`lib/screens/media_tab_view.dart`, draws both it and the rail's bar — the rail switched
+from the accent colour to the same green so the two surfaces answer "how far in am I"
+with one colour.
+
+**It is drawn inside the poster's `Stack`, which is the whole reason the cell geometry
+does not move.** A bar below the poster would have to come out of `textBudget` (or push
+`childAspectRatio`), so the shape, the text budget and the image cache key would all
+follow a progress value that changes while you scroll. As a `Positioned` child over an
+unchanged `BoxFit.cover` poster it costs nothing. `test/media_progress_bar_test.dart`
+asserts a card's size is identical with and without its bar.
+
+**The fraction comes from `playback_positions`, so the bar is gone at the end of a
+film by construction rather than by a rule here**: `savePlaybackPosition` deletes the
+row at `kFinishedFraction` (95%) and ignores anything under 10 s, and
+`AppDatabase.readPlaybackProgress` returns one fraction per remaining row
+(`position_ms / duration_ms`, clamped, `duration_ms > 0`). A finished title has no row,
+so no bar — the same reason it stops appearing in Continue Watching.
+
+**Movie tab only, and that is a property of the data rather than a shortcut.** On the
+movie tab a row's `itemId` *is* the movie the card shows, so the map answers the grid's
+ids exactly. On the series tab the rows are **episodes** while the grid lists **series**,
+and nothing joins them — a series has no position of its own. The bar there would have to
+be an invented aggregate ("the average of your started episodes" reads as "half the show
+done" when you have watched one of twenty-four), so the series grid deliberately has no
+bar and the episodes you are actually in stay in the rail, which leads with the series
+name. `MediaTabController._loadResumeProgress` therefore returns an empty map for
+anything that is not the movie tab, rather than an always-populated map that could never
+match a card — a map that looks like the feature working there invites someone to "fix"
+it with exactly that aggregate.
+
+**The read happens *after* the rail publishes, and that ordering is load-bearing.**
+`load()` calls `loadContinueWatching()` unawaited on every load, so putting the progress
+query *before* the rail adds a round trip to the path the user sees first on a return
+from the player — and it did: with the read up front, `test/media_tab_controller_test.dart`
+went flaky in exactly the generation/ordering tests, which gate on a single
+`Future.delayed(Duration.zero)` flush (`_flush`) and assert the exact state after it. Two
+different tests failed on one run and one on the next. The rail keeps the await depth it
+always had; the map arrives on the next tick as an **additive** publish guarded by
+`mapEquals`, so an unchanged fraction costs no notification. `_set` itself does not
+compare — it notifies unconditionally — so that guard is load-bearing too.
+
+The read **fails soft**, separately and after the rail is already published: a missing bar
+is a card with no progress line, which is exactly what it looked like before this existed,
+whereas letting it throw would take the rail down with it (same unawaited call from
+`load`).
+
+Pinned by the `card progress` group in `test/media_tab_controller_test.dart` (publish,
+early-return clear, Remove dropping the bar in memory and the row on disk, and the series
+tab publishing nothing while the row is still readable), the DB group in
+`test/persistence_test.dart`, and `test/media_progress_bar_test.dart`.
 
 ## Linux
 

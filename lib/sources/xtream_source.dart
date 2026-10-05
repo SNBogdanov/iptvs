@@ -195,6 +195,16 @@ class XtreamSource
     ..connectionTimeout = const Duration(seconds: 15)
     ..autoUncompress = false;
   final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
+  /// Categories are memoized for the same reason [ _mediaListCache] is, and it
+  /// is load-bearing rather than an optimisation: `loadAll` (`MediaTabController`
+  /// asks for it whenever the sort is not "As provided") walks **every** page of
+  /// the aggregate view, and each page's `_aggregateMediaPage` re-asks for the
+  /// category list before slicing it. Uncached, that is one `get_vod_categories`
+  /// (or `get_series_categories`) request per page over a whole catalogue — the
+  /// request storm a large portal turned this into. The streams themselves were
+  /// already cached, which is exactly why the storm showed up as categories
+  /// alone.
+  final Map<ContentKind, Future<List<MediaCategory>>> _mediaCategoriesCache = {};
   String? _providerCatchupTimezone;
 
   // Stalker portals usually return compact provider pages, often around
@@ -444,6 +454,25 @@ class XtreamSource
       _ => null,
     };
     if (action == null) return const [];
+    final cached = _mediaCategoriesCache[kind];
+    if (cached != null) return cached;
+    final future = _fetchMediaCategories(action, kind);
+    _mediaCategoriesCache[kind] = future;
+    try {
+      return await future;
+    } catch (_) {
+      // A failed fetch must not be memoized: the whole point is to survive
+      // transient errors across the pages of one load, not to wedge the tab
+      // for the session. A forced refresh clears it anyway (see [invalidate]).
+      _mediaCategoriesCache.remove(kind);
+      rethrow;
+    }
+  }
+
+  Future<List<MediaCategory>> _fetchMediaCategories(
+    String action,
+    ContentKind kind,
+  ) async {
     final r = await _api({'action': action});
     return _listFromAny(r)
         .map((c) {
@@ -759,6 +788,7 @@ class XtreamSource
     // Drop the memoized VOD/series catalogs so a forced reload re-fetches them.
     // Xtream live channels aren't memoized, so nothing else to clear here.
     _mediaListCache.clear();
+    _mediaCategoriesCache.clear();
   }
 
   Future<List<MediaItem>> _fetchMediaList(
@@ -880,11 +910,11 @@ List<Channel> mapLiveChannels(dynamic decoded) {
       id: streamId,
       name: '${m['name']}',
       number: int.tryParse('${m['num']}'),
-      logo:
-          (m['stream_icon'] is String &&
-              (m['stream_icon'] as String).isNotEmpty)
-          ? m['stream_icon'] as String
-          : null,
+      logo: cleanImageUrl(
+        (m['stream_icon'] is String && (m['stream_icon'] as String).isNotEmpty)
+            ? m['stream_icon'] as String
+            : null,
+      ),
       categoryId: m['category_id']?.toString(),
       archiveDays: _archiveDays(m['tv_archive'], m['tv_archive_duration']),
       extra: {
@@ -953,8 +983,12 @@ MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
     title: _firstString(m, ['name', 'title']) ?? 'Untitled',
     kind: kind,
     categoryId: m['category_id']?.toString(),
-    poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
-    backdrop: _firstString(m, ['backdrop_path', 'backdrop', 'cover_big']),
+    poster: cleanImageUrl(
+      _firstString(m, ['stream_icon', 'cover', 'cover_big']),
+    ),
+    backdrop: cleanImageUrl(
+      _firstString(m, ['backdrop_path', 'backdrop', 'cover_big']),
+    ),
     description: _firstString(m, ['plot', 'description']),
     year: _firstString(m, ['releasedate', 'release_date', 'releaseDate', 'year']),
     rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),

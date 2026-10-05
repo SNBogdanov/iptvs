@@ -5,8 +5,11 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
+import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/net.dart' show cleanImageUrl;
 import '../data/source_hint_parser.dart';
+import '../data/vod_card_orientation.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/favorite_controls.dart';
@@ -61,15 +64,19 @@ class MediaGridMetrics {
   /// Gap between a tile's poster and its text block.
   static const double posterTextGap = 8;
 
-  /// Posters are 2:3 — the shape TMDB and every provider panel ships, so a
-  /// tile at this ratio crops nothing.
-  static const double posterAspectRatio = 2 / 3;
+  /// Posters are 2:3 by default — the shape TMDB and every provider panel ships,
+  /// so a tile at this ratio crops nothing. [orientation] is the user's global
+  /// card-shape preference (docs/player.md "VOD/series card shape"), and the
+  /// only thing it changes here: everything else in this class is width-driven
+  /// and identical in both shapes.
+  final double posterAspectRatio;
 
   final int columns;
   final double spacing;
   final EdgeInsets padding;
 
   const MediaGridMetrics._({
+    required this.posterAspectRatio,
     required this.columns,
     required this.spacing,
     required this.padding,
@@ -78,7 +85,15 @@ class MediaGridMetrics {
   /// [viewport] is the **window** ([MediaQuery.sizeOf]), never a
   /// `LayoutBuilder`'s post-`SafeArea` constraints — see theme.dart's
   /// breakpoint note and docs/tv-navigation.md.
-  factory MediaGridMetrics.forSize(Size viewport) {
+  ///
+  /// [orientation] defaults to portrait, which is not a convenience but the
+  /// contract: the column ladder and every existing metric below are pinned
+  /// against the 2:3 shape, so a silent flip here would change the grid on every
+  /// untouched install.
+  factory MediaGridMetrics.forSize(
+    Size viewport, {
+    VodCardOrientation orientation = VodCardOrientation.portrait,
+  }) {
     final columns = (viewport.width / kMediaPosterTargetWidth).round().clamp(
       3,
       16,
@@ -88,6 +103,7 @@ class MediaGridMetrics {
     // only thing left of the old `compact` platform fork.
     final dense = viewport.shortestSide < 1000;
     return MediaGridMetrics._(
+      posterAspectRatio: orientation.aspectRatio,
       columns: columns,
       spacing: dense ? 8 : 12,
       padding: dense
@@ -202,10 +218,40 @@ class MediaTabView extends StatelessWidget {
   final ScrollController scrollController;
   final FocusNode? firstFocusNode;
 
+  /// Focus node for the "Next page" control, owned by the screen: after a press
+  /// the card moves to a new index, so a node that lived on the widget would not
+  /// survive the rebuild — the screen moves focus to this one, then scrolls it
+  /// into view.
+  final FocusNode? loadMoreFocusNode;
+
+  /// How many *screens* of items are revealed. The catalogue is loaded whole
+  /// (see `MediaTabController.load`'s `loadAll`, which global release-date
+  /// sorting requires), so paging is purely a display window: this counts
+  /// screenfuls, and the screenful size is computed from what actually fits the
+  /// viewport (columns × visible rows for the grid, visible rows for the list)
+  /// rather than a fixed item count. Defaults to one screen — an untouched call
+  /// site (tests included) shows the first screenful.
+  final int displayPages;
+
+  /// A floor on the revealed item count (see
+  /// `MediaTabController.shownCountFloor`): the window never shrinks below it
+  /// within a dataset, so resizing the window smaller cannot unmount an
+  /// already-shown card and steal the focus.
+  final int minShown;
+
+  /// Reports the revealed count after each build, so the owner raises its floor.
+  final ValueChanged<int>? onShown;
+
   final bool Function(String id) isFavorite;
   final ValueChanged<MediaItem> onOpenMedia;
   final VoidCallback onLoadMore;
   final VoidCallback onRetry;
+
+  /// Watched fraction per in-progress item id, published by
+  /// [MediaTabController.resumeProgress]; empty means nothing is in progress.
+  /// Reaches both the grid's poster cards and the narrow-layout list rows, so a
+  /// phone in landscape reports the same progress the grid does.
+  final Map<String, double> resumeProgress;
 
   /// In-progress items (saved playback positions) shown as a horizontal
   /// "Continue watching" rail above the grid; [onResume] plays one, resuming.
@@ -234,10 +280,15 @@ class MediaTabView extends StatelessWidget {
     required this.lastPlayedId,
     required this.scrollController,
     required this.firstFocusNode,
+    this.loadMoreFocusNode,
+    this.displayPages = 1,
+    this.minShown = 0,
+    this.onShown,
     required this.isFavorite,
     required this.onOpenMedia,
     required this.onLoadMore,
     required this.onRetry,
+    this.resumeProgress = const {},
     this.continueWatching = const [],
     required this.onResume,
     required this.onRemoveContinueWatching,
@@ -277,6 +328,80 @@ class MediaTabView extends StatelessWidget {
     Timer(visible + const Duration(milliseconds: 250), shown.close);
   }
 
+  /// How many items one screenful of this layout holds: the grid's column count
+  /// times the rows that fit the body's height, or the list's rows that fit.
+  /// Always at least one, so a body shorter than a single cell still reveals one
+  /// item per page rather than nothing.
+  ///
+  /// The grid metrics mirror the grid path below verbatim (ladder from the
+  /// window, tile width from the body) — the two must agree or the page would
+  /// not match what is drawn.
+  ///
+  /// A row counts only when **at least half of it is visible** — a sliver of the
+  /// next row peeking in is not "fitting", and counting it would put the next
+  /// screen's first row half off-screen. So the last counted row's leading edge
+  /// must sit no lower than half a row above the fold.
+  ///
+  /// [availableHeight] is the grid area's height for this call: the whole body
+  /// for a normal page, or the body minus the Continue-watching rail for the
+  /// first page (the rail is a leading sliver and eats into the first screen).
+  /// Only the grid's **top** padding is subtracted — the trailing bottom padding
+  /// is scroll-away space, not something that costs the first screen a row.
+  int _screenCells(
+    BoxConstraints constraints,
+    double availableHeight, {
+    required bool useGrid,
+    required Size windowSize,
+    required double textBudget,
+  }) {
+    final box = availableHeight < 0 ? 0.0 : availableHeight;
+    if (!useGrid) {
+      // A list row is the 58x84 thumbnail plus its 12px padding on each side
+      // (see `_MediaListTile`) and there is no separator between rows.
+      const rowExtent = 84.0 + 24.0;
+      final rows = ((box - rowExtent / 2) / rowExtent).floor() + 1;
+      final cells = rows < 1 ? 1 : rows;
+      DiagnosticsLog.instance.add(
+        'paging',
+        'list available=${box.toStringAsFixed(1)} rowExtent=$rowExtent rows=$rows '
+        'cells=$cells',
+      );
+      return cells;
+    }
+    final grid = MediaGridMetrics.forSize(windowSize);
+    final tileWidth = grid.tileWidth(constraints.maxWidth);
+    final aspect = grid.childAspectRatio(
+      tileWidth: tileWidth,
+      textBudget: textBudget,
+    );
+    if (aspect <= 0 || tileWidth <= 0) {
+      DiagnosticsLog.instance.add(
+        'paging',
+        'grid degenerate available=${box.toStringAsFixed(1)} '
+        'tileWidth=${tileWidth.toStringAsFixed(1)} aspect=${aspect.toStringAsFixed(3)}',
+      );
+      return 1;
+    }
+    final cellHeight = tileWidth / aspect;
+    final usable = box - grid.padding.top;
+    final rows =
+        ((usable - cellHeight / 2) / (cellHeight + grid.mainAxisSpacing))
+                .floor() +
+            1;
+    final perScreen = grid.columns * (rows < 1 ? 1 : rows);
+    final cells = perScreen < 1 ? 1 : perScreen;
+    DiagnosticsLog.instance.add(
+      'paging',
+      'grid available=${box.toStringAsFixed(1)} '
+      'bodyW=${constraints.maxWidth.toStringAsFixed(1)} cols=${grid.columns} '
+      'tileW=${tileWidth.toStringAsFixed(1)} aspect=${aspect.toStringAsFixed(3)} '
+      'cellH=${cellHeight.toStringAsFixed(1)} gap=${grid.mainAxisSpacing} '
+      'padTop=${grid.padding.top} usable=${usable.toStringAsFixed(1)} '
+      'rows=$rows cells=$cells',
+    );
+    return cells;
+  }
+
   @override
   Widget build(BuildContext context) {
     // The rail rides in the *same* scroll view as the grid/list below (as a
@@ -287,18 +412,35 @@ class MediaTabView extends StatelessWidget {
     // As a sliver it just contributes to the (already scrollable) content
     // and never forces an overflow.
     final showRail = !showingSearch && continueWatching.isNotEmpty;
-    final railSliver = showRail
+    // Built on demand rather than once above: whether the rail may claim the
+    // initial focus depends on the grid's own autofocus decision, which is only
+    // known inside the LayoutBuilder below.
+    Widget? railSliverFor({required bool autofocusFirst}) => showRail
         ? SliverToBoxAdapter(
-            child: _ContinueWatchingRail(
-              entries: continueWatching,
-              onResume: onResume,
-              onRemove: (entry) => _removeContinueWatching(context, entry),
+            child: _MeasureSize(
+              onChange: (size) => DiagnosticsLog.instance.add(
+                'paging',
+                'rail actual=${size.height.toStringAsFixed(1)} '
+                'estimated=${_ContinueWatchingRail.height(context).toStringAsFixed(1)}',
+              ),
+              child: _ContinueWatchingRail(
+                entries: continueWatching,
+                autofocusFirst: autofocusFirst,
+                onResume: onResume,
+                onRemove: (entry) => _removeContinueWatching(context, entry),
+              ),
             ),
           )
         : null;
 
     if (loading || error != null || visible.isEmpty) {
       final status = _statusBody(context);
+      // **The rail never takes focus in a body with no rows.** This body mounts
+      // only on a failed/empty load, and it has to leave its focus where the
+      // user needs it — `SourceErrorView` autofocuses its retry button for
+      // exactly this reason, since a status line is not reachable by D-pad. See
+      // docs/tv-navigation.md.
+      final railSliver = railSliverFor(autofocusFirst: false);
       if (railSliver == null) return status;
       return CustomScrollView(
         slivers: [
@@ -308,8 +450,6 @@ class MediaTabView extends StatelessWidget {
       );
     }
 
-    final showLoadMore =
-        !showingSearch && (loadingMore || snapshot?.hasMore == true);
     // Two-dimensional, and measured against the **window** rather than this
     // body's own (SafeArea-shrunk) constraints — see theme.dart's breakpoint
     // note. Height matters as much as width: with a width-only rule an iPad in
@@ -323,14 +463,81 @@ class MediaTabView extends StatelessWidget {
     final textBudget = mediaTileTextBudget(context);
     return LayoutBuilder(
       builder: (context, constraints) {
+        // The display window: a screenful per page, where a screenful is what
+        // actually fits — the grid's column count times the rows that fit its
+        // height, or the list's rows that fit — and a row counts only when at
+        // least half of it is visible.
+        //
+        // **The Continue-watching rail does NOT shrink the first page.** It is a
+        // sliver the user scrolls past, above the grid; folding its height into
+        // the row count made page 1 one row short of every later page (2 rows vs
+        // 3 on a real window). Every page is the same full screen of the grid.
+        final railHeight = showRail
+            ? _ContinueWatchingRail.height(context)
+            : 0.0;
+        final screen = _screenCells(
+          constraints,
+          constraints.maxHeight,
+          useGrid: useGrid,
+          windowSize: windowSize,
+          textBudget: textBudget,
+        );
+        // **The "Next page" card takes the last cell of every screen**, so page
+        // `p` shows `p * screen - 1` items and the card is cell `p * screen` —
+        // the bottom-right corner.
+        final pageLimit = displayPages * screen - 1;
+        // Never shrink below the floor within this dataset (a resize cannot
+        // unmount an already-shown card; see minShown).
+        final shownLimit = pageLimit > minShown ? pageLimit : minShown;
+        final shown = visible.length <= shownLimit
+            ? visible
+            : visible.sublist(0, shownLimit < 0 ? 0 : shownLimit);
+        // Report the revealed count so the owner can raise its floor. Post-frame
+        // because it mutates owner state, and idempotent on their side.
+        final report = onShown;
+        if (report != null) {
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => report(shown.length),
+          );
+        }
+        DiagnosticsLog.instance.add(
+          'paging',
+          'window=${windowSize.width.toStringAsFixed(0)}x'
+              '${windowSize.height.toStringAsFixed(0)} '
+              'body=${constraints.maxHeight.toStringAsFixed(1)} '
+              'rail=${railHeight.toStringAsFixed(1)} showRail=$showRail '
+              'useGrid=$useGrid screen=$screen displayPages=$displayPages '
+              'shownLimit=$shownLimit visible=${visible.length} '
+              'shown=${shown.length} snapshotHasMore=${snapshot?.hasMore}',
+        );
+        final hasMoreToShow =
+            shown.length < visible.length || (snapshot?.hasMore == true);
+        final showLoadMore =
+            !showingSearch && (loadingMore || hasMoreToShow);
         final hasLastVisible =
             lastPlayedId != null &&
-            visible.any((media) => media.id == lastPlayedId);
+            shown.any((media) => media.id == lastPlayedId);
+        // **The rail takes the initial focus unless we have somewhere better to
+        // put it.** `lastPlayedId` is set only by [MediaTabController.notePlayed],
+        // so on a fresh open it is null and the old `i == 0` rule sent the D-pad
+        // to the alphabetically/catalogurally first movie — under the Continue
+        // watching rail the user had just been watching things on, and past. The
+        // rail is what this tab is *about* when it exists, and it is the first
+        // thing drawn, so it is where a first focus belongs.
+        //
+        // Deliberately *not* overriding [hasLastVisible]: coming back from a
+        // details sheet should still land on the exact tile you left (and its
+        // own rail entry too, since it is by construction the newest one).
+        final railTakesFocus = showRail && !hasLastVisible;
+        // Exactly one autofocus candidate per tab, or the two widgets race on
+        // first frame and the winner depends on tree order.
         FocusNode? focusNodeFor(int i) => hasLastVisible
-            ? (visible[i].id == lastPlayedId ? firstFocusNode : null)
-            : (i == 0 ? firstFocusNode : null);
-        bool autofocusFor(int i) =>
-            hasLastVisible ? visible[i].id == lastPlayedId : i == 0;
+            ? (shown[i].id == lastPlayedId ? firstFocusNode : null)
+            : (i == 0 && !railTakesFocus ? firstFocusNode : null);
+        bool autofocusFor(int i) => hasLastVisible
+            ? shown[i].id == lastPlayedId
+            : (i == 0 && !railTakesFocus);
+        final railSliver = railSliverFor(autofocusFirst: railTakesFocus);
         if (!useGrid) {
           return CustomScrollView(
             controller: scrollController,
@@ -340,23 +547,25 @@ class MediaTabView extends StatelessWidget {
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
                 sliver: SliverList.builder(
-                  itemCount: visible.length + (showLoadMore ? 1 : 0),
+                  itemCount: shown.length + (showLoadMore ? 1 : 0),
                   itemBuilder: (context, i) {
-                    if (i == visible.length) {
+                    if (i == shown.length) {
                       return _MediaLoadMoreTile(
-                        snapshot: snapshot,
+                        canLoad: hasMoreToShow,
                         loading: loadingMore,
+                        focusNode: loadMoreFocusNode,
                         onPressed: onLoadMore,
                       );
                     }
                     return _MediaListTile(
-                      item: visible[i],
-                      favorite: isFavorite(visible[i].id),
+                      item: shown[i],
+                      favorite: isFavorite(shown[i].id),
+                      progress: resumeProgress[shown[i].id],
                       position: i + 1,
                       total: visible.length,
                       autofocus: autofocusFor(i),
                       focusNode: focusNodeFor(i),
-                      onTap: () => onOpenMedia(visible[i]),
+                      onTap: () => onOpenMedia(shown[i]),
                     );
                   },
                 ),
@@ -369,6 +578,11 @@ class MediaTabView extends StatelessWidget {
         // directional traversal walks a regular grid predictably, and
         // `SliverGridDelegateWithMaxCrossAxisExtent` can't express the
         // per-width `childAspectRatio` the fixed poster/text split needs.
+        //
+        // This instance is orientation-free on purpose: only `childAspectRatio`
+        // reads `posterAspectRatio`, so padding and the column ladder are the
+        // same numbers in both shapes and the tile width below is safe to
+        // compute once, outside the listener.
         final tileWidth = grid.tileWidth(constraints.maxWidth);
         return CustomScrollView(
           controller: scrollController,
@@ -377,35 +591,52 @@ class MediaTabView extends StatelessWidget {
             ?railSliver,
             SliverPadding(
               padding: grid.padding,
-              sliver: SliverGrid(
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: grid.columns,
-                  crossAxisSpacing: grid.crossAxisSpacing,
-                  mainAxisSpacing: grid.mainAxisSpacing,
-                  childAspectRatio: grid.childAspectRatio(
-                    tileWidth: tileWidth,
-                    textBudget: textBudget,
-                  ),
-                ),
-                delegate: SliverChildBuilderDelegate((context, i) {
-                  if (i == visible.length) {
-                    return _MediaLoadMoreCard(
-                      snapshot: snapshot,
-                      loading: loadingMore,
-                      onPressed: onLoadMore,
-                    );
-                  }
-                  return _MediaGridTile(
-                    item: visible[i],
-                    favorite: isFavorite(visible[i].id),
-                    position: i + 1,
-                    total: visible.length,
-                    autofocus: autofocusFor(i),
-                    focusNode: focusNodeFor(i),
-                    textBudget: textBudget,
-                    onTap: () => onOpenMedia(visible[i]),
+              // Listens rather than reading the notifier's value once: the tile
+              // is toggled from the Settings route pushed *over* this one, so
+              // nothing here rebuilds on its own and the cards would keep the
+              // old shape until some unrelated rebuild came along. Scoped to the
+              // grid alone — the rail's thumbnails and the list layout below are
+              // not cards, and stay as they are (see docs/player.md).
+              sliver: ListenableBuilder(
+                listenable: vodCardOrientation,
+                builder: (context, _) {
+                  final shaped = MediaGridMetrics.forSize(
+                    windowSize,
+                    orientation: vodCardOrientation.value,
                   );
-                }, childCount: visible.length + (showLoadMore ? 1 : 0)),
+                  return SliverGrid(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: shaped.columns,
+                      crossAxisSpacing: shaped.crossAxisSpacing,
+                      mainAxisSpacing: shaped.mainAxisSpacing,
+                      childAspectRatio: shaped.childAspectRatio(
+                        tileWidth: tileWidth,
+                        textBudget: textBudget,
+                      ),
+                    ),
+                    delegate: SliverChildBuilderDelegate((context, i) {
+                      if (i == shown.length) {
+                        return _MediaLoadMoreCard(
+                          canLoad: hasMoreToShow,
+                          loading: loadingMore,
+                          focusNode: loadMoreFocusNode,
+                          onPressed: onLoadMore,
+                        );
+                      }
+                      return _MediaGridTile(
+                        item: shown[i],
+                        favorite: isFavorite(shown[i].id),
+                        progress: resumeProgress[shown[i].id],
+                        position: i + 1,
+                        total: visible.length,
+                        autofocus: autofocusFor(i),
+                        focusNode: focusNodeFor(i),
+                        textBudget: textBudget,
+                        onTap: () => onOpenMedia(shown[i]),
+                      );
+                    }, childCount: shown.length + (showLoadMore ? 1 : 0)),
+                  );
+                },
               ),
             ),
           ],
@@ -483,20 +714,131 @@ String _continueWatchingSemantics(ContinueWatchingEntry entry) {
   return parts.join(', ');
 }
 
+/// How far a title has been watched, drawn as a bar across the bottom of its
+/// artwork — on the "Continue watching" rail's thumbnail and on a poster card in
+/// the grid.
+///
+/// **One widget for both, on purpose.** Same question ("how far through is
+/// this?"), so it gets one colour and one geometry: a green bar over a dark
+/// scrim. The rail used to draw it in [AppColors.accent], which is the *brand*
+/// hue — it reads as "this is an interactive control", not "this is your
+/// progress", and the moment a card drew the same bar in a second colour the two
+/// answers to the same question stopped agreeing. [AppColors.success] is the
+/// theme's existing "healthy / done" green, so nothing new is invented.
+///
+/// The scrim is what makes it legible: a bright poster (a snow field, a white
+/// title card) otherwise swallows a 4 px bar, and this sits *over* artwork
+/// rather than on the panel behind it. It fades from fully transparent so it
+/// costs no visible poster area above the bar.
+///
+/// **Absolutely positioned by both callers, never in a layout.** A poster card's
+/// cell is a fixed extent derived from `childAspectRatio` and a fixed
+/// [mediaTileTextBudget]; adding a row to the card would either change that
+/// extent (re-deriving every pinned metric) or clip. Inside the poster's own
+/// [Stack] it costs no geometry at all, which is why it is a sibling of the
+/// rating and favorite badges rather than a child of the text column.
+class WatchProgressBar extends StatelessWidget {
+  /// Watched fraction, 0..1. Clamped here so a bad value can only ever draw a
+  /// full or empty bar, never a `LinearProgressIndicator` assertion.
+  final double value;
+
+  /// Padding between the artwork's edges and the bar. The rail insets its bar
+  /// (with a taller top pad, so the scrim fades in above it); a card runs it
+  /// flush, which is the shape a viewer already reads as "this poster".
+  final EdgeInsets inset;
+
+  static const double _height = 4;
+  static const double _radius = 3;
+
+  const WatchProgressBar({
+    super.key,
+    required this.value,
+    this.inset = EdgeInsets.zero,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: inset,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.black.withValues(alpha: 0.0),
+            Colors.black.withValues(alpha: 0.7),
+          ],
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(_radius),
+        child: LinearProgressIndicator(
+          value: value.clamp(0.0, 1.0),
+          minHeight: _height,
+          backgroundColor: Colors.white.withValues(alpha: 0.3),
+          color: AppColors.success,
+        ),
+      ),
+    );
+  }
+}
+
 /// Horizontal "Continue watching" strip: poster tiles with a progress bar,
 /// newest first. One `FocusTraversalGroup` so the D-pad walks the rail as a
 /// row between the toolbar and the grid. Sized noticeably larger than the
 /// other rails so the title and remaining-time text stay legible on phones.
+/// Reports its child's laid-out size once per change, for the paging
+/// diagnostics. Purely a probe — it renders [child] unchanged.
+class _MeasureSize extends StatefulWidget {
+  final Widget child;
+  final ValueChanged<Size> onChange;
+  const _MeasureSize({required this.child, required this.onChange});
+  @override
+  State<_MeasureSize> createState() => _MeasureSizeState();
+}
+
+class _MeasureSizeState extends State<_MeasureSize> {
+  Size? _last;
+  @override
+  Widget build(BuildContext context) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final size = context.size;
+      if (size == null || size == _last) return;
+      _last = size;
+      widget.onChange(size);
+    });
+    return widget.child;
+  }
+}
+
 class _ContinueWatchingRail extends StatelessWidget {
   final List<ContinueWatchingEntry> entries;
   final ValueChanged<MediaItem> onResume;
   final ValueChanged<ContinueWatchingEntry> onRemove;
 
+  /// Autofocus the newest entry (index 0 — the rail is newest-first), so the
+  /// D-pad lands on the recents when this tab opens. Off in the loading/error/
+  /// empty body, which owns the focus itself.
+  final bool autofocusFirst;
+
   const _ContinueWatchingRail({
     required this.entries,
     required this.onResume,
     required this.onRemove,
+    this.autofocusFirst = false,
   });
+
+  /// The vertical space the rail occupies, so the media tab can subtract it when
+  /// deciding how many grid rows fit *on the first page* (the rail is a leading
+  /// sliver, so it eats into the first screen's grid area — and, with a
+  /// screen-sized page, ignoring it pushed the "Next page" card below the fold).
+  /// Mirrors the header + tile arithmetic in [build]/[_ContinueWatchingTile.height].
+  static double height(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final header = 8 + (scaler.scale(15) * 1.2).ceilToDouble() + 8;
+    return header + _ContinueWatchingTile.height(context);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -533,6 +875,7 @@ class _ContinueWatchingRail extends StatelessWidget {
               separatorBuilder: (_, _) => const SizedBox(width: 12),
               itemBuilder: (context, i) => _ContinueWatchingTile(
                 entry: entries[i],
+                autofocus: autofocusFirst && i == 0,
                 onTap: () => onResume(entries[i].item),
                 onRemove: () => onRemove(entries[i]),
               ),
@@ -595,10 +938,16 @@ class _ContinueWatchingTile extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onRemove;
 
+  /// See [_ContinueWatchingRail.autofocusFirst]. Only index 0 ever passes true;
+  /// the field is per-tile so the rail, not the caller, owns which entry is the
+  /// landing spot.
+  final bool autofocus;
+
   const _ContinueWatchingTile({
     required this.entry,
     required this.onTap,
     required this.onRemove,
+    this.autofocus = false,
   });
 
   @override
@@ -633,6 +982,7 @@ class _ContinueWatchingTile extends StatelessWidget {
             children: [
               FocusableCard(
                 onTap: onTap,
+                autofocus: autofocus,
                 debugLabel: 'media.continue.${item.id}',
                 // Spells out what the two visible runs compress: the series,
                 // then the episode by name, then position and time left. This
@@ -683,34 +1033,9 @@ class _ContinueWatchingTile extends StatelessWidget {
                                 left: 0,
                                 right: 0,
                                 bottom: 0,
-                                child: Container(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    6,
-                                    14,
-                                    6,
-                                    6,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        Colors.black.withValues(alpha: 0.0),
-                                        Colors.black.withValues(alpha: 0.7),
-                                      ],
-                                    ),
-                                  ),
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(3),
-                                    child: LinearProgressIndicator(
-                                      value: entry.position.progress,
-                                      minHeight: 4,
-                                      backgroundColor: Colors.white.withValues(
-                                        alpha: 0.3,
-                                      ),
-                                      color: AppColors.accent,
-                                    ),
-                                  ),
+                                child: WatchProgressBar(
+                                  value: entry.position.progress,
+                                  inset: const EdgeInsets.fromLTRB(6, 14, 6, 6),
                                 ),
                               ),
                             ],
@@ -924,8 +1249,8 @@ class _Thumb extends StatelessWidget {
         color: AppColors.textLo,
       ),
     );
-    final backdrop = item.backdrop;
-    final poster = item.poster;
+    final backdrop = cleanImageUrl(item.backdrop);
+    final poster = cleanImageUrl(item.poster);
     final image = (backdrop != null && backdrop.isNotEmpty)
         ? backdrop
         : (poster != null && poster.isNotEmpty)
@@ -965,6 +1290,12 @@ class _MediaListTile extends StatelessWidget {
   final FocusNode? focusNode;
   final VoidCallback onTap;
 
+  /// See [_MediaGridTile.progress]. On this layout the bar rides the bottom of
+  /// the 58x84 thumb rather than the card, because the row's height is set by
+  /// the text block beside it and a full-width bar under the row would need a
+  /// height this row does not have.
+  final double? progress;
+
   const _MediaListTile({
     required this.item,
     required this.favorite,
@@ -972,6 +1303,7 @@ class _MediaListTile extends StatelessWidget {
     required this.total,
     required this.autofocus,
     this.focusNode,
+    this.progress,
     required this.onTap,
   });
 
@@ -986,13 +1318,31 @@ class _MediaListTile extends StatelessWidget {
         if (item.year != null) item.year!,
         '$position of $total',
         if (favorite) 'Favorite',
+        if (progress != null) '${(progress! * 100).ceil()}% watched',
       ].join(', '),
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
           children: [
-            _Poster(item: item, width: 58, height: 84),
+            // The thumb's own [ClipRRect] is *below* [WatchProgressBar] so the
+            // bar sits on the artwork's clipped edge instead of hanging a pixel
+            // outside the rounded corner.
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Stack(
+                children: [
+                  _Poster(item: item, width: 58, height: 84),
+                  if (progress != null)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: WatchProgressBar(value: progress!),
+                    ),
+                ],
+              ),
+            ),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -1071,6 +1421,15 @@ class _MediaGridTile extends StatelessWidget {
   final bool autofocus;
   final FocusNode? focusNode;
 
+  /// How far this title has been watched, or null when nothing is in progress —
+  /// which is most cards, and every card on the series tab (see
+  /// [MediaTabController.resumeProgress] for why a series card has none).
+  ///
+  /// Read once per tile from the map the controller publishes, never fetched:
+  /// a card cannot ask the database, and a per-card read would be a query per
+  /// visible tile on a grid that can hold 200 of them.
+  final double? progress;
+
   /// Fixed height reserved for the text under the poster
   /// ([mediaTileTextBudget]) — the same value the grid's `childAspectRatio`
   /// was computed from, so the `Expanded` poster above it lands on
@@ -1087,9 +1446,17 @@ class _MediaGridTile extends StatelessWidget {
     required this.total,
     required this.autofocus,
     this.focusNode,
+    this.progress,
     required this.textBudget,
     required this.onTap,
   });
+
+  /// Whole percent, for the semantics label — a D-pad user cannot see the bar,
+  /// and "Resume" is the one thing about an in-progress title they would
+  /// otherwise have to guess. Rounded *up*, so 0.4% still reads "1%" rather than
+  /// claiming nothing is watched.
+  String get _progressSemantics =>
+      '${(progress! * 100).ceil()}% watched';
 
   @override
   Widget build(BuildContext context) {
@@ -1102,6 +1469,7 @@ class _MediaGridTile extends StatelessWidget {
         if (item.year != null) item.year!,
         '$position of $total',
         if (favorite) 'Favorite',
+        if (progress != null) _progressSemantics,
       ].join(', '),
       onTap: onTap,
       child: Padding(
@@ -1150,6 +1518,18 @@ class _MediaGridTile extends StatelessWidget {
                           ),
                           child: const FavoriteBadge(size: 16),
                         ),
+                      ),
+                    // Watched-so-far, flush across the poster's bottom edge.
+                    // **Inside this [Stack], not below it** — see
+                    // [WatchProgressBar]: the cell's extent is fixed by
+                    // `childAspectRatio`, so any row added to the card would
+                    // either move that extent or clip.
+                    if (progress != null)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: WatchProgressBar(value: progress!),
                       ),
                   ],
                 ),
@@ -1286,13 +1666,15 @@ class _RatingBadge extends StatelessWidget {
 }
 
 class _MediaLoadMoreTile extends StatefulWidget {
-  final MediaLibrarySnapshot? snapshot;
+  final bool canLoad;
   final bool loading;
+  final FocusNode? focusNode;
   final VoidCallback onPressed;
 
   const _MediaLoadMoreTile({
-    required this.snapshot,
+    required this.canLoad,
     required this.loading,
+    this.focusNode,
     required this.onPressed,
   });
 
@@ -1301,28 +1683,27 @@ class _MediaLoadMoreTile extends StatefulWidget {
 }
 
 class _MediaLoadMoreTileState extends State<_MediaLoadMoreTile> {
-  // Stateful purely to own this node: a plain `FilledButton` focus node
-  // carries no route key, so the root Back ladder read `''` from it and fell
-  // through to the exit prompt instead of climbing to the tabs.
-  late final FocusNode _focusNode = RoutedFocusNode('media.loadMore');
+  // Owned fallback for when the screen supplies no node: a plain `FilledButton`
+  // focus node carries no route key, so the root Back ladder read `''` from it
+  // and fell through to the exit prompt instead of climbing to the tabs.
+  final FocusNode _ownedNode = RoutedFocusNode('media.loadMore');
+  FocusNode get _node => widget.focusNode ?? _ownedNode;
 
   @override
   void dispose() {
-    _focusNode.dispose();
+    _ownedNode.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final snapshot = widget.snapshot;
     final loading = widget.loading;
-    final canLoad = snapshot?.hasMore == true;
-    final nextPage = snapshot == null ? null : snapshot.loadedPages + 1;
+    final canLoad = widget.canLoad;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Center(
         child: FilledButton.icon(
-          focusNode: _focusNode,
+          focusNode: _node,
           onPressed: canLoad && !loading ? widget.onPressed : null,
           icon: loading
               ? const SizedBox.square(
@@ -1334,9 +1715,7 @@ class _MediaLoadMoreTileState extends State<_MediaLoadMoreTile> {
             loading
                 ? 'Loading'
                 : canLoad
-                ? nextPage == null
-                      ? 'Load more'
-                      : 'Load page $nextPage'
+                ? 'Next page'
                 : 'All loaded',
           ),
         ),
@@ -1346,22 +1725,23 @@ class _MediaLoadMoreTileState extends State<_MediaLoadMoreTile> {
 }
 
 class _MediaLoadMoreCard extends StatelessWidget {
-  final MediaLibrarySnapshot? snapshot;
+  final bool canLoad;
   final bool loading;
+  final FocusNode? focusNode;
   final VoidCallback onPressed;
 
   const _MediaLoadMoreCard({
-    required this.snapshot,
+    required this.canLoad,
     required this.loading,
+    this.focusNode,
     required this.onPressed,
   });
 
   @override
   Widget build(BuildContext context) {
-    final canLoad = snapshot?.hasMore == true;
-    final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
     return FocusableCard(
       autofocus: false,
+      focusNode: focusNode,
       // Without an explicit label this minted the route key `FocusableCard`,
       // which is non-empty and not `media.`-prefixed — so the root Back ladder
       // matched neither its `media.` rung nor its empty-label recovery, and
@@ -1388,9 +1768,7 @@ class _MediaLoadMoreCard extends StatelessWidget {
               loading
                   ? 'Loading'
                   : canLoad
-                  ? nextPage == null
-                        ? 'Load more'
-                        : 'Load page $nextPage'
+                  ? 'Next page'
                   : 'All loaded',
               style: const TextStyle(color: AppColors.textLo),
             ),
@@ -1437,7 +1815,7 @@ class _Poster extends StatelessWidget {
             color: AppColors.textLo,
           ),
         );
-        final poster = item.poster;
+        final poster = cleanImageUrl(item.poster);
         if (poster == null || poster.isEmpty) return fallback;
         return ClipRRect(
           borderRadius: BorderRadius.circular(8),

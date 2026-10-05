@@ -146,6 +146,18 @@ public struct PlayerOpenRequest: Equatable, Sendable {
   public let canFavorite: Bool
   public let isFavorite: Bool
 
+  /// Device-wide player-chrome preferences (Settings → "Clock in the player" /
+  /// "Playback time in the player"), decoded into ``PlayerChromeState``'s
+  /// ``PlayerChromeState/showClock`` and ``PlayerChromeState/showPlaybackTimes``.
+  ///
+  /// Both **default to `true`** on decode, which is the point: these hide chrome
+  /// that is already drawn, so a Dart build that predates them — or any payload
+  /// that omits them — must render exactly what it renders today. The failure
+  /// direction here is the opposite of `canFavorite`/`isFavorite` above, which
+  /// fail *closed* because a button that does nothing is worse than no button.
+  public let showClock: Bool
+  public let showPlaybackTimes: Bool
+
   /// Debug-only integration-test soak: auto-close the controller after this
   /// many ms so `integration_test/player_soak_test.dart` can cycle it
   /// unattended. Nil unless Dart sent a positive value.
@@ -165,6 +177,8 @@ public struct PlayerOpenRequest: Equatable, Sendable {
     resumeMs: Int64 = 0,
     canFavorite: Bool = false,
     isFavorite: Bool = false,
+    showClock: Bool = true,
+    showPlaybackTimes: Bool = true,
     soakAutoCloseMs: Int64? = nil,
     epgNow: PlayerEpgEntry? = nil,
     epgNext: PlayerEpgEntry? = nil,
@@ -179,6 +193,8 @@ public struct PlayerOpenRequest: Equatable, Sendable {
     self.resumeMs = resumeMs
     self.canFavorite = canFavorite
     self.isFavorite = isFavorite
+    self.showClock = showClock
+    self.showPlaybackTimes = showPlaybackTimes
     self.soakAutoCloseMs = soakAutoCloseMs
     self.epgNow = epgNow
     self.epgNext = epgNext
@@ -205,6 +221,10 @@ public struct PlayerOpenRequest: Equatable, Sendable {
     resumeMs = max(0, PlayerOpenRequest.int64(map["resumeMs"]) ?? 0)
     canFavorite = map["canFavorite"] as? Bool ?? false
     isFavorite = map["isFavorite"] as? Bool ?? false
+    // Fail **open**, unlike the two above: an absent key is an older Dart build,
+    // and this must render today's chrome rather than lose a badge.
+    showClock = map["showClock"] as? Bool ?? true
+    showPlaybackTimes = map["showPlaybackTimes"] as? Bool ?? true
 
     let soak = PlayerOpenRequest.int64(map["soakAutoCloseMs"]) ?? 0
     soakAutoCloseMs = soak > 0 ? soak : nil

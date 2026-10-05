@@ -85,6 +85,79 @@ final class PlayerChromeStateTests: XCTestCase {
     XCTAssertEqual(state.durationLabel, "0:00")
   }
 
+  // MARK: - Chrome preferences
+
+  /// The two device-wide preferences (Settings → "Clock in the player" / "Playback
+  /// time in the player") arrive on `open` and hide chrome that is otherwise
+  /// drawn, so every assertion here is about which half of a pair disappears:
+  /// `showClockBadge` for the top bar, and `showTimeLabels` for the scrubber
+  /// row's two texts.
+  func testAFreshStateDrawsTheClockAndTheTimeReadout() {
+    var state = PlayerChromeState()
+    state.isLive = false
+    XCTAssertTrue(state.showClockBadge)
+    XCTAssertTrue(state.showTimeLabels)
+
+    state.isLive = true
+    XCTAssertTrue(state.showClockBadge, "the clock badge is not TV-gated here")
+  }
+
+  func testHidingTheClockRemovesOnlyTheBadge() {
+    var state = PlayerChromeState()
+    state.showClock = false
+
+    XCTAssertFalse(state.showClockBadge)
+    // The rest of the top bar and the transport row are untouched: the clock is
+    // one badge, not "the top bar".
+    XCTAssertTrue(state.showScrubber)
+    XCTAssertTrue(state.showTimeLabels)
+    XCTAssertNil(state.resolutionBadge, "unrelated badges are not implied")
+  }
+
+  /// The bar and its readouts are separable **here too** — the scrubber must stay
+  /// seekable, which is the same trade Kotlin's `Scrubber` and the Windows GDI
+  /// overlay make. A gate on the whole row would take seeking with it.
+  func testHidingTheTimeReadoutKeepsTheScrubber() {
+    var state = PlayerChromeState()
+    state.isLive = false
+    state.showPlaybackTimes = false
+
+    XCTAssertFalse(state.showTimeLabels)
+    XCTAssertTrue(state.showScrubber)
+    // The labels themselves are still computed — they are just not drawn, so a
+    // surface that wants to read them (semantics, a future compact layout) does
+    // not have to re-derive the format.
+    XCTAssertEqual(state.positionLabel, "0:00")
+  }
+
+  /// Live has no position/duration readout to hide, so the preference is inert
+  /// there — and, importantly, cannot switch the scrubber *on*.
+  func testTheTimeReadoutPreferenceIsInertOnLive() {
+    var state = PlayerChromeState()
+    state.isLive = true
+    state.showPlaybackTimes = false
+
+    XCTAssertFalse(state.showTimeLabels)
+    XCTAssertFalse(state.showScrubber)
+  }
+
+  func testTheChromePreferencesArriveOnTheOpenPayload() {
+    let hidden = PlayerOpenRequest(
+      url: "https://example.test/live/1.m3u8",
+      showClock: false,
+      showPlaybackTimes: false
+    )
+    var state = PlayerChromeState(request: hidden)
+    XCTAssertFalse(state.showClockBadge)
+    XCTAssertFalse(state.showTimeLabels)
+
+    // And an `open` that never mentioned them leaves the chrome as it was.
+    let plain = PlayerOpenRequest(url: "https://example.test/live/1.m3u8")
+    state = PlayerChromeState(request: plain)
+    XCTAssertTrue(state.showClockBadge)
+    XCTAssertTrue(state.showTimeLabels)
+  }
+
   func testProgressFractionClampsAndDividesByDuration() {
     var state = PlayerChromeState()
     state.durationMs = 200_000

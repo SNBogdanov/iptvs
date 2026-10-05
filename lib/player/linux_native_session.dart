@@ -10,6 +10,7 @@ import '../data/net.dart';
 import '../sources/source.dart';
 import 'buffer_preset.dart';
 import 'mpv_options.dart';
+import 'player_chrome_prefs.dart';
 
 /// Native Linux presentation backend selected from the desktop session.
 enum LinuxNativeBackend { wayland, x11 }
@@ -628,6 +629,15 @@ class LinuxNativeSession {
       'liveSynced': liveSynced,
       'aspectLabel': aspectLabel,
       'reconnecting': reconnecting,
+      // Device-wide chrome preferences. Read here rather than threaded through
+      // the four call sites: they are constant for a session (Settings is
+      // unreachable from the player), so every push carrying the same two
+      // values is correct, and a caller that forgot an argument would silently
+      // draw chrome the user had turned off. Both **fail open to on**, which is
+      // what the Lua side defaults to too — so a Dart build that predates these
+      // keys leaves the OSD drawing exactly what it draws today.
+      'showClock': showPlayerClock.value,
+      'showPlaybackTimes': showPlaybackTimes.value,
       // The Lua badge derives PQ/HLG from mpv properties itself but cannot
       // see ST2094-40 scene metadata semantics — Dart's probe is the single
       // authority for the HDR10+ upgrade (docs/player.md).

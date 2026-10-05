@@ -22,7 +22,10 @@ import 'data/net.dart' show redactText;
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
+import 'data/vod_card_orientation.dart';
+import 'player/player_chrome_prefs.dart';
 import 'player/tray.dart';
+import 'player/window_placement.dart';
 import 'screens/profile_pick_screen.dart';
 import 'theme.dart';
 
@@ -54,7 +57,25 @@ Future<void> main() async {
   if (defaultTargetPlatform == TargetPlatform.windows) {
     unawaited(applyPersistedCloseToTray());
     unawaited(loadAlwaysOnTopPreference());
+    // Opens at the remembered position/size and starts recording it. Also fired
+    // ahead of the boot group: a restored rectangle is only correct before the
+    // first frame paints into it, and the keychain read overlaps the others.
+    startWindowPlacementTracking();
   }
+  // Cross-platform, unlike the three above: the media grid's card shape. Fills
+  // the notifier the grid reads, and until it answers the grid draws the default
+  // portrait shape — which is what an untouched install uses anyway, so the
+  // first frame is never drawn in the wrong shape.
+  unawaited(loadVodCardOrientation());
+  // The player's clock badge and VOD time readout, the other two device-wide
+  // chrome preferences. Also fired, not awaited, and for a stronger reason than
+  // the card shape above: nothing reads these until a player route is opened,
+  // which is at least a profile pick and a catalogue load away — so the read
+  // has always landed before any chrome exists, while awaiting it would put a
+  // keychain read on the critical path to the first frame for a value that
+  // cannot be consumed yet. The notifiers start at true, which is what an
+  // untouched install draws anyway.
+  unawaited(loadPlayerChromePrefs());
   final store = SourceStore();
   // Cloud init, opening the database and reading the source list are mutually
   // independent — only the identity migration below needs the database and the

@@ -13,6 +13,7 @@
 
 import 'package:flutter/rendering.dart' show Size;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/data/vod_card_orientation.dart';
 import 'package:iptvs/screens/media_tab_view.dart';
 import 'package:iptvs/theme.dart' show kMediaPosterTargetWidth;
 
@@ -86,5 +87,97 @@ void main() {
       textBudget: 90,
     );
     expect(tallerText, lessThan(ratio));
+  });
+
+  group('card shape', () {
+    // The user's global VOD/series card-shape preference. One number in the
+    // grid, but two things had to be decided deliberately rather than falling
+    // out of the change, so both are pinned here.
+    test('portrait is the default, not merely a fallback', () {
+      // Every metric below was pinned against 2:3, so a default that quietly
+      // meant landscape would change the grid on every untouched install.
+      final metrics = MediaGridMetrics.forSize(const Size(1280, 800));
+      expect(metrics.posterAspectRatio, closeTo(2 / 3, 1e-9));
+      expect(
+        MediaGridMetrics.forSize(
+          const Size(1280, 800),
+          orientation: VodCardOrientation.portrait,
+        ).posterAspectRatio,
+        metrics.posterAspectRatio,
+      );
+    });
+
+    test('landscape cards are shorter, never wider than portrait', () {
+      final portrait = MediaGridMetrics.forSize(
+        const Size(1280, 800),
+        orientation: VodCardOrientation.portrait,
+      );
+      final landscape = MediaGridMetrics.forSize(
+        const Size(1280, 800),
+        orientation: VodCardOrientation.landscape,
+      );
+      expect(landscape.posterAspectRatio, closeTo(16 / 9, 1e-9));
+      final tile = portrait.tileWidth(1280);
+      expect(
+        landscape.childAspectRatio(tileWidth: tile, textBudget: 60),
+        greaterThan(portrait.childAspectRatio(tileWidth: tile, textBudget: 60)),
+      );
+    });
+
+    test('the column ladder is identical in both shapes', () {
+      // Density is a width decision; the setting changes the card's height, not
+      // how many fit across. If this ever moved, choosing landscape would also
+      // silently change tile *width*, which would re-decode every poster in the
+      // catalogue (memCacheWidth is part of the cache key) for no stated reason.
+      for (final width in const [600.0, 960.0, 1280.0, 1920.0, 3840.0]) {
+        expect(
+          MediaGridMetrics.forSize(
+            Size(width, 900),
+            orientation: VodCardOrientation.landscape,
+          ).columns,
+          MediaGridMetrics.forSize(Size(width, 900)).columns,
+          reason: '$width px viewport',
+        );
+      }
+    });
+
+    test('landscape stays inside the clamp across the whole ladder', () {
+      // A 16:9 band is short enough that a large text scale could otherwise
+      // push the computed ratio past the guard, and the clamp would silently
+      // squash the poster instead of growing the cell.
+      for (final width in const [600.0, 960.0, 1280.0, 1920.0, 3840.0]) {
+        final metrics = MediaGridMetrics.forSize(
+          Size(width, 900),
+          orientation: VodCardOrientation.landscape,
+        );
+        for (final textBudget in const [40.0, 60.0, 90.0, 140.0]) {
+          final ratio = metrics.childAspectRatio(
+            tileWidth: metrics.tileWidth(width),
+            textBudget: textBudget,
+          );
+          expect(ratio, inInclusiveRange(0.2, 2.0));
+          expect(
+            ratio,
+            lessThan(2.0),
+            reason: '$width px / $textBudget px text hit the clamp',
+          );
+        }
+      }
+    });
+
+    test('a taller text budget never eats the poster in either shape', () {
+      for (final orientation in VodCardOrientation.values) {
+        final metrics = MediaGridMetrics.forSize(
+          const Size(1280, 800),
+          orientation: orientation,
+        );
+        final tile = metrics.tileWidth(1280);
+        expect(
+          metrics.childAspectRatio(tileWidth: tile, textBudget: 120),
+          lessThan(metrics.childAspectRatio(tileWidth: tile, textBudget: 40)),
+          reason: '$orientation',
+        );
+      }
+    });
   });
 }

@@ -279,20 +279,61 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   episode -> season -> series by `readSeriesTitlesForEpisodes` — an episode row's own
   `title` is the *episode* name, so a rail of those read as unrelated titles. The tile has exactly
   two single-line runs and its rail height is derived from that, so the episode name lives in the
-  semantics label rather than a third line). **The movie and series grids are
+  semantics label rather than a third line). **A started, unfinished movie card carries a green
+  watched-progress bar across the bottom of its poster** — `WatchProgressBar`, one shared widget
+  for the card *and* the rail (the rail moved off `AppColors.accent` onto `AppColors.success` so
+  the two agree). It's a `Positioned` child **inside the poster's `Stack`**, which is what keeps
+  `childAspectRatio`, `textBudget` and `memCacheWidth` untouched; a bar below the poster would make
+  the cell geometry follow a value that changes while you scroll. No bar at the end of a film
+  because `playback_positions` has no row by then (`kFinishedFraction` 95%, sub-10 s ignored), not
+  by a rule in the widget. **Movie tab only** — a movie row's `itemId` *is* the card's id, while a
+  series tab's rows are episodes and its grid lists series, so `_loadResumeProgress` publishes an
+  empty map there rather than an episode-keyed one that can never match a card (which would read as
+  the feature working and invite an invented "average of your started episodes" aggregate).
+  **The read runs *after* the rail publishes, not before** — `load()` calls
+  `loadContinueWatching()` unawaited, so an extra round trip ahead of the rail pushed the rail's own
+  publish a tick later and made `test/media_tab_controller_test.dart`'s generation tests flaky (they
+  gate on one `_flush()`); the map lands as an additive `mapEquals`-guarded publish, and `_set` does
+  not compare, so that guard is load-bearing. It fails soft. Pinned by the `card progress` group in
+  `test/media_tab_controller_test.dart`, `test/media_progress_bar_test.dart`, and the DB group in
+  `test/persistence_test.dart`; detail: docs/player.md "The card's watched-progress bar".
+  **The movie and series grids are
    reorderable; live, the Continue Watching rail and the season/episode lists
    deliberately are not** (`media_sort.dart`, `MediaTabController.sort`). The five modes are
    release date both ways (default: newest first), name both ways, and **"As provided"** — the escape
    hatch back to the panel's own arrangement, since a portal with deliberate grouping has a reason for
    its order. The choices are **per VOD tab and session-scoped**, not persisted: no preference key, no
-   cloud surface, nothing for another device to agree about. **One "load more" press is exactly one
-   page** (`_mediaPagesPerLoad` = 1), because the control is labelled `Load page ${loadedPages + 1}` —
-   at 3 it advanced by three, so a Stalker portal (15 rows a page) appended ~40 cards and the button
-   then offered page 5, the label and the request disagreeing in plain sight. Note the two load paths
-   still record the page differently, and must not be "tidied" into agreement: `loadMedia` stores the
-   **requested** page (`loadedPages = page`) while `loadMoreMedia` stores the page the provider
-   **echoed** (`fetched.page`), because a portal that renumbers is authoritative only mid-stream. Pinned
-   by `test/media_paging_test.dart`. Dates come from `MediaItem.year`, a
+   cloud surface, nothing for another device to agree about. **A sorted mode loads the whole catalogue
+   (`loadAll`), because global release-date ordering needs every page** — so paging there is a pure
+   *display window*: `MediaTabView.displayPages` (owned per kind by `ChannelListScreen._mediaDisplayPages`)
+   reveals page `p` at **`p * screenSize - 1` items, because the "Next page" card takes the last cell
+   of every screen** — so the card always sits bottom-right (page 1 = 23 items of a 24-cell screen,
+   page 2 = 47, not 24/48). The screenful is computed from what actually fits the viewport
+   (`MediaTabView._mediaPageSize` — grid columns × visible rows, or the list's visible rows), and a row
+   counts only when **at least half of it is visible**, so a sliver of the next row is not "fitting".
+   Because the screenful is re-read every build, a resize re-lands the card on the last row with no
+   stored bookkeeping, and the card carries **no page number** (a number was wrong after a resize). A
+   provider-order ("As provided") tab still fetches a page at a time (`_mediaPagesPerLoad` = 1) and its
+   "Next page" also pulls the next page when the controller has unfetched pages. The window resets to
+   one screen on every dataset-replacing load, category change and sort change. Note the two fetch
+   paths still record the page differently, and must not be "tidied" into agreement: `loadMedia` stores
+   the **requested** page (`loadedPages = page`) while `loadMoreMedia` stores the page the provider
+   **echoed** (`fetched.page`), because a portal that renumbers is authoritative only mid-stream.
+   Pinned by `test/media_paging_test.dart` and `test/media_display_paging_test.dart`. **Card shape is a global device preference, portrait (2:3) or
+   landscape (16:9)** (`VodCardOrientation`, `AppSettingsStore`, cycled in Settings), and the whole
+   setting is one number: `MediaGridMetrics.posterAspectRatio` is an instance field set by
+   `forSize`'s `orientation` argument, which **defaults to portrait** because the column ladder and
+   every pinned metric were established against 2:3. `childAspectRatio` already derives the cell
+   height from that ratio plus a fixed `textBudget`, so landscape is just a shorter cell. **The
+   column ladder must stay width-only** — tile width feeds `memCacheWidth`, which is part of the
+   image cache key, so moving it re-decodes every poster for a preference that only claims to change
+   height. The grid **listens** (`ListenableBuilder` on the notifier) rather than reading once: the
+   tile is toggled from the Settings route pushed *over* the media tab, so nothing there rebuilds on
+   its own. The Continue Watching rail stays 16:9 in both modes (its thumbnails are video frames,
+   already landscape) and the narrow list thumb stays 2:3 (sized to the text beside it) — neither is
+   a card. Pinned by `test/vod_card_orientation_test.dart`, the shape group in
+   `test/media_grid_metrics_test.dart`, and the both-shapes sweep in `test/layout_overflow_test.dart`;
+   detail: docs/player.md "VOD/series card shape". Dates come from `MediaItem.year`, a
    provider-supplied **`String?`** holding ISO `2026-09-29`, dotted/slashed `29.09.2026`, a bare
    `2026`, or something unparseable — so `releaseSortKey` normalises shape into one integer
    (`yyyyMMdd`) and **an unparseable row sorts last in both directions**, never as year 1: "unknown"
@@ -308,8 +349,13 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `epg_grid_screen.dart` (the TV-guide timeline, selection-cursor model) — both navigation models
   are documented in docs/tv-navigation.md. `sources_screen.dart` manages provider configs
   (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`); `source_settings_screen.dart`
-  toggles a source's categories and edits advanced catch-up timezone/offset/window overrides
-  (persisted on `SourceConfig.settings`); its category rows are **lazy slivers**, because
+  toggles a source's categories, edits advanced catch-up timezone/offset/window overrides, and cycles
+  the per-source **catalogue refresh interval** (`settings['refreshInterval']`, startup/6/12/24/48 h,
+  default 24 — `lib/sources/refresh_interval.dart` + `SourceRefreshStore`); it refreshes **channels +
+  VOD, never the EPG**, runs after the cached load (never instead of it), is decided once per screen
+  by the pure `planSourceRefresh`, and stores *when it last ran* device-locally in the keychain, not in
+  `settings` (which rides the cloud). A manual refresh resets that timestamp. See docs/sources.md
+  "Scheduled catalogue refresh". Those edits are persisted on `SourceConfig.settings`; its category rows are **lazy slivers**, because
   `ListView(children: [...])` builds every child up front and a portal with thousands of
   categories rebuilt all of them on every keystroke and every toggle — the D-pad took seconds to
   answer. The filtered lists are cached on the query and the hidden-id set is resolved once per
@@ -612,6 +658,19 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   tabs' error bodies are now `SourceErrorView` (`widgets/source_error_view.dart`), whose retry
   autofocuses — safe because that body only mounts on a failed load, which replaces the list
   wholesale. Pinned by `test/source_error_view_test.dart`.
+- **A media tab opens its focus on its Continue-watching rail, when it has one.** The movies/series
+  tab is ordinary focus nodes, but its *initial* one is a priority rule (`railTakesFocus` in
+  `media_tab_view.dart`): rail drawn + nothing played this session → the rail's newest entry;
+  rail drawn + `lastPlayedId` still visible → **that grid tile, unchanged on purpose** (returning
+  from a details sheet must land where you left); no rail → grid item 0 (the old behaviour);
+  searching → the results (the rail isn't drawn); loading/error/empty body → **not the rail**, the
+  body's own action owns it. The rail used to be unfocusable entirely (no `autofocus`, no focus
+  node) while the grid's `else i == 0` sent a fresh open to the catalog's *first* title with the
+  recents drawn right above the cursor. **Exactly one autofocus candidate per tab** is part of the
+  rule — two racing ones are decided by tree order — so both sites are gated on the same flag, and
+  the rail's sliver is built by a closure because the answer is only known inside the
+  `LayoutBuilder`. Pinned by `test/media_tab_focus_test.dart` (asserts the autofocus *set*, and real
+  `hasFocus`). Detail: docs/tv-navigation.md "Where a media tab opens its focus".
 - **Typed channel numbers are one shared entry, and the coordinator does not perform the jump.**
   `ChannelNumberEntry` (`screens/channel_number_entry.dart`) owns the digits, the match, the commit
   rules and the chip, and both surfaces that accept a number (the live list and the fullscreen
@@ -959,11 +1018,18 @@ Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when 
 decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR), Windows (native
 HWND surface, mpv d3d11 — for HDR; a same-channel **SDR** preview→fullscreen stays on the embedded
 texture for a seamless handoff via `preferWindowsEmbedded`, escalating embedded→native once on
-PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses). **Every Windows launch site
-passes `preferWindowsEmbedded` explicitly** (`Platform.isWindows` for VOD/catch-up/preview-less
-live): the default stays false because the *policy* belongs to the caller, and leaving it at the
-default is what made movies and series play in a second window — mpv's video goes to its own child
-HWND, the GDI controls to an owned `WS_POPUP`, and neither is the Flutter route on screen., and iOS (**implemented,
+PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses). **VOD, catch-up and
+preview-less live open on the native HWND surface** — they deliberately do *not* pass
+`preferWindowsEmbedded`, so the constructor default (false) leaves them native. That is the 0.1.63
+behaviour and the one that plays correctly: forcing them onto the embedded texture (a local
+experiment) showed VOD as a black picture with working audio, and was reverted. Only the SDR adopted
+preview→fullscreen handoff passes `preferWindowsEmbedded`
+(`decision.adoptsEmbeddedPreview && Platform.isWindows && !streamLikelyHdr`); an HDR one escalates to
+the real D3D11 surface. **Both Windows surfaces run `hwdec=auto-copy`, not `auto-safe`**, on their
+respective paths (`lib/player/hwdec_policy.dart` for the embedded controller, `player_screen.dart`'s
+`_configureNativePlayer` for the native one): `auto-safe` negotiates d3d11va zero-copy, which loses
+the bottom chroma rows and draws the green stripe. See docs/player.md "The embedded Windows surface
+asks for `hwdec=auto-copy`" and the native paragraph after it., and iOS (**implemented,
 on-device validation pending** — a presented `UIViewController` owning an `AVPlayerLayer`, the
 `HdrPlayerActivity` analogue: **AVPlayer default** for real HDR/PiP/AirPlay, **libmpv via
 `media_kit` fallback**, always SDR on iOS, for containers AVFoundation refuses; see docs/ios.md
@@ -993,6 +1059,21 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   on the app root, plus a runner-side `WM_KEYDOWN`/`VK_F12` for the native HDR surface) and just calls
   `hideToTray`. A global Settings screen (avatar menu → Settings) hosts the close-to-tray, random
   zapping and always-on-top-in-fullscreen preferences in `AppSettingsStore`.
+- **Windows remembers the window's position and size** (`lib/player/window_placement.dart`), on by
+  default. Dart owns the record (keychain, `AppSettingsStore`) and the runner owns the HWND, so the whole
+  native surface is `getWindowPlacement`/`setWindowPlacement` on `iptvs/native_hdr_player` — the
+  **frame** rect in physical pixels (`GetWindowRect`, never `GetClientRect`: client coordinates shave
+  the border off on every run), plus `IsZoomed`. Three rules are load-bearing. **Recording is by
+  *moment*, never `WM_MOVE`** (a keychain write per drag frame): the tray hide (`silenceRequest`, where
+  `GetWindowRect` still answers) and `paused`/`detached`/`hidden`. **A monitor can be gone**, so the
+  runner requires the rect to still land on one via `MonitorFromRect` + **`MONITOR_DEFAULTTONULL`**
+  (`NEAREST` would accept a detached monitor, and a window restored onto one is the failure that needs no
+  bug report — the app looks like it did not start); a refusal is `false`, not an exception, and the
+  runner's own startup placement stands. **A malformed record is discarded whole, never half-applied**,
+  and `maximized` must be a real `bool` — it picks `SW_MAXIMIZE` vs an explicit rect, so coercing a
+  corrupted value to `false` would open a maximized window as a resizable one at the maximized rect.
+  Turning the setting off deletes the record; a surviving record is still not applied. Pinned by
+  `test/window_placement_test.dart`; detail: docs/player.md "System tray icon".
 - **Windows: the runner sizes mpv's VO window itself** (`ResyncNativeVideoRenderer`) — never rely on
   mpv's `--wid` parent hook. mpv reaches `ResizeBuffers` only via a real `WM_SIZE` on its child HWND
   (`VO_EVENT_RESIZE`), and its `EqualRect` early-out never revisits a size it missed: a dropped edge
@@ -1062,6 +1143,16 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   list, so a zap is remembered as the last channel too. A failure to read it is a log line, never a
   snackbar: the app is fully usable starting normally. Pinned by `test/last_channel_resume_test.dart`.
 
+- **Two device-wide preferences hide the clock badge and the VOD time readout, and the shared
+  overlay keeps both on screen while the chrome is down.** `showPlayerClock` /
+  `showPlaybackTimes` (Settings, `lib/player/player_chrome_prefs.dart`; default-on, only an explicit
+  `false` written) gate the top-bar clock and the two texts either side of the VOD scrubber — hiding
+  the readout keeps the scrubber. When the chrome auto-hides, `player_overlay.dart`'s
+  `_persistentHud` draws the clock top-right and the readout bottom-right (`IgnorePointer`), so they
+  are readable *during playback* rather than only while the mouse moves. The preference reaches every
+  surface (`showClock`/`showPlaybackTimes` on the native payloads); the always-on HUD is implemented
+  on the embedded/shared overlay, with the native surfaces applying it to their chrome only so far.
+  See docs/player.md "Player chrome preferences".
 - **The live chrome is one layout on every surface that draws its own overlay.** Where the VOD
   scrubber sits, live gets a three-row EPG strip (programme title + `HH:mm – HH:mm`, progress bar,
   `Next · HH:mm – HH:mm · title`); LIVE is a **top-bar badge**, and the badges read source, LIVE,

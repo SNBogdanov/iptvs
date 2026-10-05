@@ -92,6 +92,30 @@ class PlayerUiState(
     /** True on Android TV (drives the clock badge, hidden on phones). */
     var isTv by mutableStateOf(isTv)
 
+    /**
+     * Whether the top bar draws its wall-clock badge (Settings → "Clock in the
+     * player"), seeded from `EXTRA_SHOW_CLOCK` on the open Intent.
+     *
+     * **Separate from [isTv]**, which answers a different question: whether a
+     * clock belongs here at all. Android's badge is TV-only because a phone
+     * already shows the system clock in its status bar, so this only ever
+     * *removes* the badge where it exists — turning it on does not give a phone
+     * one. Every other surface draws the badge unconditionally and gates only
+     * on this.
+     */
+    var showClock by mutableStateOf(true)
+
+    /**
+     * Whether the VOD scrubber draws its position/duration text (Settings →
+     * "Playback time in the player"), seeded from `EXTRA_SHOW_TIMES`.
+     *
+     * Hides the two labels and keeps the slider, matching the Windows GDI
+     * overlay and iOS: the bar stays draggable, so this costs an at-a-glance
+     * position rather than the ability to seek. Live has no scrubber, so this
+     * has nothing to answer there.
+     */
+    var showPlaybackTimes by mutableStateOf(true)
+
     /** Live EPG now/next snapshot; null for VOD. */
     var epgNow by mutableStateOf(epgNow)
     var epgNext by mutableStateOf(epgNext)

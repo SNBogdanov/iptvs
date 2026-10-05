@@ -437,7 +437,7 @@ private fun TopBadges(state: PlayerUiState, nowMillis: Long) {
     state.resolutionBadge()?.let { Badge(it) }
     state.hdrBadge()?.let { Badge(it, accent = true) }
     state.fpsBadge()?.let { Badge(it) }
-    if (state.isTv) Badge(formatClock(nowMillis))
+    if (state.isTv && state.showClock) Badge(formatClock(nowMillis))
 }
 
 @Composable
@@ -693,13 +693,18 @@ private fun Scrubber(
 ) {
     val duration = state.durationMs.coerceAtLeast(1)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            formatTime(state.positionMs),
-            color = PlayerColors.TextHi,
-            fontFamily = InterFontFamily,
-            fontSize = 13.sp,
-            modifier = Modifier.width(58.dp),
-        )
+        // The labels are hidden rather than the row dropped, and the slider keeps
+        // its weight — a hidden readout leaves the bar exactly where it was, so
+        // toggling the preference reflows nothing and seeking still works.
+        if (state.showPlaybackTimes) {
+            Text(
+                formatTime(state.positionMs),
+                color = PlayerColors.TextHi,
+                fontFamily = InterFontFamily,
+                fontSize = 13.sp,
+                modifier = Modifier.width(58.dp),
+            )
+        }
         SlimSlider(
             value = (state.positionMs.toFloat() / duration).coerceIn(0f, 1f),
             onValueChange = { fraction ->
@@ -709,13 +714,15 @@ private fun Scrubber(
             modifier = Modifier.weight(1f),
             step = 0.02f, // ~2% per D-pad press for quicker scrubbing
         )
-        Text(
-            formatTime(state.durationMs),
-            color = PlayerColors.TextLo,
-            fontFamily = InterFontFamily,
-            fontSize = 13.sp,
-            modifier = Modifier.padding(start = 8.dp),
-        )
+        if (state.showPlaybackTimes) {
+            Text(
+                formatTime(state.durationMs),
+                color = PlayerColors.TextLo,
+                fontFamily = InterFontFamily,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
     }
 }
 

@@ -198,6 +198,25 @@ class LibraryRepository {
     return snapshot;
   }
 
+  /// Force-refreshes the **live catalogue only**, deliberately without forcing
+  /// the EPG.
+  ///
+  /// This is the auto-refresh path (`SourceRefreshInterval`): it exists so the
+  /// scheduled channels+VOD refresh can re-fetch the channel list without
+  /// dragging a full guide download behind it. [load]'s `forceRefresh` makes
+  /// `_epgNeedsRefresh` return true, so reusing [load] here would force an XMLTV
+  /// fetch on every auto-refresh — exactly the coupling the guide's own
+  /// freshness window exists to avoid. The EPG is still refreshed by its normal
+  /// schedule; nothing here touches `epg_synced_at`.
+  Future<LibrarySnapshot> refreshCatalog() async {
+    final token = loadToken;
+    await source.connect();
+    if (source is RefreshableSource) {
+      (source as RefreshableSource).invalidate();
+    }
+    return _loadChannels(forceRefresh: true, token: token);
+  }
+
   /// Whether the cached guide is old enough (or the load forced enough) to be
   /// worth re-fetching.
   Future<bool> _epgNeedsRefresh(bool forceRefresh) async {

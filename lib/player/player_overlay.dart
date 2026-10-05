@@ -8,10 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../data/net.dart' show cleanImageUrl;
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/image_utils.dart';
 import 'playback_audio_session.dart';
+import 'player_chrome_prefs.dart';
 import 'zap_quick_list.dart';
 
 /// The narrow slice of a media_kit [Player] the embedded overlay reads and
@@ -1263,6 +1265,12 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           // the fixed-offset info panel — the tree Linux and Windows ship.
           // Touch replaces all three with one full-height column, so the panel
           // is banded between the bars by construction (see [_touchChrome]).
+          // Persistent clock/time HUD, drawn only while the chrome is down:
+          // with the bars up their own clock badge and time readout already
+          // show, so this is the same information surviving the auto-hide —
+          // which is exactly what the two device-wide preferences are for.
+          // Behind the zap banner and the quick list, both of which cover it.
+          if (!_visible) _persistentHud(),
           _zapBanner(),
           _quickListPanel(context),
           if (!widget.touch) ...[
@@ -1475,7 +1483,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       if (resolution != null) _badge(resolution),
       if (hdr != null) _badge(hdr),
       if (fps != null) _badge(fps),
-      _badge(playerClockLabel(DateTime.now(), dated: !widget.touch)),
+      // Read synchronously rather than through a ListenableBuilder: the only
+      // writer is the settings toggle, and Settings is unreachable from a
+      // player route, so a listener here could never fire. Same reason
+      // `channel_list_screen` reads `alwaysOnTopEnabled.value` for its own
+      // one-shot decisions.
+      if (showPlayerClock.value)
+        _badge(playerClockLabel(DateTime.now(), dated: !widget.touch)),
     ];
   }
 
@@ -1579,7 +1593,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                   }),
                 ],
                 _volumeControls(context, showSlider: !compact),
-                if (!widget.isLive)
+                if (!widget.isLive && showPlaybackTimes.value)
                   // Flexible wherever the row can be width-starved: always
                   // under touch, and on the pointer path only once it is
                   // narrow enough to take the `Expanded`-transport branch.
@@ -2144,7 +2158,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     if (identity == null && z.digits.isEmpty && z.message == null) {
       return const SizedBox.shrink();
     }
-    final logo = z.logoUrl;
+    final logo = cleanImageUrl(z.logoUrl);
     final logosDisabled = debugDisableNetworkChannelLogos;
     final showLogo = !logosDisabled && logo != null && logo.isNotEmpty;
     return Row(
@@ -2545,6 +2559,72 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     maxLines: 1,
     overflow: TextOverflow.ellipsis,
     style: const TextStyle(color: Colors.white70),
+  );
+
+  /// The clock (top-right) and the VOD position/duration (bottom-right) that
+  /// stay on screen while the chrome is down.
+  ///
+  /// **Two independent preferences, not one HUD switch.** `showPlayerClock` is
+  /// device-wide (every kind of stream has a wall clock); `showPlaybackTimes` is
+  /// VOD/series only, because live has no duration to read. Both are read
+  /// synchronously — Settings is unreachable from a player route, so a listener
+  /// here could never fire — matching the chrome's own badge/readout.
+  ///
+  /// Present only while the chrome is hidden: with it up, the top bar already
+  /// carries the clock and the transport row the readout, so drawing both would
+  /// double them. They live at the same corners the chrome puts them in, so the
+  /// clock does not jump when the bars fade.
+  ///
+  /// `IgnorePointer` throughout: this is information, never a target — a press
+  /// in the corner must still reach the tap-to-show/video layer beneath, or the
+  /// overlay's whole reveal gesture would die in the top-right corner.
+  Widget _persistentHud() {
+    final clock = showPlayerClock.value;
+    final times = !widget.isLive && showPlaybackTimes.value;
+    if (!clock && !times) return const SizedBox.shrink();
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(
+          children: [
+            if (clock)
+              Positioned(
+                top: 12 + _barInsets.top,
+                right: 20 + _barInsets.right,
+                child: _badge(
+                  playerClockLabel(DateTime.now(), dated: !widget.touch),
+                ),
+              ),
+            if (times)
+              Positioned(
+                bottom: 12 + _barInsets.bottom,
+                right: 20 + _barInsets.right,
+                child: _positionRebuild(_hudTimePill),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The readout pill's body; the position it prints is scoped by
+  /// [_positionRebuild] at the call site, so a per-tick rebuild never touches
+  /// the rest of the overlay (the same split the transport row makes).
+  Widget _hudTimePill() => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: AppColors.panel.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        color: Color(0xFFCED2E0),
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
   );
 
   // The menu buttons carry their accessible name on the `Icon` rather than on

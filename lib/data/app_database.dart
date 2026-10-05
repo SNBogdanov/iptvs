@@ -1007,6 +1007,55 @@ class AppDatabase {
     return rows.map(_rowToPlaybackPosition).toList();
   }
 
+  /// Watched fraction (0..1) per in-progress item of [kind] for [sourceId] —
+  /// the data behind the progress bar drawn on a poster card.
+  ///
+  /// **Deliberately not [readRecentPositions].** The rail wants the newest 20
+  /// rows; a card wants *every* row this source holds, because the title in the
+  /// middle of the grid is exactly the one that needs a bar. So: a separate
+  /// projected query, no row limit, no `MediaItem` built and no locator
+  /// decrypted — two numbers per row, and nothing that could touch the sealed
+  /// locator path.
+  ///
+  /// **Every row in this table is unfinished by construction** —
+  /// [savePlaybackPosition] deletes at [kFinishedFraction] and ignores anything
+  /// under ten seconds — so the map never carries a ~100% bar, and a card whose
+  /// progress has finished simply has no entry at all.
+  ///
+  /// A row whose duration is unusable contributes **nothing**, rather than a
+  /// `0.0`: a zero-width bar draws nothing, so keeping the row would only make
+  /// every card pay a [Stack] child for an invisible sliver. That matches
+  /// [PlaybackPosition.progress], which also answers 0 for an unknown duration —
+  /// the difference is that here the bar is simply absent instead of drawn
+  /// empty.
+  ///
+  /// The `MIN(1.0, …)` (and the re-clamp below) is **defence against a state the
+  /// API cannot produce**: [savePlaybackPosition] deletes a row at
+  /// [kFinishedFraction], so every stored ratio is under 0.95. It stays because
+  /// the failure it prevents is visible — a bar drawn past the poster's edge —
+  /// and this method reads a table rather than trusting a writer's arithmetic.
+  Future<Map<String, double>> readPlaybackProgress(
+    String sourceId,
+    ContentKind kind,
+  ) async {
+    final rows = await _db.rawQuery(
+      'SELECT item_id, '
+      '       MIN(1.0, position_ms * 1.0 / duration_ms) AS progress '
+      'FROM playback_positions '
+      'WHERE source_id = ? AND kind = ? AND duration_ms > 0',
+      [sourceId, kind.name],
+    );
+    final out = <String, double>{};
+    for (final row in rows) {
+      final progress = row['progress'];
+      if (progress is! num) continue;
+      out[row['item_id'] as String] = progress
+          .toDouble()
+          .clamp(0.0, 1.0);
+    }
+    return out;
+  }
+
   static PlaybackPosition _rowToPlaybackPosition(Map<String, Object?> r) =>
       PlaybackPosition(
         kind: ContentKind.values.byName(r['kind'] as String),

@@ -426,6 +426,49 @@ wholesale: whatever focus the body held is already gone, so there is nothing to 
 Pinned by `test/source_error_view_test.dart`, which asserts the button holds focus on arrival and
 that a single `select` press with no navigation first runs the retry.
 
+## Where a media tab opens its focus
+
+The movies/series tab is not a selection model — it is ordinary focus nodes — but its **initial**
+focus follows a priority rule, because the "Continue watching" rail is drawn *above* the poster
+grid and used to be invisible to focus entirely.
+
+The bug: `_ContinueWatchingRail` built its cards with no `autofocus` and no focus node, while the
+grid's rule was "autofocus `lastPlayedId`, else item 0". `lastPlayedId` is set only by
+`MediaTabController.notePlayed`, so on a **fresh open** it is null, item 0 took the focus, and the
+things the user had actually been watching sat right above the cursor — drawn, pressable, and
+never where the D-pad started. The rail is what that tab *is* when it exists, and it is the first
+thing drawn, so a first focus there is the only answer that matches what the screen says.
+
+The rule, as `railTakesFocus` in `MediaTabView`'s `LayoutBuilder`:
+
+| rail drawn? | `lastPlayedId` still in the grid? | focus lands on |
+|---|---|---|
+| yes | no | the rail's **newest** entry (`autofocusFirst && i == 0`; the rail is newest-first) |
+| yes | yes | that grid tile — **unchanged on purpose** |
+| no | no | grid item 0 — the old behaviour |
+| no (searching) | — | the first search result; the rail is not drawn at all |
+| loading / error / empty body | — | **not the rail**: the body's own action owns it |
+
+Two of those rows are deliberate refusals rather than omissions:
+
+- **`lastPlayedId` still wins.** Coming back from a details sheet must land on the exact tile you
+  left, not at the top of the tab; overriding it would trade one wrong first focus for another.
+  (That tile is by construction also the newest rail entry, since watching it wrote its position.)
+- **The status body never lets the rail have it.** Above: a body that renders *instead of* the rows
+  has no focus targets of its own except its retry, and `SourceErrorView` autofocusing that button
+  is the whole fix. A rail autofocusing over it would re-break the one rule that makes a failed load
+  recoverable — while buying nothing, since the rail was already reachable by arrowing up.
+
+**Exactly one autofocus candidate per tab** is part of the rule, not a detail: two widgets
+requesting autofocus in the same frame race, and the winner is decided by tree order. Both the rail
+and `autofocusFor(i)` are gated on the same `railTakesFocus`, and the rail's sliver is built by a
+closure (`railSliverFor(autofocusFirst:)`) rather than once above the `LayoutBuilder`, precisely
+because the answer is only known inside it.
+
+Pinned by `test/media_tab_focus_test.dart`, which asserts the autofocus set as a *list* (so "two of
+them" fails), checks real `hasFocus` on the rail tile rather than only the flag, and sweeps all five
+rows of the table above.
+
 ## Per-row favorite button + intra-row action cursor
 
 Every channel row carries an **always-visible star cell** (`_ChannelTile` in `live_tab_view.dart`):

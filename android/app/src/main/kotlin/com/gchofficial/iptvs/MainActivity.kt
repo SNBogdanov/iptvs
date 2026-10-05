@@ -236,6 +236,21 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_ZAP_ENABLED,
                             args["zapEnabled"] as? Boolean ?: false,
                         )
+                        // Device-wide chrome preferences (Settings → "Clock in the
+                        // player" / "Playback time in the player"). Constant for the
+                        // life of a route and constant for the process, so they ride
+                        // the open Intent rather than a live channel. Fail **open**,
+                        // the opposite of zapEnabled above: an absent key means an
+                        // older Dart build, and the chrome it draws today is the
+                        // chrome an untouched install should keep.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_SHOW_CLOCK,
+                            args["showClock"] as? Boolean ?: true,
+                        )
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_SHOW_TIMES,
+                            args["showPlaybackTimes"] as? Boolean ?: true,
+                        )
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }

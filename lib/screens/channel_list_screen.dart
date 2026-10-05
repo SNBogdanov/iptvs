@@ -12,7 +12,9 @@ import '../data/diagnostics_log.dart';
 import '../data/last_channel_store.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
+import '../data/source_refresh_store.dart';
 import '../data/source_store.dart';
+import '../sources/refresh_interval.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
@@ -487,6 +489,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// landing does not yank the cursor back mid-browse.
   bool _resumeAttempted = false;
 
+  /// One shot per screen, like [_resumeAttempted]: the scheduled catalogue
+  /// refresh is decided once when the screen mounts for the active source, so a
+  /// Reload or a source change inside the same screen does not re-run it.
+  bool _autoRefreshAttempted = false;
+
   /// Records that a channel started playing: this screen's own zap bookkeeping,
   /// and — through the device-local [LastChannelStore] — the next launch.
   ///
@@ -657,6 +664,61 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
   }
 
+  /// The scheduled catalogue refresh (per-source `refreshInterval`): once the
+  /// first cached load is on screen, decide whether a refresh is due and run it
+  /// in the background — live channels and any VOD tab already loaded, **never
+  /// the EPG** (see [SourceRefreshInterval]).
+  ///
+  /// Deliberately after the first [load] rather than replacing it: the cached
+  /// catalogue paints immediately and this updates it behind the user, which is
+  /// the only ordering that cannot show a spinner on launch. One shot per screen
+  /// so a Reload or a source change does not re-run it.
+  Future<void> _maybeAutoRefresh() async {
+    if (_autoRefreshAttempted) return;
+    _autoRefreshAttempted = true;
+    final sourceId = widget.repo.source.id;
+    final store = SourceRefreshStore();
+    DateTime? last;
+    try {
+      last = await store.lastRefresh(sourceId);
+    } catch (_) {
+      // Fails to "never refreshed", which [planSourceRefresh] treats as due —
+      // the safe direction: a missing record must not disable the feature.
+    }
+    final interval = widget.config.refreshInterval;
+    final due = planSourceRefresh(interval, last, DateTime.now());
+    DiagnosticsLog.instance.add(
+      'library',
+      'auto-refresh check source=${widget.repo.source.name} '
+          'interval=${interval.storageValue} '
+          'last=${last?.toIso8601String() ?? 'never'} due=$due',
+    );
+    if (!due || !mounted) return;
+    // Channels first, without EPG; then only the VOD tabs the user has actually
+    // opened — forcing an untouched tab would download a whole catalogue nobody
+    // asked to browse.
+    unawaited(_live.refreshCatalog());
+    for (final kind in const [ContentKind.movie, ContentKind.series]) {
+      if (_media(kind).snapshot != null) {
+        _loadMediaTab(kind, forceRefresh: true);
+      }
+    }
+    try {
+      await store.setLastRefresh(sourceId, DateTime.now());
+    } catch (_) {}
+  }
+
+  /// Resets the auto-refresh schedule after a *manual* refresh, so pressing
+  /// Refresh does not leave the scheduled one about to fire again a moment later.
+  void _noteManualRefresh() {
+    unawaited(
+      SourceRefreshStore().setLastRefresh(
+        widget.repo.source.id,
+        DateTime.now(),
+      ),
+    );
+  }
+
   /// Puts [target] where the cursor can sit on it, and puts the cursor there.
   ///
   /// The live list is a selection model, so a channel it does not draw cannot be
@@ -813,7 +875,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     silenceRequest.addListener(_onSilenceRequested);
     resumeRequest.addListener(_onResumeRequested);
     alwaysOnTopEnabled.addListener(_syncAlwaysOnTop);
-    _loadLive();
+    // The scheduled catalogue refresh runs *after* the cached one is in hand,
+    // never instead of it: a launch must paint the cached list immediately, and
+    // a background refresh must not be able to delay or blank it.
+    unawaited(
+      _loadLive().whenComplete(() {
+        if (mounted) unawaited(_maybeAutoRefresh());
+      }),
+    );
     _live.startEpgRefresh();
     _globalFavorites.startEpgRefresh();
   }
@@ -1048,6 +1117,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// Load live channels (via the controller) plus the focus-node prune and
   /// favorites, which stay in the screen.
   Future<void> _loadLive({bool forceRefresh = false}) async {
+    if (forceRefresh) _noteManualRefresh();
     await _live.load(forceRefresh: forceRefresh);
     if (!mounted) return;
     _focus.clampSelection();
@@ -1121,12 +1191,58 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     bool forceRefresh = false,
   }) {
     final controller = _media(kind);
+    if (forceRefresh) _noteManualRefresh();
+    // A dataset-replacing load starts at the top: revealing a window from the
+    // previous arrangement makes no sense against the new one.
+    _mediaDisplayPages.remove(kind);
     if (switchCategory) {
       unawaited(controller.setCategory(category));
     } else {
       unawaited(controller.load(forceRefresh: forceRefresh));
     }
     unawaited(_loadFavorites(kind));
+  }
+
+  /// One "Load more" press: the next screenful.
+  ///
+  /// Since the catalogue is loaded whole (see [MediaTabView.displayPages]),
+  /// revealing is usually a pure display step. But a provider-order tab still
+  /// fetches a page at a time, so when the controller genuinely has unfetched
+  /// pages this also pulls the next one — otherwise the revealed window would
+  /// run past what has been fetched and the button would do nothing.
+  void _mediaLoadMore(ContentKind kind) {
+    final controller = _media(kind);
+    final snap = controller.snapshot;
+    if (snap == null) return;
+    setState(() {
+      _mediaDisplayPages[kind] = (_mediaDisplayPages[kind] ?? 1) + 1;
+    });
+    if (snap.hasMore) {
+      unawaited(controller.loadMore());
+    }
+    // Reveal the new "Next page" control and put the D-pad on it. It moved to a
+    // new index, so without this the focus would be lost on a rebuild and the
+    // control could sit below the fold — the user pressed it, so it should stay
+    // in front of them.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final scroll = controller.scrollController;
+      if (scroll.hasClients) {
+        await scroll.animateTo(
+          scroll.position.maxScrollExtent,
+          duration: appMotion(context, const Duration(milliseconds: 220)),
+          curve: Curves.easeOut,
+        );
+      }
+      if (mounted) _mediaLoadMoreFocusFor(kind).requestFocus();
+    });
+  }
+
+  /// The grid's sort dropdown: re-sorts and resets the display window.
+  void _setMediaSort(ContentKind kind, MediaSort sort) {
+    if (_media(kind).sort == sort) return;
+    _mediaDisplayPages.remove(kind);
+    _media(kind).setSort(sort);
   }
 
   @override
@@ -1140,6 +1256,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     _previewTimer?.cancel();
     _focus.dispose();
     for (final node in _tabFocusNodes.values) {
+      node.dispose();
+    }
+    for (final node in _mediaLoadMoreFocus.values) {
       node.dispose();
     }
     _searchController.dispose();
@@ -1599,6 +1718,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // List, Set and SourceConfig don't override ==) and the controller reassigns
   // fresh collections on every mutation (`_replaceItems` copies the snapshot and
   // the search results), so a stale hit is impossible.
+  /// How many *screens* of a VOD tab's grid/list are revealed, per kind. The
+  /// catalogue is loaded whole (global release-date sorting needs it), so paging
+  /// is a display window over the already-loaded list — see
+  /// [MediaTabView.displayPages], which computes the screenful size from the
+  /// viewport. Reset to one on every dataset-replacing load, category change and
+  /// sort change, so a new arrangement starts at the top.
+  final Map<ContentKind, int> _mediaDisplayPages = {};
+
+  /// Focus nodes for each VOD tab's "Next page" control — see
+  /// [MediaTabView.loadMoreFocusNode]. Owned by the screen because the control
+  /// moves to a new index on every press, so a node created inside the view
+  /// would not survive the rebuild that follows.
+  final Map<ContentKind, FocusNode> _mediaLoadMoreFocus = {};
+
+  FocusNode _mediaLoadMoreFocusFor(ContentKind kind) => _mediaLoadMoreFocus
+      .putIfAbsent(kind, () => RoutedFocusNode('media.loadMore'));
+
   List<MediaItem>? _visibleMediaCache;
   (
     ContentKind,
@@ -2708,7 +2844,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             // AVPlayer failure permanently downgrade the live channel to SDR
             // (or vice versa).
             iosEngineKey: 'catchup:${channel.id}',
-            preferWindowsEmbedded: Platform.isWindows,
           ),
         ),
       );
@@ -2810,7 +2945,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               resumeFrom: resume?.position,
             ),
             iosEngineKey: item.id,
-            preferWindowsEmbedded: Platform.isWindows,
           ),
         ),
       );
@@ -3533,7 +3667,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               ? null
               : MediaSortDropdown(
                   value: _media(_tab).sort,
-                  onChanged: _media(_tab).setSort,
+                  onChanged: (sort) => _setMediaSort(_tab, sort),
                 ),
         ),
         Padding(
@@ -3566,10 +3700,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             lastPlayedId: _media(_tab).lastPlayedId,
             scrollController: _media(_tab).scrollController,
             firstFocusNode: _media(_tab).firstFocusNode,
+            loadMoreFocusNode: _mediaLoadMoreFocusFor(_tab),
+            displayPages: _mediaDisplayPages[_tab] ?? 1,
+            minShown: _media(_tab).shownCountFloor,
+            onShown: _media(_tab).noteShownCount,
             isFavorite: (id) => _isFavorite(_tab, id),
             onOpenMedia: _openMedia,
-            onLoadMore: () => _media(_tab).loadMore(),
+            onLoadMore: () => _mediaLoadMore(_tab),
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
+            resumeProgress: _media(_tab).resumeProgress,
             continueWatching: _media(_tab).continueWatching,
             onResume: _playMedia,
             onRemoveContinueWatching: (entry) =>

@@ -624,3 +624,23 @@ String redactUrl(Object url) {
   if (uri.hasQuery) out.write('?<redacted>');
   return out.toString();
 }
+
+/// Strips a wrapping pair of square brackets (and surrounding whitespace) from a
+/// provider-supplied image URL.
+///
+/// Some panels store artwork as `[https://…/1.jpg]` rather than the bare URL.
+/// `Uri.parse` (inside `cached_network_image`/the image loader) then fails at the
+/// leading `[` with `Scheme not starting with alphabetic character (at character
+/// 1)`, so the poster never loads and only the fallback is drawn. This is a
+/// data-shape fix, applied where the URL enters the model — not a redaction
+/// concern (see [redactUrl]). Returns null for null/blank so a bracketed-empty
+/// value reads as "no artwork".
+String? cleanImageUrl(String? url) {
+  if (url == null) return null;
+  var value = url.trim();
+  while (value.length >= 2 && value.startsWith('[') && value.endsWith(']')) {
+    value = value.substring(1, value.length - 1).trim();
+  }
+  return value.isEmpty ? null : value;
+}
+

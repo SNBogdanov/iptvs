@@ -7,6 +7,7 @@ import '../player/channel_dwell.dart';
 import '../data/source_store.dart';
 import '../sources/epg_guides.dart' show kMaxEpgGuides;
 import '../sources/m3u_upgrade.dart';
+import '../sources/refresh_interval.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../sources/xtream_source.dart' show validatedXtreamStreamExtension;
@@ -274,6 +275,25 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       settings.remove('channelDwellSeconds');
     } else {
       settings['channelDwellSeconds'] = next.storageValue;
+    }
+    await _save(_config.copyWith(settings: settings));
+  }
+
+  /// Advances the catalogue refresh interval to the next rung.
+  ///
+  /// Only a **non-default** value is ever written, and the default is removed
+  /// rather than stored — the same no-cloud-churn trick `_cycleChannelDwell`
+  /// uses, so a source nobody touched serializes byte-for-byte as it did before
+  /// this setting existed.
+  Future<void> _cycleRefreshInterval() async {
+    final values = SourceRefreshInterval.values;
+    final current = _config.refreshInterval;
+    final next = values[(values.indexOf(current) + 1) % values.length];
+    final settings = <String, dynamic>{..._config.settings};
+    if (next == SourceRefreshInterval.defaultInterval) {
+      settings.remove('refreshInterval');
+    } else {
+      settings['refreshInterval'] = next.storageValue;
     }
     await _save(_config.copyWith(settings: settings));
   }
@@ -655,6 +675,17 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                             _ResumeOnLaunchTile(
                               enabled: _config.autoResumeLastChannel,
                               onTap: _toggleResumeOnLaunch,
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'Catalogue refresh',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            _RefreshIntervalTile(
+                              interval: _config.refreshInterval,
+                              onTap: _cycleRefreshInterval,
                             ),
                             const Padding(
                               padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
@@ -1148,6 +1179,50 @@ class _ChannelDwellTile extends StatelessWidget {
                       color: AppColors.textLo,
                       fontSize: 12,
                     ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RefreshIntervalTile extends StatelessWidget {
+  final SourceRefreshInterval interval;
+  final VoidCallback onTap;
+
+  const _RefreshIntervalTile({required this.interval, required this.onTap});
+
+  static const _hint =
+      'How often new channels and VOD titles are fetched in the background. '
+      'The TV guide keeps its own schedule. Activate to change.';
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      semanticsLabel: 'Catalogue refresh: ${interval.label}. $_hint',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.sync_outlined, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Catalogue refresh: ${interval.label}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  const Text(
+                    _hint,
+                    style: TextStyle(color: AppColors.textLo, fontSize: 12),
                   ),
                 ],
               ),

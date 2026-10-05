@@ -23,6 +23,7 @@ import 'ios_engine.dart';
 import 'live_zap_controller.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
+import 'player_chrome_prefs.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
 import 'playback_audio_session.dart';
@@ -1682,7 +1683,21 @@ class _PlayerScreenState extends State<PlayerScreen>
             // natives read it as `EXTRA_ZAP_ENABLED` once, at launch; they
             // fail closed, so an older build that doesn't send it simply
             // draws no button.
-            'zapEnabled': widget.zap != null,
+'zapEnabled': widget.zap != null,
+            // Device-wide chrome preferences, for the natives that have no
+            // other way to learn them: Android seeds its Compose overlay from
+            // these Intent extras once at launch (its Activity has no inbound
+            // control-state channel), and iOS decodes them into its
+            // PlayerChromeState. Both **fail closed to on**, i.e. to exactly
+            // what every surface draws today, so a native that never receives
+            // them renders the unchanged chrome rather than losing a badge.
+            //
+            // Sent even though the values cannot change while this route is
+            // open (Settings is unreachable from the player) — this is read
+            // once, and a route launched later after a toggle must still see
+            // the current value.
+            'showClock': showPlayerClock.value,
+            'showPlaybackTimes': showPlaybackTimes.value,
             if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
               'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),
@@ -2981,6 +2996,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     'canFavorite': _canFavorite,
     'isFavorite': _favorite,
     'reconnecting': _reconnecting,
+    // The Windows GDI overlay has no open-time payload to read: its whole
+    // picture of the stream is [NativeControlState], filled by this push. So
+    // these two ride here rather than only on `open`, or Windows would keep
+    // drawing both regardless of the setting. iOS ignores them in
+    // `applyControlState` (it takes them from `open`) — which is harmless and
+    // keeps the two paths in agreement about the same two names.
+    'showClock': showPlayerClock.value,
+    'showPlaybackTimes': showPlaybackTimes.value,
   };
 
   Future<void> _syncNativeControlState() async {
@@ -3601,11 +3624,23 @@ class _PlayerScreenState extends State<PlayerScreen>
             'gpu-api': 'd3d11',
             'gpu-context': 'd3d11',
             // Hardware-decode on the GPU. `auto-safe` lets mpv negotiate the
-            // best working method (d3d11va zero-copy with this d3d11 path) and
-            // fall back cleanly to software when a codec/driver combo isn't
-            // supported — forcing `d3d11va` could half-init and stall/desync.
-            // 4K HEVC/10-bit is too heavy for software decode, so we want HW.
-            'hwdec': 'auto-safe',
+            // best working method and fall back cleanly to software when a
+            // codec/driver combo isn't supported — forcing `d3d11va` could
+            // half-init and stall/desync. 4K HEVC/10-bit is too heavy for
+            // software decode, so we want HW.
+            //
+            // **Windows asks for `auto-copy`, not `auto-safe`.** `auto-safe`
+            // negotiates d3d11va *zero-copy*, and that is the path that loses
+            // the bottom band on 1080p HEVC: the decoder hands the presenter a
+            // surface whose last rows are never written, so the chroma plane's
+            // unwritten bytes show green along the bottom of the picture — the
+            // "green stripe". `auto-copy` keeps the decoder on the GPU but
+            // copies each frame back to system memory before presentation, the
+            // copy the zero-copy path omits. The windowed VOD route now runs on
+            // this native surface, so the band it used to fix on the embedded
+            // route has to be fixed here too. Linux keeps `auto-safe` (vaapi/drm
+            // zero-copy is the point there and the band was never reported).
+            'hwdec': Platform.isWindows ? 'auto-copy' : 'auto-safe',
             // 10-bit swapchain so HDR/10-bit output isn't truncated to 8-bit,
             // without forcing the desktop into HDR globally.
             'd3d11-output-format': 'rgb10_a2',
