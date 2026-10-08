@@ -966,6 +966,30 @@ class AppDatabase {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  /// Records a run-length the player **actually saw** by playing [itemId], so
+  /// the catalogue card can show it afterwards. An M3U file row starts without
+  /// one when the playlist omitted `#EXTINF`, and only playback knows.
+  ///
+  /// The real play is ground truth, so it overwrites whatever was stored —
+  /// including a provider-claimed runtime a refresh may have re-seeded; a
+  /// non-positive value is never written. A row replaced meanwhile simply
+  /// matches nothing and the update no-ops.
+  Future<void> updateLearnedMediaDuration(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+    Duration duration,
+  ) async {
+    final seconds = duration.inSeconds;
+    if (seconds <= 0) return;
+    await _db.update(
+      'media_items',
+      {'duration_seconds': seconds},
+      where: 'source_id = ? AND kind = ? AND id = ?',
+      whereArgs: [sourceId, kind.name, itemId],
+    );
+  }
+
   Future<PlaybackPosition?> readPlaybackPosition(
     String sourceId,
     ContentKind kind,

@@ -252,4 +252,204 @@ http://stream.invalid/two
       expect(m3uLog().last, contains('no expiry parameter'));
     });
   });
+
+  group('M3U file/VOD classification', () {
+    test('file extensions classify as VOD', () {
+      for (final url in [
+        'https://host/vod/the-movie.mp4',
+        'https://host/storage/title.mkv',
+        'https://host/title.webm?token=abc',
+        'https://host/title.MP4',
+        'C:/media/clip1.mov',
+        'files/title.avi',
+      ]) {
+        expect(isM3uFileLocator(url), isTrue, reason: url);
+      }
+    });
+
+    test('stream extensions never classify as VOD', () {
+      for (final url in [
+        'https://host/live/1.ts',
+        'https://host/live/1.m3u8',
+        'https://host/live/1.m3u',
+        'https://host/dash.mpd',
+        'https://host/ss.isml/Manifest',
+      ]) {
+        expect(isM3uFileLocator(url), isFalse, reason: url);
+      }
+    });
+
+    test('absent or unknown extensions stay channels, whatever the duration',
+        () {
+      expect(isM3uFileLocator('https://host/vod?id=5'), isFalse);
+      expect(isM3uFileLocator('https://host/film'), isFalse);
+    });
+
+    test('extinfDurationSeconds reads a run length, -1/0/absent are unknown',
+        () {
+      expect(extinfDurationSeconds('#EXTINF:689,Title'), 689);
+      expect(extinfDurationSeconds('#EXTINF: 100.9 ,Title'), 101);
+      expect(extinfDurationSeconds('#EXTINF:-1,Title'), isNull);
+      expect(extinfDurationSeconds('#EXTINF:0,Title'), isNull);
+      expect(extinfDurationSeconds('#EXTVLCOPT:none'), isNull);
+      expect(extinfDurationSeconds('#EXTM3U'), isNull);
+    });
+  });
+
+  group('parseM3uPlaylist VOD rows', () {
+    test('file rows become movies; stream rows stay channels', () {
+      const playlist = '''
+#EXTM3U
+#EXTINF:689 tvg-logo="http://host/logo1.png" group-title="Films",The Movie
+https://host/vod/the-movie.mp4
+#EXTINF:-1 tvg-logo="http://host/logo2.png" group-title="News",Channel One
+http://host/live/one.ts
+#EXTINF:3600 group-title="Films",No Extension
+https://host/vod/encoded
+''';
+      final parsed = parseM3uPlaylist(playlist);
+      // Only the genuine stream is a channel; the extension-less row is
+      // deliberately NOT classified by duration.
+      expect(parsed.channels, hasLength(2));
+      expect(parsed.channels.map((c) => c.name), ['Channel One', 'No Extension']);
+      expect(parsed.channels.first.extra['url'], 'http://host/live/one.ts');
+
+      expect(parsed.media, hasLength(1));
+      final movie = parsed.media.single;
+      expect(movie.title, 'The Movie');
+      expect(movie.kind, ContentKind.movie);
+      expect(movie.categoryId, 'Films');
+      expect(movie.poster, 'http://host/logo1.png');
+      expect(movie.durationSeconds, 689);
+      expect(movie.id, stableM3uMediaId('https://host/vod/the-movie.mp4'));
+      expect(movie.extra, {'url': 'https://host/vod/the-movie.mp4'});
+      // A group that held only files must not leak into the live category
+      // pane — the live tab is streams, the movies tab is files. ('Films'
+      // still appears in *live* categories here only because the standalone
+      // extension-less row carries the same group label.)
+      expect(parsed.categories.map((c) => c.id), ['Films', 'News']);
+      expect(parsed.mediaCategories.map((c) => c.id), ['Films']);
+    });
+
+    test('a file row without an EXTINF duration carries null, never a sentinel',
+        () {
+      const playlist = '''
+#EXTM3U
+#EXTINF:-1 group-title="Films",No Runtime
+https://host/vod/film.mp4
+''';
+      final movie = parseM3uPlaylist(playlist).media.single;
+      expect(movie.durationSeconds, isNull);
+      expect(movie.title, 'No Runtime');
+    });
+  });
+
+  group('M3uSource VOD catalogue', () {
+    String playlist(int fileCount) {
+      final out = StringBuffer('#EXTM3U\n');
+      for (var i = 0; i < fileCount; i++) {
+        out
+          ..writeln(
+            '#EXTINF:${900 + i} tvg-logo="http://host/vod/$i.png" '
+            'group-title="Films",Movie $i',
+          )
+          ..writeln('https://host/vod/$i.mp4');
+      }
+      out
+        ..writeln('#EXTINF:-1 group-title="News",Live')
+        ..writeln('http://host/live/1.ts');
+      return out.toString();
+    }
+
+    M3uSource sourceWith(String p, {String? userAgent}) => M3uSource(
+          sourceId: 'm3u-vod',
+          playlistUrl: 'http://host/playlist.m3u',
+          userAgent: userAgent,
+          debugPlaylistLoader: () async => utf8.encode(p),
+        );
+
+    test('mediaCategories are movies-only, live categories are movies-free',
+        () async {
+      final source = sourceWith(playlist(2));
+      expect(
+        (await source.mediaCategories(ContentKind.movie)).map((c) => c.id),
+        ['Films'],
+      );
+      expect(await source.mediaCategories(ContentKind.series), isEmpty);
+      expect((await source.categories()).map((c) => c.id), ['News']);
+    });
+
+    test('mediaItems filters by category and refuses series', () async {
+      final source = sourceWith(playlist(3));
+      final all = await source.mediaItems(ContentKind.movie);
+      expect(all, hasLength(3));
+      expect(all.first.title, 'Movie 0');
+      expect(all.first.durationSeconds, 900);
+      expect(
+        await source.mediaItems(ContentKind.movie, categoryId: 'News'),
+        isEmpty,
+      );
+      expect(await source.mediaItems(ContentKind.series), isEmpty);
+    });
+
+    test('mediaItemsPage pages in kM3uMediaPageSize steps', () async {
+      final source = sourceWith(playlist(205));
+      final p1 = await source.mediaItemsPage(ContentKind.movie, page: 1);
+      expect(p1.items, hasLength(kM3uMediaPageSize));
+      expect(p1.totalPages, 3);
+      expect(
+        p1.items.first.id,
+        stableM3uMediaId('https://host/vod/0.mp4'),
+      );
+      final p3 = await source.mediaItemsPage(ContentKind.movie, page: 3);
+      expect(p3.items, hasLength(5));
+      expect(p3.items.last.title, 'Movie 204');
+      final pastEnd = await source.mediaItemsPage(ContentKind.movie, page: 9);
+      expect(pastEnd.items, isEmpty);
+      expect(pastEnd.totalPages, 3);
+    });
+
+    test('searchMedia matches titles, filters by category, caps at 200',
+        () async {
+      final source = sourceWith(playlist(300));
+      final hits = await source.searchMedia(ContentKind.movie, 'movie');
+      expect(hits, hasLength(200));
+      expect(
+        await source.searchMedia(ContentKind.movie, 'movie', categoryId: 'News'),
+        isEmpty,
+      );
+      expect(await source.searchMedia(ContentKind.movie, '  '), isEmpty);
+    });
+
+    test('resolveMedia yields a finite-duration StreamInfo and passes UA',
+        () async {
+      final source = sourceWith(playlist(1), userAgent: 'TestUA');
+      final movie = (await source.mediaItems(ContentKind.movie)).single;
+      final info = await source.resolveMedia(movie);
+      expect(info.isLive, isFalse);
+      expect(info.url, 'https://host/vod/0.mp4');
+      expect(info.headers, {'User-Agent': 'TestUA'});
+    });
+
+    test('invalidate() drops the memo so a forced reload re-reads', () async {
+      var loads = 0;
+      final source = M3uSource(
+        sourceId: 'm3u-vod',
+        playlistUrl: 'http://host/playlist.m3u',
+        debugPlaylistLoader: () async {
+          loads++;
+          return utf8.encode(playlist(1));
+        },
+      );
+      expect(await source.mediaItems(ContentKind.movie), hasLength(1));
+      // A cached source answers without re-fetching…
+      expect(await source.mediaItems(ContentKind.movie), hasLength(1));
+      expect(loads, 1);
+      // …until invalidate() forces it (LibraryRepository does this on a
+      // forceRefresh, and the memo also caches the live channels it shares).
+      source.invalidate();
+      expect(await source.mediaItems(ContentKind.movie), hasLength(1));
+      expect(loads, 2);
+    });
+  });
 }

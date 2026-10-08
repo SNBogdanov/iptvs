@@ -93,7 +93,7 @@ void main() {
               favorite: false,
               onToggleFavorite: () {},
               onPlay: null,
-              onPlayEpisode: (_) {},
+              onPlayEpisode: (_, __) {},
             ),
           ),
         ),
@@ -148,6 +148,7 @@ void main() {
         categoryId: 'demo-series',
       );
       MediaItem? played;
+      List<MediaItem>? playedSiblings;
 
       await tester.pumpWidget(
         MaterialApp(
@@ -167,7 +168,10 @@ void main() {
                           favorite: false,
                           onToggleFavorite: () {},
                           onPlay: null,
-                          onPlayEpisode: (episode) => played = episode,
+                          onPlayEpisode: (episode, siblings) {
+                            played = episode;
+                            playedSiblings = siblings;
+                          },
                         ),
                       ),
                     ),
@@ -208,6 +212,14 @@ void main() {
       expect(played, isNotNull);
       expect(played!.id, 'bbb');
       expect(find.byType(MediaDetailsSheet), findsNothing);
+
+      // The season's own list travels with the episode. It is what the
+      // previous/next pair steps through, so handing over the episode alone
+      // would force the route to invent a sequence the user never saw - and the
+      // only invented answer steps across a season boundary.
+      expect(playedSiblings, isNotNull);
+      expect(playedSiblings!.map((e) => e.id), contains('bbb'));
+      expect(playedSiblings!.every((e) => e.kind == ContentKind.episode), isTrue);
     },
   );
 }

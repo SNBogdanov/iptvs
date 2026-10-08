@@ -33,7 +33,14 @@ class MediaKitVideoPlugin : public flutter::Plugin {
  private:
   static constexpr UINT kMainThreadTaskMessage = WM_USER + 1001;
 
+  // iptvs patch: `HandleMethodCall` is an engine-called boundary, so it is a
+  // `try` wrapper around the real body - see the .cc for why a throw crossing
+  // it kills the process outright.
   void HandleMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& method_call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  void HandleMethodCallInner(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 

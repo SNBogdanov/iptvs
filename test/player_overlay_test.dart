@@ -47,6 +47,8 @@ void main() {
     bool zapEnabled = false,
     VoidCallback? onOpenQuickList,
     ValueChanged<String>? onQuickListCommand,
+    VoidCallback? onPreviousEntry,
+    VoidCallback? onNextEntry,
     bool touch = false,
     GlobalKey<EmbeddedPlayerControlsState>? controlsKey,
   }) async {
@@ -85,6 +87,8 @@ void main() {
               zapEnabled: zapEnabled,
               onOpenQuickList: onOpenQuickList,
               onQuickListCommand: onQuickListCommand,
+              onPreviousEntry: onPreviousEntry,
+              onNextEntry: onNextEntry,
               dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
               onBack: () {},
               onToggleFavorite: onToggleFavorite ?? () {},
@@ -1251,6 +1255,102 @@ void main() {
   // docs/tv-navigation.md). This used to peel the info panel *only*, so on
   // the Windows SDR live surface Escape with the chrome up skipped straight
   // out to the channel list — two rungs in one press.
+  group('previous/next entry in the transport', () {
+    testWidgets('are absent when the route wired nothing', (tester) async {
+      // VOD today: no sibling list reaches the route, so there must be no
+      // affordance at all — two permanently dead buttons would be worse.
+      await pumpOverlay(tester, isLive: false);
+      expect(find.byIcon(Icons.skip_previous), findsNothing);
+      expect(find.byIcon(Icons.skip_next), findsNothing);
+    });
+
+    testWidgets('appear together once the route wires both', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: true,
+        zapEnabled: true,
+        onPreviousEntry: () {},
+        onNextEntry: () {},
+      );
+      expect(find.byIcon(Icons.skip_previous), findsOneWidget);
+      expect(find.byIcon(Icons.skip_next), findsOneWidget);
+    });
+
+    testWidgets('a one-sided pair draws nothing', (tester) async {
+      // The overlay cannot express "previous but not next" — the getter is
+      // `canStepEntry`, both callbacks or neither. Guards against a future
+      // refactor to two independent flags.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: true,
+        zapEnabled: true,
+        onPreviousEntry: () {},
+      );
+      expect(find.byIcon(Icons.skip_previous), findsNothing);
+      expect(find.byIcon(Icons.skip_next), findsNothing);
+    });
+
+    testWidgets('each button calls only its own callback', (tester) async {
+      var previous = 0;
+      var next = 0;
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: true,
+        zapEnabled: true,
+        onPreviousEntry: () => previous++,
+        onNextEntry: () => next++,
+      );
+      await tester.tap(find.byIcon(Icons.skip_previous));
+      await tester.pump();
+      expect(previous, 1);
+      expect(next, 0);
+
+      await tester.tap(find.byIcon(Icons.skip_next));
+      await tester.pump();
+      expect(previous, 1);
+      expect(next, 1);
+    });
+
+    testWidgets('both are exposed to a screen reader', (tester) async {
+      // A D-pad user reaches them by focus; a screen-reader user has no cursor.
+      final handle = tester.ensureSemantics();
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: true,
+        zapEnabled: true,
+        onPreviousEntry: () {},
+        onNextEntry: () {},
+      );
+      expect(find.bySemanticsLabel('Previous'), findsOneWidget);
+      expect(find.bySemanticsLabel('Next'), findsOneWidget);
+      handle.dispose();
+    });
+
+    testWidgets('fit on a narrow surface with every other control', (
+      tester,
+    ) async {
+      // The pair is two extra fixed-width buttons in a row that already carries
+      // play/pause, volume, a full cluster, and — on live — the EPG strip.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        zapEnabled: true,
+        canFavorite: true,
+        onPreviousEntry: () {},
+        onNextEntry: () {},
+        width: 667,
+        height: 375,
+      );
+      expect(tester.takeException(), isNull);
+      expect(find.byIcon(Icons.skip_previous), findsOneWidget);
+    });
+  });
+
   group('the Back/Escape ladder peels one rung per press', () {
     testWidgets('info → hide chrome → exit', (tester) async {
       final key = GlobalKey<EmbeddedPlayerControlsState>();

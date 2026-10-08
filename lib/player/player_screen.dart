@@ -21,6 +21,7 @@ import 'channel_owner.dart';
 import 'hwdec_policy.dart';
 import 'ios_engine.dart';
 import 'live_zap_controller.dart';
+import 'vod_step_session.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'player_chrome_prefs.dart';
@@ -424,6 +425,21 @@ class PlayerScreen extends StatefulWidget {
   /// launch list and disposes it when the route pops.
   final LiveZapController? zap;
 
+  /// VOD/series sibling navigation: the playlist this title was launched from
+  /// and the resolver that turns a sibling into a playable stream.
+  ///
+  /// **A separate path from [zap], on purpose.** A live zap swaps inside a
+  /// channel list whose ordering, favourites and per-row providers the
+  /// controller already owns. VOD has no such list at the route, so a launch
+  /// site hands one over here — and it must be the *same* list the user stepped
+  /// through in, or the button means something different from the grid.
+  ///
+  /// The list is a **snapshot at open time**, matching live's launch range: a
+  /// sort or category change behind the player is not re-read, because the
+  /// route has no controller to re-read it from. The cursor, however, is
+  /// mutable state here (see [_vodIndex]) — stepping twice must move twice.
+  final VodStepSession? vodStep;
+
   /// Re-resolves this live channel's stream fresh from the source. Used by the
   /// live reconnect watchdog and "Go to live": Stalker `create_link` URLs
   /// carry single-use/short-lived `play_token`s, so after a portal-side kill
@@ -493,6 +509,7 @@ class PlayerScreen extends StatefulWidget {
     this.existingController,
     this.adoptNativePreview = false,
     this.zap,
+    this.vodStep,
     this.playback,
     this.favoriteInitial = false,
     this.onSetFavorite,
@@ -685,7 +702,26 @@ class _PlayerScreenState extends State<PlayerScreen>
   late StreamInfo _stream = widget.stream;
 
   LiveZapController? get _zap => widget.zap;
-  String get _title => _zap?.title ?? widget.title;
+
+  VodStepSession? get _vodStep => widget.vodStep;
+
+  /// Which of [_vodStep]'s siblings is on screen, and **mutable** where the
+  /// session's own `index` is not.
+  ///
+  /// The session is a value describing the launch; the cursor is route state,
+  /// because two presses of Next must move twice rather than resolve the same
+  /// neighbour forever. Starts at the session's index and only ever moves to a
+  /// neighbour [vodStepIndex] actually returned — never optimistically past a
+  /// resolve that failed, which would otherwise skip an episode the user can
+  /// still see.
+  int? _vodIndex;
+
+  /// The title of the VOD currently on screen, once a step has moved off
+  /// [PlayerScreen.title]. A zap gets this from its controller; a VOD session
+  /// has no controller to read back, so the route keeps what it played.
+  String? _vodTitle;
+
+  String get _title => _vodTitle ?? _zap?.title ?? widget.title;
   String? get _sourceName => _zap?.sourceName ?? widget.sourceName;
   Programme? get _epgNow => _zap != null ? _zap!.epg.now : widget.epgNow;
   Programme? get _epgNext => _zap != null ? _zap!.epg.next : widget.epgNext;
@@ -796,6 +832,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   // VOD resume plumbing (null when untracked / live).
   Timer? _positionPersistTimer;
   Duration? _pendingEmbeddedResume;
+  /// The learned run-length has been written back for this route; see
+  /// [_recordLearnedMediaDuration].
+  bool _mediaDurationRecorded = false;
   /// Index into [kAspectModes]: the user's stored choice if they have one,
   /// otherwise [defaultAspectModeIndex] — Fill on a television, Fit on a
   /// desktop, and on a handset whatever the window's shape asks for (so
@@ -889,6 +928,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void initState() {
     super.initState();
+    _vodIndex = widget.vodStep?.index;
     // Both native-player platforms call back over this channel: Windows sends
     // input/control/closed events for its GDI overlay; Android sends `nativeClosed`
     // when its native Activity finishes. Without the Android handler, backing out
@@ -1307,67 +1347,21 @@ class _PlayerScreenState extends State<PlayerScreen>
       'zap play source=${entry.sourceName} channel=${entry.name} '
       'id=${entry.channelId}',
     );
-    // Per-channel presentation. Favourite and aspect are per *owning* source,
-    // which a cross-source zap changes.
     _favorite = _zap?.isFavorite ?? _favorite;
     _aspectModeIndex = resolveAspectModeIndex(_zap?.aspectLabel);
-    // A new stream deserves its own single escalation chance, and its own HDR
-    // probe — the flags are otherwise spent for the whole session.
-    _windowsEscalated = false;
-    _linuxEscalated = false;
-    _hdr10Plus = false;
-    _lastVideoParamsLog = null;
-    // The stop above was ours, not a drop: reset every watchdog counter so the
-    // new channel starts on a clean stall clock and full backoff budget.
-    _reconnectAttempt = 0;
-    _lastReconnectMs = 0;
-    _stalledSinceMs = 0;
-    _buffering = false;
+    // Live-only, unlike a VOD step: `media_kit`'s `completed` handling and the
+    // reconnect banner are properties of a live stream, and there is no VOD
+    // equivalent to reset.
     _liveSynced = true;
     if (_reconnecting) {
       _reconnecting = false;
       _onReconnectingChanged();
     }
 
-    if (_separateEngineOwnsPlayback && !_usesLinuxNativeSurface) {
-      // Android's Activity / iOS's presented controller own the engine; they
-      // stop, rebuild if the headers or preset changed, and reload.
-      await _invokeNativeZapTo(stream, entry);
-    } else if (_linuxNativeSession != null) {
-      final session = _linuxNativeSession!;
-      await session.command(
-        LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
-      );
-      await session.command(['set_property', 'force-media-title', entry.name]);
-      await session.command(['loadfile', stream.url, 'replace']);
-      await _pushLinuxOverlayState();
-    } else {
-      // Embedded, and the Windows native HWND — which is this same `_player`
-      // presenting through a `vo` swap, so it reopens exactly the way
-      // `_goToLive` does, on the surface it already holds.
-      final platform = _player.platform;
-      if (platform is NativePlayer) {
-        for (final option in mpvBufferOptions(_bufferPreset).entries) {
-          try {
-            await platform.setProperty(option.key, option.value);
-          } catch (error) {
-            _logPlayback('warn mpv zap ${option.key} failed: $error');
-          }
-        }
-        if (stream.headers.isNotEmpty) {
-          await _setNativeHeaderOptions(platform, stream.headers);
-        }
-      }
-      await _player.open(
-        Media(
-          stream.url,
-          httpHeaders: stream.headers.isEmpty ? null : stream.headers,
-        ),
-      );
-    }
+    // The surface swap itself is shared with the VOD step - see
+    // [_reopenOnCurrentSurface].
+    await _reopenOnCurrentSurface(stream, entry.name, entry: entry);
     if (!mounted) return;
-    setState(() {});
-    await _syncNativeControlState();
     await _pushZapBanner();
   }
 
@@ -1406,6 +1400,29 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// Routes one command from the shared zap vocabulary, whichever surface it
   /// came from. Returns whether the controller consumed it.
   bool _handleZapCommand(ZapCommand command) {
+    // VOD has no `LiveZapController` behind it, but the step pair speaks the
+    // **same** vocabulary - `channelUp`/`channelDown` are Next/Previous - and
+    // every surface that draws its own overlay sends those two commands rather
+    // than knowing whether the route is live. Diverting here is what makes the
+    // Windows GDI buttons work on VOD without that surface learning a second
+    // command, and it is the only place that knows about the split at all.
+    //
+    // Gated on a session *and* `!_isLive`, both deliberate: with no session the
+    // command falls through to the guard below and is still declined, so this
+    // cannot turn a dead key into a silently swallowed one; and live is left
+    // exactly as it was, so the branch below can still call back in without
+    // recursing.
+    if (_vodStep != null &&
+        !_isLive &&
+        (command.kind == ZapCommandKind.channelUp ||
+            command.kind == ZapCommandKind.channelDown)) {
+      if (command.kind == ZapCommandKind.channelUp) {
+        _stepNextEntry();
+      } else {
+        _stepPreviousEntry();
+      }
+      return true;
+    }
     final zap = _zap;
     if (zap == null || !_isLive) return false;
     if (command.kind == ZapCommandKind.favorite) {
@@ -1485,6 +1502,185 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// a zap session; the pointer/touch counterpart of the `G`/`GUIDE` keys,
   /// which is the only way a mouse or a finger can reach the list.
   bool get _zapEnabled => _zap != null && _isLive;
+
+  /// Whether the transport carries the previous/next entry pair.
+  ///
+  /// Live comes from a [zap] controller, VOD from a [vodStep] session; either
+  /// one makes the pair mean something, and neither does on its own. **Both or
+  /// neither**: the pair is drawn as a unit, and half a pair would be a button
+  /// that can only ever be dead.
+  ///
+  /// Deliberately not derived from "is there a sibling" — the session is a
+  /// launch-site artefact and answering "no siblings" as "no pair" would make
+  /// the transport **reflow when the user reaches the end of a season**, which
+  /// is exactly when the button is still the way back. The press is the thing
+  /// that answers null.
+  bool get _canStepEntry => _zapEnabled || _vodStep != null;
+
+  void _stepPreviousEntry() {
+    // `channelDown`, not `previousChannel`: the "previous channel" command is
+    // the *toggle* over the last-watched one, which is a different question
+    // from "the one before this in the list". Random zapping is applied inside
+    // the controller, so this button obeys the same preference PgDn does.
+    if (_vodStep != null && !_zapEnabled) {
+      _stepVodEntry(previous: true);
+      return;
+    }
+    if (!_zapEnabled) return;
+    _handleZapInput(const ZapCommand(ZapCommandKind.channelDown));
+  }
+
+  void _stepNextEntry() {
+    if (_vodStep != null && !_zapEnabled) {
+      _stepVodEntry(previous: false);
+      return;
+    }
+    if (!_zapEnabled) return;
+    _handleZapInput(const ZapCommand(ZapCommandKind.channelUp));
+  }
+
+  /// Plays the VOD sibling one step away, if the session has one.
+  ///
+  /// Three deliberate differences from [_zapPlay]:
+  ///
+  /// - **No random, no wrap.** The neighbour comes from [vodStepIndex], which
+  ///   answers null at both ends; a live zap's whole justification is that a
+  ///   channel list has no ends. Reusing `channelUp`/`channelDown` here would
+  ///   also drag the random-zapping preference into a film, where "random"
+  ///   has no meaning.
+  /// - **Resolve first, then commit.** The cursor moves only after a stream
+  ///   came back, so a failed resolve leaves the user on the episode they can
+  ///   still see instead of silently skipping one. A live zap can be as cavalier
+  ///   as it likes there because it reverts the cursor on failure.
+  /// - **Reuses the same reopen** `_zapPlay` uses for embedded and the Windows
+  ///   native HWND. VOD opens native there, and that surface cannot adopt a
+  ///   different engine anyway, so "step" and "zap" are the same operation once
+  ///   the stream is in hand.
+  Future<void> _stepVodEntry({required bool previous}) async {
+    final session = _vodStep;
+    final index = _vodIndex;
+    if (session == null || index == null || _steppingVod) return;
+    // Resolve against the *session's* list and the route's cursor, not the
+    // session's own `neighbour()`: that one is keyed to the launch index, which
+    // a previous step has already moved past.
+    final target = vodStepIndex(
+      length: session.items.length,
+      index: index,
+      previous: previous,
+    );
+    if (target == null) {
+      // The end of the list is an answer, not an error: no log, no beep, the
+      // picture keeps playing. Same as pressing an already-selected card.
+      return;
+    }
+    final item = session.items[target];
+    _steppingVod = true;
+    _logPlayback(
+      'vod step ${previous ? 'previous' : 'next'} target=${item.id}',
+    );
+    StreamInfo? stream;
+    try {
+      stream = await session.resolve(item);
+    } catch (error) {
+      _logPlayback(
+        'warn vod step resolve failed id=${item.id} '
+        'detail=${_redactPlayback(error.toString())}',
+      );
+    }
+    if (!mounted) {
+      _steppingVod = false;
+      return;
+    }
+    if (stream == null) {
+      // Cursor deliberately left where it was - see the doc comment.
+      _steppingVod = false;
+      return;
+    }
+    _vodIndex = target;
+    _vodTitle = item.title;
+    _steppingVod = false;
+    await _reopenOnCurrentSurface(stream, item.title);
+  }
+
+  /// Guards against a second step landing while the first is still resolving:
+  /// two overlapping `resolveMedia` calls would race on the single provider
+  /// connection and leave the cursor describing a stream that lost.
+  bool _steppingVod = false;
+
+  /// Swaps the playing stream on whatever surface this route already holds.
+  ///
+  /// Shared with [_zapPlay] because a VOD step and a live zap end in the same
+  /// place — a different URL on the current surface — and the parts that differ
+  /// (title, live-only watchdog flags) are set by the caller before this runs.
+  ///
+  /// [entry] is the live channel behind this swap, and it is **not optional for
+  /// live**: Android's Activity and iOS's presented controller own the engine
+  /// and receive a `zapTo` carrying the channel, so dropping it would silently
+  /// turn every live zap on those platforms into a log line. A VOD step has no
+  /// such vocabulary yet, and passes none — which is why it can be absent.
+  Future<void> _reopenOnCurrentSurface(
+    StreamInfo stream,
+    String title, {
+    ZapEntry? entry,
+  }) async {
+    if (!mounted) return;
+    _stream = stream;
+    // A new stream deserves its own single escalation chance and its own HDR
+    // probe — the flags are otherwise spent for the whole session.
+    _windowsEscalated = false;
+    _linuxEscalated = false;
+    _hdr10Plus = false;
+    _lastVideoParamsLog = null;
+    // The stop below was ours, not a drop: reset every watchdog counter so the
+    // new stream starts on a clean stall clock and full backoff budget.
+    _reconnectAttempt = 0;
+    _lastReconnectMs = 0;
+    _stalledSinceMs = 0;
+    _buffering = false;
+    if (_separateEngineOwnsPlayback && !_usesLinuxNativeSurface) {
+      // Android's Activity / iOS's presented controller own the engine; they
+      // stop, rebuild if the headers or preset changed, and reload.
+      if (entry == null) {
+        // A VOD step on a platform whose native surface only understands
+        // `zapTo`. Say so rather than reopening the Dart engine behind the
+        // Activity, which would put two engines on one stream.
+        _logPlayback('warn vod step on a separate native engine is not wired');
+        return;
+      }
+      await _invokeNativeZapTo(stream, entry);
+    } else if (_linuxNativeSession != null) {
+      final session = _linuxNativeSession!;
+      await session.command(
+        LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
+      );
+      await session.command(['set_property', 'force-media-title', title]);
+      await session.command(['loadfile', stream.url, 'replace']);
+      await _pushLinuxOverlayState();
+    } else {
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        for (final option in mpvBufferOptions(_bufferPreset).entries) {
+          try {
+            await platform.setProperty(option.key, option.value);
+          } catch (error) {
+            _logPlayback('warn mpv step ${option.key} failed: $error');
+          }
+        }
+        if (stream.headers.isNotEmpty) {
+          await _setNativeHeaderOptions(platform, stream.headers);
+        }
+      }
+      await _player.open(
+        Media(
+          stream.url,
+          httpHeaders: stream.headers.isEmpty ? null : stream.headers,
+        ),
+      );
+    }
+    if (!mounted) return;
+    setState(() {});
+    await _syncNativeControlState();
+  }
 
   /// A `zap:` command string from the overlay's quick-list pointer gestures —
   /// a row click, or a wheel notch.
@@ -1951,6 +2147,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           final positionMs = (args['positionMs'] as num?)?.toInt();
           final durationMs = (args['durationMs'] as num?)?.toInt();
           if (positionMs != null && durationMs != null && durationMs > 0) {
+            _recordLearnedMediaDuration(Duration(milliseconds: durationMs));
             // Awaited — the caller (_playMedia) reloads "Continue watching"
             // right after this route pops, so the write must land first.
             await playback.db.savePlaybackPosition(
@@ -3035,7 +3232,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           // controller, such as the EPG grid's own play path — where Dart
           // declines the command and the key becomes dead instead of
           // revealing the chrome.
-          'zapEnabled': widget.zap != null,
+'zapEnabled': widget.zap != null,
+          // Whether the previous/next pair should be drawn at all. **This**, not
+          // `zapEnabled`, is what the Windows GDI overlay gates the two transport
+          // buttons on: the pair serves live zapping and VOD stepping alike, and
+          // the route decides which (see `_canStepEntry`). An older native build
+          // ignores the key, so VOD there simply has no buttons - fail closed.
+          'stepEnabled': _canStepEntry,
           ..._streamInfoPayload(),
         },
       });
@@ -3465,6 +3668,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       zapEnabled: _zapEnabled,
       onOpenQuickList: _zapEnabled ? _toggleQuickList : null,
       onQuickListCommand: _zapEnabled ? _handleQuickListPointerCommand : null,
+      onPreviousEntry: _canStepEntry ? _stepPreviousEntry : null,
+      onNextEntry: _canStepEntry ? _stepNextEntry : null,
       dynamicRangeLabel: _dynamicRangeLabel,
       onBack: _back,
       onToggleFavorite: _toggleFavorite,
@@ -3792,6 +3997,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (linuxSession != null) {
       final linuxState = await linuxSession.playbackState();
       if (linuxState == null) return;
+      _recordLearnedMediaDuration(linuxState.duration);
       await playback.db.savePlaybackPosition(
         playback.sourceId,
         playback.kind,
@@ -3804,12 +4010,33 @@ class _PlayerScreenState extends State<PlayerScreen>
     final position = _player.state.position;
     final duration = _player.state.duration;
     if (duration <= Duration.zero) return;
+    _recordLearnedMediaDuration(duration);
     await playback.db.savePlaybackPosition(
       playback.sourceId,
       playback.kind,
       playback.itemId,
       position: position,
       duration: duration,
+    );
+  }
+
+  /// One-shot write-back of a run-length actually discovered by playback, so
+  /// the catalogue card shows it afterwards. A movie whose playlist row carried
+  /// no `#EXTINF` duration starts life without one; the file itself is the
+  /// only thing that knows. Movies only, once per route — repeated ticks and
+  /// the native close relay both funnel here and must agree on one value.
+  void _recordLearnedMediaDuration(Duration duration) {
+    final playback = widget.playback;
+    if (playback == null || playback.kind != ContentKind.movie) return;
+    if (_mediaDurationRecorded || duration <= Duration.zero) return;
+    _mediaDurationRecorded = true;
+    unawaited(
+      playback.db.updateLearnedMediaDuration(
+        playback.sourceId,
+        playback.kind,
+        playback.itemId,
+        duration,
+      ),
     );
   }
 
@@ -4163,24 +4390,26 @@ class _PlayerScreenState extends State<PlayerScreen>
             // by a row: they used to ride the same `channelUp`/`channelDown`
             // the arrows' one-row siblings resolve through, which made a page
             // key indistinguishable from an arrow.
+            // The pair's handlers, not the raw commands, so the key and the transport
+            // button cannot disagree - the VOD branch lives in one place.
             const SingleActivator(LogicalKeyboardKey.pageDown): () =>
-                _handleZapInput(
-                  _zapListOpen
-                      ? const ZapCommand(
+                _zapListOpen
+                    ? _handleZapInput(
+                        const ZapCommand(
                           ZapCommandKind.move,
                           kZapPageRows,
-                        )
-                      : const ZapCommand(ZapCommandKind.channelUp),
-                ),
+                        ),
+                      )
+                    : _stepNextEntry(),
             const SingleActivator(LogicalKeyboardKey.pageUp): () =>
-                _handleZapInput(
-                  _zapListOpen
-                      ? const ZapCommand(
+                _zapListOpen
+                    ? _handleZapInput(
+                        const ZapCommand(
                           ZapCommandKind.move,
                           -kZapPageRows,
-                        )
-                      : const ZapCommand(ZapCommandKind.channelDown),
-                ),
+                        ),
+                      )
+                    : _stepPreviousEntry(),
             const SingleActivator(LogicalKeyboardKey.mediaLast): () =>
                 _handleZapInput(
                   const ZapCommand(ZapCommandKind.previousChannel),

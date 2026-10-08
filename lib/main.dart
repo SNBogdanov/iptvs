@@ -23,6 +23,7 @@ import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
 import 'data/vod_card_orientation.dart';
+import 'player/clock_format.dart';
 import 'player/player_chrome_prefs.dart';
 import 'player/tray.dart';
 import 'player/window_placement.dart';
@@ -61,6 +62,13 @@ Future<void> main() async {
     // ahead of the boot group: a restored rectangle is only correct before the
     // first frame paints into it, and the keychain read overlaps the others.
     startWindowPlacementTracking();
+    // The player clock badge's regional format, read from this machine's
+    // Windows settings. Also fired, not awaited, and for the same reason as the
+    // chrome preferences below: nothing reads the clock until a player route is
+    // opened, which is a profile pick and a catalogue load away, so the answer
+    // has always landed first — while awaiting it would put a platform round
+    // trip on the path to the first frame for a value nothing can consume yet.
+    unawaited(detectClockFormat());
   }
   // Cross-platform, unlike the three above: the media grid's card shape. Fills
   // the notifier the grid reads, and until it answers the grid draws the default

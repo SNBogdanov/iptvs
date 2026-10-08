@@ -209,9 +209,12 @@ greys, `Go to live` appears leftmost in the right cluster).
 **Badge *labels* are one contract too**, not just their order: `4K`/`1440p`/`1080p`/`720p`/`SD` on
 deliberately loose thresholds (a 1088-tall stream is 1080p), a compact `DV`/`HDR10+`/`HDR10`/`HLG`/
 `HDR` — **nothing at all for SDR** — `50fps`/`23.976fps` with no space, a source name truncated at
-20, and a dated `Sat 8 Aug · 16:02` clock — **unpadded day** — on the pointer/TV surfaces (bare
-`HH:mm` under `touch`, matching the iOS controller; the GDI overlay needs MSVC's `%#d` for that,
-and the Lua one builds it from `os.date('*t')` because `os.date`'s `%a`/`%b` are locale-dependent). Kotlin `PlayerUiState`, Swift `BadgeFormatting`, the GDI
+20, and a dated clock on the pointer/TV surfaces — the machine's own regional **long date + short
+time** on Windows (see "The clock badge's regional format"), and the hand-rolled English
+`Sat 8 Aug · 16:02` (unpadded day) with nothing resolved — with bare `HH:mm` under `touch`,
+matching the iOS controller. (Before the regional format landed, the GDI overlay earned the
+unpadded day from MSVC's `%#d` and the Dart badge hand-rolled the same shape, while the Lua one
+builds it from `os.date('*t')` because `os.date`'s `%a`/`%b` are locale-dependent.) Kotlin `PlayerUiState`, Swift `BadgeFormatting`, the GDI
 `ResolutionBadge`/`HdrBadge`/`FpsBadge` and Dart's top-level `resolutionBadgeLabel`/`hdrBadgeLabel`/
 `fpsBadgeLabel`/`sourceBadgeLabel`/`playerClockLabel` (`player_overlay.dart`, pure and directly
 tested) all implement it. The shared overlay previously printed `3840×2160`, `50.00 FPS`, the *full*
@@ -707,13 +710,22 @@ reachable after any long fullscreen session that reconnects.
 into a map with `at()` there. `VideoOutput::Resize` unregisters the old texture, its release callback
 erases the map entry, and `texture_id_` was cleared *outside* `textures_mutex_` — so a frame callback
 taking the lock inside that window saw a live id whose entry was already gone,
-`pixel_buffer_textures_.at()` threw `std::out_of_range`, and the exception crossed into engine C++
-that has no handler for C++ exceptions: `std::terminate` → `abort()`. The process died with
-`0xC0000409` mid-zap, with **nothing in the Dart diagnostics log**, because no Dart code ran. Six
-identical WER minidumps on the owner's machine, every one the same stack
-(`media_kit_video_plugin` → `std::_Xout_of_range` → `CxxThrowException` →
-`flutter_windows!terminate` → `abort`). There is a second instance of the same window between
-`RegisterTexture` returning and the new entry being emplaced.
+`pixel_buffer_textures_.at()` threw `std::out_of_range`, and the exception crossed into engine-owned
+C++. The process died with `0xC0000409` mid-zap, with **nothing in the Dart diagnostics log**,
+because no Dart code ran. Six identical WER minidumps on the owner's machine, every one the same
+stack (`media_kit_video_plugin` → `std::_Xout_of_range` → `CxxThrowException` →
+`RtlpExecuteHandlerForException` → `int 29h`). There is a second instance of the same window
+between `RegisterTexture` returning and the new entry being emplaced.
+
+**The engine has a handler; that is the part worth correcting.** An earlier draft of this file
+claimed the throw had "no handler for C++ exceptions: `std::terminate` → `abort()`", and inferred
+`flutter_windows!terminate` from the symbolised stack. Both wrong. The registers settle it: `ecx = 7`,
+`.exr -1` → `Subcode: 0x7 FAST_FAIL_FATAL_APP_EXIT`. The engine catches the exception
+(`RtlpExecuteHandlerForException`) and then kills the process itself rather than unwinding into the
+plugin — same visible outcome, different mechanism, and `0xC0000409` here is **not** a stack buffer
+overflow despite the exception's name. Every engine-side function name in that trace is a `dbghelp`
+guess (no Release PDB for the plugin or for `flutter_windows.dll`, so frames were attributed to the
+nearest export); only the CRT frames and the module+offset pairs are real.
 
 The patch (`find()` in both callbacks returning the `nullptr` they already used for "no texture";
 `texture_id_` cleared under the mutex; the same non-throwing lookup in `Render`/`CheckAndResize`,
@@ -722,7 +734,23 @@ without a trace; the `ThreadPool::Post` calls in `NotifyRender`/`~VideoOutput` g
 throws once the pool is stopped, `NotifyRender` is mpv callback C code and a throwing destructor *is*
 `terminate`; `~VideoOutput` waiting on its teardown promise only when a texture existed, because
 upstream blocked forever otherwise; the `const` `width()`/`height()` accessors; and a catch around
-`task()` in the pool's worker loop). Full rationale, the exact diff, and the re-apply procedure for a
+`task()` in the pool's worker loop).
+
+**Added after the crash was already fixed by `find()`, and for a reason the dump forced.** The
+`.at()` → `find()` conversion removed every *known* throwing lookup, yet a `std::_Xout_of_range`
+still arrived from the plugin on the raster thread. There is **no `.at(` anywhere in the package**,
+so the throw came from one inlined out of a header rather than a `.cc`, and with no Release PDB
+there is no way to name the line. Rather than keep hunting a frame that cannot be attributed, both
+texture callbacks and `HandleMethodCall` are now wrapped in `try`/`catch(...)`, so **no boundary the
+engine calls into can throw past it**: the failure degrades from a killed process to a dropped
+frame. `HandleMethodCall` is the more exposed of the two, since its arguments arrive over the method
+channel and `std::get`/`std::stoll` throw on data we did not write (`std::out_of_range` from
+`std::stoll` is literally the thrower the dump names). Its catch deliberately does not touch
+`result` — several branches move it into a continuation, so replying an error could use a
+moved-from `unique_ptr`; a call that never gets a result leaves one Dart future hanging, which the
+existing timeouts already handle.
+
+Full rationale, the exact diff, and the re-apply procedure for a
 version bump are in `packages/media_kit_video/VENDORED.md`; every edit is marked `// iptvs patch:`
 in place. Do **not** point this dependency back at pub.dev without re-applying that patch — nothing in
 Dart will fail, the player will just die on zap again.
@@ -857,7 +885,14 @@ geometry, so drawing and hit-testing cannot drift apart again.
 The controls
 overlay is a layered window clipped to a region covering only the top+bottom bars (+ open
 menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
-when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
+when the bar height changes (e.g. the taller live-EPG bar). **A press outside an open list menu
+closes it without doing anything else** — the region means "outside" is two different windows, so
+the overlay's `WM_LBUTTONDOWN` (a press on its own bars) and the video surface's
+`NativeVideoSurfaceWndProc` (a press on the rest of the window, which the region does not cover)
+both clear `open_menu`, both swallow the press (no click-through to the control or video under the
+cursor), and both reach `kNativeControlsLayoutMessage` so the menu rect leaves the region and the
+menu is erased. That is the contract behind "click outside the speed window closes it without
+changing the selection" — the video surface is the half of it that used to be missing. The **SDR embedded path** instead uses
 the shared Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's and —
 in `touch` mode — iOS's mpv path, see "iOS"), kept
 at visual parity with the GDI overlay (chip buttons, badges in the same order, favorite star, and
@@ -1496,6 +1531,48 @@ native surfaces (Windows GDI/HDR, Android Compose, iOS, the Linux Lua OSD — wh
 the preferences to their chrome badge/readout only) is outstanding. Pinned by
 `test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
 
+### The clock badge's regional format
+
+The dated clock badge follows the **user's Windows regional settings** rather than a hard-coded
+English shape. On Windows with a Russian desktop it reads `пятница, 6 октября 2026 г. · 12:34`: the
+OS **long date** (`LOCALE_SLONGDATE`) plus its **short time** (`LOCALE_SSHORTTIME`), joined by the
+same middle dot the badge has always used. Nothing resolved ⇒ the hand-rolled English
+`Sat 8 Aug · 16:02` it showed before.
+
+This has to be one value for **two surfaces on one machine** — the native Windows GDI overlay and
+the shared Flutter overlay (Windows SDR preview→fullscreen; Linux embedded) — because a stream's
+dynamic range picks which one draws, and the same user must not see two different clocks. So both
+read the same source:
+
+- **Native** (`windows/runner/flutter_window.cpp`): `LongDateNow`/`ShortTimeNow` format the user's
+  `LOCALE_SLONGDATE`/`LOCALE_SSHORTTIME` pictures through `GetDateFormatEx`/`GetTimeFormatEx`; the
+  GDI badge (`FormatClock`) joins them with the middle dot, and `ClockFormatMap` (the `iptvs/clock`
+  answer) sends the **same long-date string** plus the short-time *picture* and the AM/PM
+  designators. This replaced a C-locale `wcsftime("%a %#d %b · %H:%M")`, which was English
+  regardless of the desktop.
+- **Dart** (`lib/player/clock_format.dart`): `detectClockFormat()` — fired unawaited from `main()`
+  on Windows — asks `iptvs/clock`'s `locale` once and stores a `ClockFormat`, which
+  `playerClockLabel` (`player_overlay.dart`) renders.
+
+**The date is a string NLS already formatted, not a picture Dart rebuilds — and that is the point.**
+NLS inflects a month that sits next to a day number, so the mask `d MMMM yyyy 'г.'` yields the
+genitive **"6 октября 2026 г."**. Rebuilding the date from month-name constants printed the
+standalone nominative **"6 октябрь 2026 г."** instead (`LOCALE_SMONTHNAME10` is "Октябрь"; a lone
+`MMMM` picture is treated as standalone too and returns the same nominative) — so the names never
+cross the channel; the finished date does.
+
+Only the **time** travels as a picture, because it ticks: `ClockFormat.format` renders it locally
+each minute with a deliberately tiny scanner (`h`/`H`/`m`/`s`/`t` runs, quoted literals, `\`
+escapes; an unmodelled token is copied verbatim rather than guessed at). Because that date string is
+only good for the day it was fetched, `refreshClockFormatIfStale` re-asks when the local day rolls
+over — the shared overlay calls it from its 30 s clock tick, so a session left running across
+midnight does not keep printing yesterday. A blank or missing pattern is rejected whole
+(`ClockFormat.fromMap` returns null) so the English fallback stays in charge — fail closed.
+Pinned by `test/clock_format_test.dart`.
+
+**Outstanding:** the Android Compose, iOS and Linux Lua overlays still print their own clock; only
+the Windows pair reads the regional format so far.
+
 ### VOD/series card shape
 
 The media grid's cards are **portrait (2:3) or landscape (16:9)**, one global
@@ -2050,6 +2127,40 @@ stays null for VOD, catch-up, and every route that isn't channel-list-borne, so 
     consecutive pages from appearing to skip content. `moveQuickList` clamps, so a page key cannot
     wrap a long list. Direction is unchanged and still decided in one place: Page Down moves the
     highlight **down**.
+
+- **The step pair, and the one list it walks.** One pair of controls serves both modes. On live it
+  steps channels (the rules above); on VOD it steps the entries of a `VodStepSession`, and the
+  **direction is the same in both** — Previous is `channelDown`, Next is `channelUp`, and
+  `PlayerScreen._stepPreviousEntry`/`_stepNextEntry` branch on whether a VOD session is present. The
+  pair is drawn only when **both** callbacks are wired (`canStepEntry` / `stepEnabled`) and is
+  **absent, never disabled**, at the ends of the list as everywhere else: a route with no list to
+  walk shows no affordance it cannot honour, and a surface with no in-place swap simply has no
+  session to offer. It sits in the **transport beside play/pause**, ahead of the seek buttons, and
+  deliberately *not* in the right-hand cluster with aspect/info — those are settings for the item on
+  screen, these move between items.
+- **The VOD list is the caller's, and it is a snapshot, never a re-query.** A `VodStepSession`
+  (`lib/player/vod_step_session.dart`) pairs the entries with a resolver; `_vodIndex` moves **only
+  after that resolve succeeds**, so a failed resolve leaves the cursor where it was rather than
+  skipping an unwatchable entry. Siblings come from the launch site, because only it knows what the
+  user was looking at: an episode carries its **season's** list (so stepping never crosses a season
+  boundary they did not cross on screen — `MediaDetailsSheet`'s `onPlayEpisode` is therefore
+  `void Function(MediaItem, List<MediaItem>)`, and the episode list travels with the episode), and a
+  film carries the tab's loaded snapshot in the current sort. **Movies only** on that second path: a
+  series card's meaningful siblings are its episodes, and inventing a "next series" would be a
+  feature nobody asked for. The snapshot is passed by reference — `vodStepIndex` is an index
+  computation, so a 29k-item catalogue costs nothing to carry. It is the **active** tab's, so an item
+  not in it finds no match, yields a null session, and therefore draws no pair: a foreign item gets
+  no neighbours rather than the wrong provider's.
+- **VOD stepping reuses the zap command vocabulary rather than a new one.** The native surfaces
+  send `zap:down`/`zap:up`, which `parseZapCommand` already maps to `channelDown`/`channelUp`;
+  `_handleZapCommand` diverts exactly those two kinds to the step handlers when a VOD session is
+  present and the stream is not live. That is what lets the Windows GDI transport buttons work
+  without that surface knowing anything about VOD, and it keeps the rule that reads backwards between
+  live and VOD (`zap:up` = "next" on both, but PgDn advances on live while PgUp advances on VOD) in
+  one place. Gated on a session **and** `!_isLive` deliberately: with no session the command falls
+  through and is still declined, so this cannot turn a dead key into a silently swallowed one, and
+  live is untouched so the step handlers can still call back in without recursing. Pinned by
+  `test/vod_step_session_test.dart` and `test/player_overlay_test.dart`.
 
 - **The resolver is state-based, never reuse of the route's original widget fields.** The
   `_current*` mirrors already exist so a single live route survives probes/episodes without a
@@ -2612,7 +2723,11 @@ not the zap controller's: the banner restarts its 3 s hide on every `bannerRevis
 one-second countdown routed through that path would hold the banner up forever. The countdown rides
 the deadline, not a decrement, so a late tick (a hidden window throttling timers) self-corrects. The
 chip (`autoSwitchChipLabel`) is printed verbatim by every surface and holds — not pauses — while a
-resolve is in flight, the quick list is open, or the range has one entry (`AutoSwitchHold`).
+resolve is in flight, the quick list is open, the range has one entry (`AutoSwitchHold`), or the
+window is hidden to the tray (`AutoSwitchHold.silenced`): the F12/close-to-tray hide pauses
+playback and swallows every input, so the walker must stop reselecting into a window nobody can
+see — a hold (freeze) rather than a stop, so restoring the window resumes the same countdown
+(`LiveZapController` tracks it off the process-wide `silenceRequest`/`resumeRequest`).
 
 **Random zapping** (`LiveZapController.random`, toggled by **Ctrl+R**, persisted in
 `AppSettingsStore.randomZapping`) makes `channelUp`/`channelDown` pick a random index that is never

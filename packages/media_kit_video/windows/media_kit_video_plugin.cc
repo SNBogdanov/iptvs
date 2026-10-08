@@ -7,8 +7,11 @@
 // LICENSE file.
 #include "media_kit_video_plugin.h"
 #include "utils.h"
-
 #include <Windows.h>
+#include <exception>
+#include <iostream>
+#include <string>
+
 
 namespace media_kit_video {
 
@@ -99,6 +102,39 @@ void MediaKitVideoPlugin::ProcessMainThreadTasks() {
 }
 
 void MediaKitVideoPlugin::HandleMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& method_call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  // iptvs patch: exception barrier on an engine-called boundary.
+  //
+  // The crash dump shows what happens when a C++ throw crosses into Flutter's
+  // own C++ from a plugin: the engine's handler runs, cannot deal with it, and
+  // calls `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` - reported as
+  // STATUS_STACK_BUFFER_OVERRUN (0xC0000409) with no Dart log, no crash
+  // handler and no unwinding into us. This body has several ways to throw on
+  // data that arrives over the channel rather than from our own code:
+  // `std::get` on an `EncodableValue` of the wrong alternative
+  // (`std::bad_variant_access`), and `std::stoll` on a value that is not a
+  // number or does not fit a `long long` (`std::invalid_argument` /
+  // `std::out_of_range` - the last is literally the `std::_Xout_of_range`
+  // thrower the dump names).
+  //
+  // The catch deliberately does NOT touch `result`: several branches move it
+  // into a continuation, so replying an error here could use a moved-from
+  // unique_ptr. A method call that never receives a result only leaves one
+  // Dart future hanging, which the existing timeouts already handle; the same
+  // throw without this barrier takes the whole process down.
+  try {
+    HandleMethodCallInner(method_call, std::move(result));
+  } catch (const std::exception& e) {
+    std::cerr << "media_kit: HandleMethodCall(" << method_call.method_name()
+              << ") threw: " << e.what() << std::endl;
+  } catch (...) {
+    std::cerr << "media_kit: HandleMethodCall(" << method_call.method_name()
+              << ") threw a non-standard exception" << std::endl;
+  }
+}
+
+void MediaKitVideoPlugin::HandleMethodCallInner(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   if (method_call.method_name().compare("VideoOutputManager.Create") == 0) {

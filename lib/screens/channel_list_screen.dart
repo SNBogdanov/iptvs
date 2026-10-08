@@ -30,6 +30,7 @@ import '../player/buffer_preset.dart';
 import '../player/channel_dwell.dart';
 import '../player/live_zap_controller.dart';
 import '../player/player_screen.dart';
+import '../player/vod_step_session.dart';
 import '../player/tray.dart'
     show
         alwaysOnTopEnabled,
@@ -2896,6 +2897,56 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
   }
 
+  /// The sibling list a movie steps through, or null when there is none.
+///
+/// **Movies only.** A series card steps through nothing here — the meaningful
+/// siblings of a series are its *episodes*, and those come from the season list
+/// in the series browser, already wired. Handing a series card the other series
+/// in the grid would invent a "next" the user never saw as a sequence.
+///
+/// The loaded snapshot is passed by reference and is not copied or indexed:
+  /// `vodStepIndex` is an index computation, so a 29k-item catalogue costs
+  /// nothing to carry and there is no second list to keep in step with the grid.
+  ///
+  /// An item that is *not* in that snapshot — a rail entry for something the
+  /// current category never loaded, say — yields a null session, because
+  /// `_vodStepFor` looks the id up and declines on a miss. That is deliberate
+  /// and is the safety property here: this list is the *active* tab's, so a
+  /// caller that could hand us a foreign item gets no step pair rather than a
+  /// neighbour from the wrong provider. Resolution already goes through the
+  /// active repository ([_playMedia]), so the two agree about what "sibling"
+  /// can mean.
+List<MediaItem>? _movieSiblings(MediaItem item) {
+    if (item.kind != ContentKind.movie) return null;
+    final items = _media(item.kind).snapshot?.items;
+    if (items == null || items.length < 2) return null;
+    return items;
+  }
+
+  /// The VOD step session for [item] among [siblings], or null when the caller
+  /// had no list or the item is not in it.
+  ///
+  /// **The `indexWhere` miss is a real case, not a defensive flourish**: an
+  /// episode opened from a *different* season's list, or a title resumed from the
+  /// continue-watching rail, arrives with siblings that do not contain it. The
+  /// answer is "no pair", because `VodStepSession` asserts a cursor that
+  /// addresses its own list — passing `-1` would throw inside the route's
+  /// constructor, i.e. a crash on a perfectly ordinary resume.
+  VodStepSession? _vodStepFor(MediaItem item, List<MediaItem>? siblings) {
+    if (siblings == null || siblings.isEmpty) return null;
+    final index = siblings.indexWhere((sibling) => sibling.id == item.id);
+    if (index < 0) return null;
+    return VodStepSession(
+      items: siblings,
+      index: index,
+      // Movies/series always resolve against the active source, and this route
+      // has the repository in hand — the session's callback exists so an episode
+      // could pass its season's `parent` through, which `resolveMedia` reads off
+      // the item itself when present.
+      resolve: (MediaItem target) => widget.repo.resolveMedia(target),
+    );
+  }
+
   void _replaceMediaItem(MediaItem replacement) {
     _media(replacement.kind).replaceItems({replacement.id: replacement});
   }
@@ -2903,7 +2954,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// Play a movie/episode fullscreen, auto-resuming from any saved position
   /// unless [fromStart]. The player persists the new position (periodically,
   /// on exit, and via the Android native player's close payload).
-  Future<void> _playMedia(MediaItem item, {bool fromStart = false}) async {
+  Future<void> _playMedia(
+    MediaItem item, {
+    bool fromStart = false,
+    List<MediaItem>? siblings,
+  }) async {
     if (_resolving) return;
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
@@ -2931,6 +2986,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             title: item.title,
             stream: stream,
             sourceName: widget.repo.source.name,
+            vodStep: _vodStepFor(item, siblings),
             // Movies/series are always the active source — only live rows can
             // belong to another one.
             bufferPreset: bufferPresetFromName(widget.config.bufferPresetName),
@@ -2999,18 +3055,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // movies, so "Continue watching" reloads on return (the sheet used to
         // push its own player, which skipped that reload — the series rail then
         // went stale until a manual refresh).
-        onPlayEpisode: _playMedia,
-        onPlay:
+        onPlayEpisode: (episode, siblings) =>
+            _playMedia(episode, siblings: siblings),
+onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
-            ? () {
-                Navigator.of(context).pop();
-                _playMedia(item);
-              }
-            : null,
+                ? () {
+                    Navigator.of(context).pop();
+                    _playMedia(item, siblings: _movieSiblings(item));
+                  }
+                : null,
         onPlayFromStart: resume != null
             ? () {
                 Navigator.of(context).pop();
-                _playMedia(item, fromStart: true);
+                _playMedia(
+                  item,
+                  fromStart: true,
+                  siblings: _movieSiblings(item),
+                );
               }
             : null,
       ),

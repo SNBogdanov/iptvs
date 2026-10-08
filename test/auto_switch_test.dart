@@ -138,6 +138,41 @@ void main() {
       });
     });
 
+    test('a hidden window holds the clock, freezes and resumes it', () {
+      fakeAsync((async) {
+        final (auto, _) = buildIn(async);
+        auto.enable();
+        async.elapse(const Duration(seconds: 2));
+        auto.sync(
+          settling: false,
+          quickListOpen: false,
+          entryCount: 3,
+          silenced: true,
+        );
+        expect(auto.hold, AutoSwitchHold.silenced);
+        expect(autoSwitchChipLabel(auto), contains('hidden'));
+        final frozen = auto.remaining;
+        async.elapse(const Duration(seconds: 30));
+        expect(
+          advances,
+          0,
+          reason: 'no switching into a window hidden to the tray',
+        );
+        expect(auto.remaining, frozen, reason: 'a hold is a freeze, not a stop');
+
+        auto.sync(
+          settling: false,
+          quickListOpen: false,
+          entryCount: 3,
+          silenced: false,
+        );
+        expect(auto.hold, AutoSwitchHold.none);
+        // Resumes into the rest of the period it was part-way through.
+        expect(auto.remaining, frozen);
+        auto.dispose();
+      });
+    });
+
     test('a hold resumes the frozen count rather than restarting it', () {
       fakeAsync((async) {
         final (auto, _) = buildIn(async);

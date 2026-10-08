@@ -43,3 +43,16 @@ String stableM3uChannelId(String locator) =>
     '$_m3uChannelPrefix${sha256.convert(utf8.encode(normalizeM3uLocator(locator)))}';
 
 bool isStableM3uChannelId(String value) => value.startsWith(_m3uChannelPrefix);
+
+const _m3uMediaPrefix = 'm3u-media:';
+
+/// Stable, credential-opaque M3U **VOD** identifier, for the playlist rows that
+/// point at a file rather than a stream (see [isM3uFileLocator in m3u_source]).
+///
+/// A deliberately separate namespace from [stableM3uChannelId]: the same
+/// content-derived digest is the identity under another kind, and the M3U id
+/// migration (`migrateM3uChannelIds`) only ever re-keys `channels`/live
+/// favorites/programmes, never `media_items` — so media rows carry their own
+/// prefix and nothing that globs `m3u-channel:*` can reach them.
+String stableM3uMediaId(String locator) =>
+    '$_m3uMediaPrefix${sha256.convert(utf8.encode(normalizeM3uLocator(locator)))}';

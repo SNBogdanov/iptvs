@@ -24,6 +24,7 @@ import 'buffer_preset.dart';
 import 'auto_switch.dart';
 import 'channel_dwell.dart';
 import 'channel_number_entry.dart';
+import 'tray.dart';
 import 'zap_command.dart';
 import 'zap_quick_list.dart';
 
@@ -191,7 +192,14 @@ class LiveZapController extends ChangeNotifier {
        _playingEntry = entries[initialIndex],
        _launchEntry = entries[initialIndex],
        _rangeCatId = rangeCategoryId,
-       _rangeCatLabel = rangeLabel;
+       _rangeCatLabel = rangeLabel {
+    // The window can hide to the tray while a live session is up, pausing
+    // playback and silencing every input; the countdown must stand down with
+    // it (see `_syncAutoSwitch`'s `silenced`). Process-wide notifiers, so the
+    // subscription only ever fires on the tray-supporting platform.
+    silenceRequest.addListener(_onSilenceRequested);
+    resumeRequest.addListener(_onResumeRequested);
+  }
 
   final ZapCatalog catalog;
   final Duration settleDelay;
@@ -271,6 +279,12 @@ class LiveZapController extends ChangeNotifier {
   bool _settling = false;
   bool _settleRunning = false;
   bool _resettleWanted = false;
+
+  /// The window is hidden to the tray while this session is up: playback is
+  /// paused on it and no input can reach the player, so the auto-switch
+  /// countdown freezes ([AutoSwitchHold.silenced]) instead of reselecting into
+  /// a window nobody can see. Raised/cleared by the tray hide events.
+  bool _silenced = false;
   List<Channel>? _rangeChannelsCache;
 
   /// The digit buffer, **the same [ChannelNumberEntry] the live list types
@@ -1208,6 +1222,7 @@ class LiveZapController extends ChangeNotifier {
         settling: _settling,
         quickListOpen: _listOpen,
         entryCount: _entries.length,
+        silenced: _silenced,
       );
   }
 
@@ -1334,6 +1349,23 @@ class LiveZapController extends ChangeNotifier {
     _notify();
   }
 
+  /// The runner hid the window to the tray (boss key / close-to-tray).
+  void _onSilenceRequested() {
+    _setSilenced(true);
+  }
+
+  /// The window came back from the tray: unfreeze the frozen countdown rather
+  /// than letting it resume from a fresh period, so a hide costs no time.
+  void _onResumeRequested() {
+    _setSilenced(false);
+  }
+
+  void _setSilenced(bool value) {
+    if (_silenced == value) return;
+    _silenced = value;
+    _syncAutoSwitch();
+  }
+
   void _showMessage(String text) {
     _message = text;
     _messageTimer?.cancel();
@@ -1362,6 +1394,8 @@ class LiveZapController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    silenceRequest.removeListener(_onSilenceRequested);
+    resumeRequest.removeListener(_onResumeRequested);
     _settleTimer.cancel();
     _messageTimer?.cancel();
     _messageTimer = null;

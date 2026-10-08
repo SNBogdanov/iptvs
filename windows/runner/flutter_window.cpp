@@ -64,6 +64,10 @@ constexpr const wchar_t kNativeControlsClassName[] =
     L"IPTVS_NATIVE_VIDEO_CONTROLS";
 constexpr const char kNativeHdrPlayerChannel[] = "iptvs/native_hdr_player";
 constexpr const char kTrayChannel[] = "iptvs/tray";
+// The user's regional date/time format, asked for once by the Dart overlay
+// (`clock_format.dart`) so its clock badge reads the same as the GDI one this
+// file draws. One source - the machine's own settings - for two surfaces.
+constexpr const char kClockChannel[] = "iptvs/clock";
 constexpr UINT kNativeVideoSurfaceInputMessage = WM_APP + 0x4D;
 constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
@@ -112,7 +116,10 @@ constexpr int kNativeIdentityRowGap = 10;
 constexpr int kNativeMenuWidth = 300;
 constexpr int kNativeMenuHeaderHeight = 36;
 constexpr int kNativeMenuRowHeight = 40;
-constexpr int kNativeMenuMaxRows = 5;
+// The list menus (audio/subtitle/speed) show this many rows before scrolling.
+// The speed menu carries exactly six entries (0.5x..2.0x), so a cap below six
+// forced its last row behind the scrollbar — the "all rows, no scroll" report.
+constexpr int kNativeMenuMaxRows = 6;
 constexpr int kNativeMenuPadding = 10;
 constexpr int kNativeControlsKindOverlay = 0;
 #ifndef NDEBUG
@@ -216,6 +223,12 @@ enum class NativeFocusItem {
   kBack,
   kFavorite,
   kPlay,
+  // Previous / next entry - the music-player slot beside play/pause. One pair
+  // for both modes: on live it steps channels, on VOD the entries of the
+  // route's list. Absent rather than disabled, so a route with no list to walk
+  // shows no affordance it cannot honour.
+  kStepPrevious,
+  kStepNext,
   kSeekBack,
   kSeekForward,
   kMute,
@@ -285,6 +298,13 @@ struct NativeControlState {
   // grid's own play path) must keep them, or Dart would decline the command
   // and they would become dead keys.
   bool zap_enabled = false;
+  // Whether this route has *any* list to step through - live zapping or a VOD
+  // step session (`PlayerScreen._canStepEntry`). One flag for both modes rather
+  // than a second `vodStepEnabled`, because the pair of buttons does exactly
+  // the same thing either way: send the same two commands and let the route
+  // decide what they mean (zap on live, previous/next film or episode on VOD).
+  // Fails closed - an older Dart build that never sends it draws no buttons.
+  bool step_enabled = false;
   // Device-wide chrome preferences (Settings → "Clock in the player" / "Playback
   // time in the player"), pushed on every setControlState. Both default to
   // **true**, which is what this overlay draws today — so a Dart build that
@@ -1366,6 +1386,11 @@ struct BottomLayout {
   RECT bottom;
   int control_center_y = 0;
   RECT play;
+  // Previous / next entry. The pair or neither, never one: a lone step button
+  // has no direction to point in.
+  bool has_step = false;
+  RECT step_previous;
+  RECT step_next;
   bool has_seek = false;
   RECT seek_back;
   RECT seek_forward;
@@ -1420,6 +1445,18 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   int x = NativeScale(16);
   l.play = RectFrom(x, top, x + kBtn, bot);
   x += kBtn + NativeScale(8);
+  // The step pair sits in the transport beside play/pause, ahead of the seek
+  // buttons - the music-player slot, and deliberately *not* in the right-hand
+  // cluster with aspect and info: those are settings for the item on screen,
+  // while these move between items. Same order as the shared Flutter overlay
+  // (`player_overlay.dart`, the transport Row).
+  l.has_step = g_native_control_state.step_enabled;
+  if (l.has_step) {
+    l.step_previous = RectFrom(x, top, x + kBtn, bot);
+    x += kBtn + NativeScale(8);
+    l.step_next = RectFrom(x, top, x + kBtn, bot);
+    x += kBtn + NativeScale(8);
+  }
   l.has_seek = !live;
   if (l.has_seek) {
     l.seek_back = RectFrom(x, top, x + kBtn, bot);
@@ -1567,6 +1604,10 @@ std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   std::vector<NativeFocusItem> out;
   out.push_back(NativeFocusItem::kBack);
   out.push_back(NativeFocusItem::kPlay);
+  if (l.has_step) {
+    out.push_back(NativeFocusItem::kStepPrevious);
+    out.push_back(NativeFocusItem::kStepNext);
+  }
   if (l.has_seek) {
     out.push_back(NativeFocusItem::kSeekBack);
     out.push_back(NativeFocusItem::kSeekForward);
@@ -1595,6 +1636,16 @@ std::string CommandForFocusedItem(NativeFocusItem item) {
     return "favorite";
   case NativeFocusItem::kPlay:
     return "playPause";
+  // The **existing** zap vocabulary, deliberately: `zap:down` is
+  // `channelDown` (Previous) and `zap:up` is `channelUp` (Next) in
+  // `player/zap_command.dart`, and the route dispatches both to the live
+  // cursor or the VOD step list. Reusing them means this surface invents no
+  // command of its own, and the direction rule - which reads backwards
+  // between PgUp/PgDn and live/VOD - stays in exactly one place.
+  case NativeFocusItem::kStepPrevious:
+    return "zap:down";
+  case NativeFocusItem::kStepNext:
+    return "zap:up";
   case NativeFocusItem::kSeekBack:
     return "seekBack";
   case NativeFocusItem::kSeekForward:
@@ -1736,15 +1787,28 @@ RECT CurrentMenuRect(const RECT &rect) {
   return MenuRect(rect, MenuAnchorX(layout));
 }
 
+// Row geometry inside the list menu, in the panel's local pixels.
+//
+// **Every offset here must be `NativeScale`d.** `MenuRect` sizes the panel from
+// scaled constants and `UiFont` scales the text drawn into it, but this list
+// used to step by the raw logical constants — so at 150% DPI the panel came out
+// 369px tall while the five rows it was sized for spanned only 236px, leaving
+// the bottom half of the menu empty and unclickable. The failure looked exactly
+// like "the window is tall but the speeds only fill half of it", and it hit the
+// hit-test too, because `NativeControlsWndProc` reads this same function: paint
+// and click agreed, so the dead band was uniformly dead rather than
+// mis-registered.
 std::vector<RECT> MenuOptionRects(const RECT &rect) {
   std::vector<RECT> out;
   const int visible_rows = MenuVisibleRowCount();
-  const int left = 10;
-  const int right = rect.right - 10;
-  int top = kNativeMenuHeaderHeight;
+  const int left = NativeScale(10);
+  const int right = rect.right - NativeScale(10);
+  int top = NativeScale(kNativeMenuHeaderHeight);
   for (int i = 0; i < visible_rows; i++) {
-    out.push_back(RectFrom(left, top, right, top + kNativeMenuRowHeight - 4));
-    top += kNativeMenuRowHeight;
+    out.push_back(RectFrom(left, top, right,
+                         top + NativeScale(kNativeMenuRowHeight) -
+                             NativeScale(4)));
+    top += NativeScale(kNativeMenuRowHeight);
   }
   return out;
 }
@@ -1824,21 +1888,90 @@ int64_t NowMs() {
       .count();
 }
 
-// Date + time for the top-bar clock badge, e.g. "Fri 26 Jun · 23:09" (locale names).
+// One locale attribute as text, or empty when Windows has nothing for it.
+std::wstring LocaleInfoString(LCTYPE type) {
+  wchar_t buffer[128];
+  int n = GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, type, buffer, 128);
+  return n > 1 ? std::wstring(buffer) : std::wstring();
+}
+
+// The long date for **now**, produced by NLS from the user's own picture
+// (`LOCALE_SLONGDATE`, e.g. `d MMMM yyyy 'г.'`). Letting GetDateFormatEx apply
+// the mask is what inflects the month - NLS reads a day number next to a full
+// month name and prints the genitive ("6 октября 2026 г."), where the standalone
+// month constant is nominative ("Октябрь"). Rebuilding the date from month
+// constants in Dart is exactly how the badge once printed "6 октябрь 2026 г.".
+std::wstring LongDateNow() {
+  SYSTEMTIME st{};
+  GetLocalTime(&st);
+  const std::wstring picture = LocaleInfoString(LOCALE_SLONGDATE);
+  wchar_t date[128];
+  const int n = GetDateFormatEx(
+      LOCALE_NAME_USER_DEFAULT, picture.empty() ? DATE_LONGDATE : 0, &st,
+      picture.empty() ? nullptr : picture.c_str(), date, 128, nullptr);
+  return n > 0 ? std::wstring(date) : std::wstring();
+}
+
+std::wstring ShortTimeNow() {
+  SYSTEMTIME st{};
+  GetLocalTime(&st);
+  const std::wstring picture = LocaleInfoString(LOCALE_SSHORTTIME);
+  wchar_t time[64];
+  const int n = GetTimeFormatEx(
+      LOCALE_NAME_USER_DEFAULT, picture.empty() ? TIME_NOSECONDS : 0, &st,
+      picture.empty() ? nullptr : picture.c_str(), time, 64);
+  return n > 0 ? std::wstring(time) : std::wstring();
+}
+
+// UTF-8 for the method-channel boundary: `EncodableValue` carries `std::string`,
+// never `std::wstring`, and the regional date this runner sends Dart is the
+// first thing on that channel that is not ASCII (Cyrillic month and weekday
+// names).
+std::string ToUtf8(const std::wstring &text) {
+  if (text.empty()) {
+    return std::string();
+  }
+  const int size = WideCharToMultiByte(
+      CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0,
+      nullptr, nullptr);
+  std::string out(static_cast<size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
+                      out.data(), size, nullptr, nullptr);
+  return out;
+}
+
+// The regional date/time format, as the Dart overlay needs it
+// (`clock_format.dart`): the long date **already formatted by NLS for today**,
+// plus the short-time picture and the AM/PM designators. Only the time travels
+// as a picture, because it ticks - Dart formats that one each minute - while the
+// date is constant for the day and is best left to the same
+// `GetDateFormatEx` the GDI badge calls, so the two cannot disagree.
+flutter::EncodableMap ClockFormatMap() {
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("longDate")] =
+      flutter::EncodableValue(ToUtf8(LongDateNow()));
+  map[flutter::EncodableValue("shortTime")] =
+      flutter::EncodableValue(ToUtf8(LocaleInfoString(LOCALE_SSHORTTIME)));
+  map[flutter::EncodableValue("am")] =
+      flutter::EncodableValue(ToUtf8(LocaleInfoString(LOCALE_S1159)));
+  map[flutter::EncodableValue("pm")] =
+      flutter::EncodableValue(ToUtf8(LocaleInfoString(LOCALE_S2359)));
+  return map;
+}
+
+// Date + time for the top-bar clock badge, in the user's Windows regional
+// format - the OS long date plus its short time, e.g.
+// "пятница, 6 октября 2026 г. · 12:34". This used to be a C-locale `wcsftime`
+// with `%a %#d %b · %H:%M`, so the badge was English on a non-English desktop;
+// the Dart overlay's `playerClockLabel` now reads the same settings through
+// `iptvs/clock`, and the two share these two helpers so they cannot diverge.
 std::wstring FormatClock() {
-  std::time_t t = std::time(nullptr);
-  std::tm local{};
-  if (localtime_s(&local, &t) != 0) {
+  const std::wstring date = LongDateNow();
+  const std::wstring time = ShortTimeNow();
+  if (date.empty() || time.empty()) {
     return L"";
   }
-  wchar_t buffer[64];
-  // `%#d` is MSVC's "no leading zero" flag: "Sat 8 Aug", the same shape Kotlin's
-  // `EEE d MMM` and Dart's `playerClockLabel` produce. `%d` here was the only
-  // one padding it to "Sat 08 Aug".
-  if (wcsftime(buffer, 64, L"%a %#d %b · %H:%M", &local) == 0) {
-    return L"";
-  }
-  return buffer;
+  return date + L" · " + time;
 }
 
 // Wall-clock HH:mm for EPG programme start/stop labels.
@@ -2342,16 +2475,23 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
   const RECT menu_local = OffsetRectToLocal(menu, menu.left, menu.top);
   FillRoundRect(hdc, menu, NativeScale(kNativeMenuRadius), RGB(8, 9, 14));
   HFONT label_font = UiFont(13, FW_SEMIBOLD);
+  // Scaled on the same rule as `MenuOptionRects`: the panel's header band is
+  // `NativeScale(kNativeMenuHeaderHeight)` tall, so an unscaled 16/4/32 landed
+  // the label in the top third of the band with the rows starting well below it.
   DrawTextWithFont(
       hdc, MenuHeader(kind),
-      RectFrom(menu.left + 16, menu.top + 4, menu.right - 16, menu.top + 32),
+      RectFrom(menu.left + NativeScale(16), menu.top + NativeScale(4),
+               menu.right - NativeScale(16),
+               menu.top + NativeScale(32)),
       DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font, RGB(154, 161, 178));
   const auto option_rects = MenuOptionRects(menu_local);
   if (options.empty()) {
     DrawTextWithFont(
         hdc, L"Nothing available",
-        option_rects.empty() ? RectFrom(menu.left + 16, menu.top + 36,
-                                        menu.right - 16, menu.bottom - 10)
+        option_rects.empty() ? RectFrom(menu.left + NativeScale(16),
+                                        menu.top + NativeScale(36),
+                                        menu.right - NativeScale(16),
+                                        menu.bottom - NativeScale(10))
                              : RectFrom(menu.left + option_rects[0].left,
                                         menu.top + option_rects[0].top,
                                         menu.left + option_rects[0].right,
@@ -2380,8 +2520,8 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
                        active ? RGB(255, 255, 255) : RGB(218, 222, 233));
     }
     if (MenuMaxScrollOffset() > 0) {
-      const int track_top = menu.top + kNativeMenuHeaderHeight;
-      const int track_bottom = menu.bottom - kNativeMenuPadding;
+      const int track_top = menu.top + NativeScale(kNativeMenuHeaderHeight);
+      const int track_bottom = menu.bottom - NativeScale(kNativeMenuPadding);
       FillRoundRect(
           hdc, RectFrom(menu.right - 6, track_top, menu.right - 3, track_bottom),
           4, RGB(39, 43, 58));
@@ -2986,6 +3126,16 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
       paint_hdc, l.play,
       g_native_control_state.playing ? L"\xE769" : L"\xE768",
       is_focused(NativeFocusItem::kPlay));
+  if (l.has_step) {
+    // Segoe MDL2 "Previous" / "Next" - the same two glyphs the shared Flutter
+    // overlay draws for `Icons.skip_previous` / `Icons.skip_next`, at this row's
+    // ordinary button geometry. Tinted by nothing: they are an action, not a
+    // state, so the filled background still means keyboard focus alone.
+    DrawIconButton(paint_hdc, l.step_previous, L"\xE892",
+                   is_focused(NativeFocusItem::kStepPrevious));
+    DrawIconButton(paint_hdc, l.step_next, L"\xE893",
+                   is_focused(NativeFocusItem::kStepNext));
+  }
   if (l.has_seek) {
     DrawTextButton(paint_hdc, l.seek_back, L"-10",
                    is_focused(NativeFocusItem::kSeekBack));
@@ -3211,6 +3361,12 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   }
   if (PointInRect(x, y, l.play)) {
     return "playPause";
+  }
+  if (l.has_step && PointInRect(x, y, l.step_previous)) {
+    return "zap:down";
+  }
+  if (l.has_step && PointInRect(x, y, l.step_next)) {
+    return "zap:up";
   }
   if (l.has_seek) {
     if (PointInRect(x, y, l.seek_back)) {
@@ -3495,6 +3651,25 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
         return 0;
       }
     }
+    // A press anywhere outside an open popup menu dismisses it and goes no
+    // further. Selecting a speed is the *menu item* hit test inside the rect;
+    // an outside press must not also act on the control (or empty video) under
+    // it — that is how an outside click left the speed window hanging or
+    // reached a button the user was not aiming for. A dismiss is a dismiss,
+    // not a click-through.
+    if (g_native_control_state.open_menu != NativeMenuKind::kNone) {
+      RECT client_rect;
+      GetClientRect(hwnd, &client_rect);
+      if (!PointInRect(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam),
+                       CurrentMenuRect(client_rect))) {
+        g_native_control_state.open_menu = NativeMenuKind::kNone;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        if (HWND parent = NativeControlsOwner(hwnd)) {
+          PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
+        }
+        return 0;
+      }
+    }
     const int control_kind =
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     const std::string command = NativeControlCommandFromPoint(
@@ -3608,6 +3783,22 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
     }
     break;
   case WM_LBUTTONDOWN:
+    // A press on the video is an outside press while a popup menu is up — the
+    // controls overlay's region covers only its bars and the menu, so this
+    // surface is the rest of the window. The overlay closes on a press on its
+    // own chrome; this must dismiss the same menu the same way and swallow the
+    // press (no chrome reveal, no click-through), or an outside click leaves
+    // the speed window hanging — which is exactly the "click outside must close
+    // without changing the selection" report. The `kNativeControlsLayoutMessage`
+    // round-trip to the parent is what the overlay's own dismiss uses to
+    // rebuild the region (the menu rect leaves it) and repaint.
+    if (g_native_control_state.open_menu != NativeMenuKind::kNone) {
+      g_native_control_state.open_menu = NativeMenuKind::kNone;
+      if (HWND parent = GetParent(hwnd)) {
+        PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
+      }
+      return 0;
+    }
     if (HWND parent = GetParent(hwnd)) {
       PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
     }
@@ -3727,6 +3918,7 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   RegisterNativeHdrPlayerChannel();
   RegisterTrayChannel();
+  RegisterClockChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   // The tray icon outlives the first frame: it is the one affordance left after
@@ -4974,6 +5166,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "sourceName", g_native_control_state.source_name);
   g_native_control_state.zap_enabled =
       EncodableBoolArg(args, "zapEnabled", g_native_control_state.zap_enabled);
+  g_native_control_state.step_enabled =
+      EncodableBoolArg(args, "stepEnabled", g_native_control_state.step_enabled);
   // Absent key keeps the previous value, so the default-true init above is what
   // an older Dart build renders (and what a native route opened before the first
   // push ever drew).
@@ -5351,6 +5545,24 @@ void FlutterWindow::SetNativeWindowMiniPlayer(bool mini) {
   }
 }
 
+void FlutterWindow::RegisterClockChannel() {
+  clock_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kClockChannel,
+          &flutter::StandardMethodCodec::GetInstance());
+
+  clock_channel_->SetMethodCallHandler(
+      [](const flutter::MethodCall<flutter::EncodableValue> &call,
+         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+             result) {
+        if (call.method_name() == "locale") {
+          result->Success(flutter::EncodableValue(ClockFormatMap()));
+          return;
+        }
+        result->NotImplemented();
+      });
+}
+
 void FlutterWindow::RegisterNativeHdrPlayerChannel() {
   native_hdr_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -5626,3 +5838,4 @@ void FlutterWindow::RegisterTrayChannel() {
           flutter_controller_->engine()->messenger(), kTrayChannel,
           &flutter::StandardMethodCodec::GetInstance());
 }
+

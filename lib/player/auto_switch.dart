@@ -37,6 +37,12 @@ enum AutoSwitchHold {
   /// The quick list is open. It owns navigation outright — channels must not
   /// change behind a list the user is reading.
   quickList,
+
+  /// The window is hidden to the tray (boss key / close-to-tray). Playback is
+  /// paused on it and no input can reach the player, so switching channels is a
+  /// reconnect only a hidden user would pay for — the countdown freezes rather
+  /// than reselecting into the dark.
+  silenced,
 }
 
 extension AutoSwitchHoldX on AutoSwitchHold {
@@ -156,16 +162,19 @@ class AutoSwitch extends ChangeNotifier {
   ///
   /// Called by the controller on every state change it already reacts to,
   /// rather than the mode watching the world itself: the conditions are the
-  /// controller's own (`settling`, `quickListOpen`, range size) and there is
-  /// one of each.
+  /// controller's own (`settling`, `quickListOpen`, range size, the window
+  /// being hidden to the tray) and there is one of each.
   void sync({
     required bool settling,
     required bool quickListOpen,
     required int entryCount,
+    bool silenced = false,
   }) {
     if (_disposed) return;
     if (!_enabled) return;
-    final next = entryCount < 2
+    final next = silenced
+        ? AutoSwitchHold.silenced
+        : entryCount < 2
         ? AutoSwitchHold.nothingToSwitch
         : settling
         ? AutoSwitchHold.settling
@@ -286,6 +295,7 @@ String autoSwitchChipLabel(AutoSwitch auto) {
     AutoSwitchHold.settling => '$period s · switching',
     AutoSwitchHold.quickList => '$period s · list open',
     AutoSwitchHold.nothingToSwitch => '$period s · one channel',
+    AutoSwitchHold.silenced => '$period s · hidden',
     AutoSwitchHold.off => '',
   };
 }

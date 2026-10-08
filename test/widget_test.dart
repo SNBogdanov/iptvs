@@ -614,6 +614,89 @@ void main() {
       expect(fromStreamId.title, 'Alternate Series');
     });
 
+    // The catalogue mapper and the season mapper read their runtime through one
+    // helper. They did not used to: only `_seasonEpisodes` set durationSeconds,
+    // so episodes printed a runtime and movies on the same panel printed
+    // nothing - which reads as "the feature is broken", not "one of two mappers
+    // forgot". Pinned per key so a panel variant cannot silently drop it again.
+    group('movie runtime', () {
+      MediaItem movie(Map<String, dynamic> payload) =>
+          source.debugMapMediaItem(payload, ContentKind.movie);
+
+      test('reads duration in seconds', () {
+        expect(movie({'stream_id': '1', 'duration': 596}).durationSeconds, 596);
+      });
+
+      test('reads the duration_secs variant', () {
+        expect(
+          movie({'stream_id': '1', 'duration_secs': 596}).durationSeconds,
+          596,
+        );
+      });
+
+      test('reads a H:MM:SS duration', () {
+        expect(
+          movie({'stream_id': '1', 'duration': '01:45:30'}).durationSeconds,
+          6330,
+        );
+      });
+
+      test('reads a MM:SS duration as minutes and seconds', () {
+        expect(
+          movie({'stream_id': '1', 'duration': '45:30'}).durationSeconds,
+          2730,
+        );
+      });
+
+      test('falls back to duration_min only when seconds are absent or zero', () {
+        expect(
+          movie({'stream_id': '1', 'duration_min': 120}).durationSeconds,
+          7200,
+        );
+        // A panel that sent both agrees with itself; seconds win.
+        expect(
+          movie({
+            'stream_id': '1',
+            'duration': 596,
+            'duration_min': 120,
+          }).durationSeconds,
+          596,
+        );
+        // Zero means unknown, so the minutes answer is still reachable.
+        expect(
+          movie({
+            'stream_id': '1',
+            'duration': 0,
+            'duration_min': 120,
+          }).durationSeconds,
+          7200,
+        );
+      });
+
+      test('reads a decimal-seconds duration', () {
+        // A panel sending "596.0" used to fall through to the colon branch,
+        // where the single unparseable part made the whole value null.
+        expect(
+          movie({'stream_id': '1', 'duration': '596.0'}).durationSeconds,
+          596,
+        );
+        expect(
+          movie({'stream_id': '1', 'duration': '596.5'}).durationSeconds,
+          597,
+        );
+      });
+
+      test('stays null when the panel sent no runtime', () {
+        expect(movie({'stream_id': '1', 'name': 'No Runtime'}).durationSeconds,
+            isNull);
+        // Unparseable is not zero: it must not masquerade as a runtime.
+        expect(
+          movie({'stream_id': '1', 'duration': 'about two hours'}).durationSeconds,
+          isNull,
+        );
+      });
+    });
+
     test('adds a VOD user agent for direct movie playback', () async {
       const movie = MediaItem(
         id: 'movie-1',

@@ -62,6 +62,10 @@ private:
   void SetNativeWindowMiniPlayer(bool mini);
   void RegisterNativeHdrPlayerChannel();
   void RegisterTrayChannel();
+  // Answers `iptvs/clock`'s `locale` with the user's regional date/time format
+  // (patterns and names), which the shared Flutter overlay's clock badge renders
+  // exactly as the GDI badge here does.
+  void RegisterClockChannel();
 
   // System tray icon (docs/player.md "Windows tray icon"): the notification-area
   // icon, its show/hide + exit menu, and the close-to-tray policy. WM_CLOSE
@@ -96,6 +100,10 @@ private:
   // does not reach on Windows.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       tray_channel_;
+  // The regional-format channel (native → Dart): answers once at boot with the
+  // patterns and names the Dart overlay's clock badge formats against.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      clock_channel_;
 
   // Native child HWND used by mpv for Windows HDR playback.
   HWND native_video_surface_ = nullptr;

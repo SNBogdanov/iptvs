@@ -710,6 +710,7 @@ class XtreamSource
     return compute(decodeMediaItemsBytes, args);
   }
 
+
   Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
     final operation = HttpOperation(
       policy,
@@ -861,11 +862,9 @@ class XtreamSource
             _firstString(m, ['movie_image', 'cover', 'cover_big']) ??
             season.poster,
         description: _firstString(m, ['plot', 'description']),
-        year: _firstString(m, ['releasedate', 'release_date', 'year']),
-        durationSeconds: _parseDurationSeconds(
-          _firstString(m, ['duration', 'time', 'length']),
-        ),
-        seasonNumber: season.seasonNumber,
+year: _firstString(m, ['releasedate', 'release_date', 'year']),
+    durationSeconds: _durationFrom(m),
+    seasonNumber: season.seasonNumber,
         episodeNumber: _parseInt(m['episode_num'] ?? m['episode_number']),
         extra: m,
       );
@@ -992,9 +991,33 @@ MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
     description: _firstString(m, ['plot', 'description']),
     year: _firstString(m, ['releasedate', 'release_date', 'releaseDate', 'year']),
     rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),
+    durationSeconds: _durationFrom(m),
     providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
     extra: m,
   );
+}
+
+/// The catalogue's runtime in seconds, or null when the panel sent none.
+///
+/// **One rule for the whole source.** `_mapMediaItem` and `_seasonEpisodes`
+/// both read their runtime through here, because they did not used to: only the
+/// season mapper set `durationSeconds`, so an episode showed a runtime and a
+/// movie on the very same panel showed nothing — which reads as the feature
+/// being broken rather than as one of two mappers having forgotten.
+///
+/// `duration_min` is a separate fallback because some panels report minutes and
+/// nothing else; it is only consulted when the seconds fields are absent or
+/// zero, since a panel that sent both agrees with itself. A zero is treated as
+/// *unknown*, not as "zero-length": `formatMediaDuration` hides 0 anyway, and
+/// treating it as unknown is what lets the minutes fallback answer.
+int? _durationFrom(Map<String, dynamic> m) {
+  final seconds = _parseDurationSeconds(
+    _firstString(m, ['duration', 'duration_secs', 'time', 'length']),
+  );
+  if (seconds != null && seconds > 0) return seconds;
+  final minutes = _parseDouble(_firstString(m, ['duration_min']));
+  if (minutes != null && minutes > 0) return (minutes * 60).round();
+  return null;
 }
 
 List<Map<String, dynamic>> _listFromAny(dynamic value) {
@@ -1044,15 +1067,26 @@ double? _parseDouble(String? value) {
 }
 
 int? _parseDurationSeconds(String? value) {
-  if (value == null || value.isEmpty) return null;
-  final direct = int.tryParse(value);
-  if (direct != null) return direct;
-  final parts = value.split(':').map(int.tryParse).toList();
-  if (parts.any((part) => part == null)) return null;
-  if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
-  if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
-  return null;
-}
+    if (value == null || value.isEmpty) return null;
+    final direct = int.tryParse(value);
+    if (direct != null) return direct;
+    // A decimal seconds value ("596.0", "596.5") is a real Xtream Codes variant,
+    // and it used to fall through to the colon branch below, where a single
+    // unparseable part made the whole value null - i.e. a panel that sent a
+    // perfectly good runtime printed nothing. Rounded, since a card shows whole
+    // seconds.
+    if (!value.contains(':')) {
+      final asDouble = double.tryParse(value);
+      if (asDouble != null && asDouble.isFinite && asDouble > 0) {
+        return asDouble.round();
+      }
+    }
+    final parts = value.split(':').map(int.tryParse).toList();
+    if (parts.any((part) => part == null)) return null;
+    if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+    if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
+    return null;
+  }
 
 String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
   for (final key in keys) {

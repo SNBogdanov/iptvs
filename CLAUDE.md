@@ -1152,7 +1152,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   are readable *during playback* rather than only while the mouse moves. The preference reaches every
   surface (`showClock`/`showPlaybackTimes` on the native payloads); the always-on HUD is implemented
   on the embedded/shared overlay, with the native surfaces applying it to their chrome only so far.
-  See docs/player.md "Player chrome preferences".
+  **The dated clock badge is the machine's own regional format on Windows** — the OS long date
+  (formatted by NLS from `LOCALE_SLONGDATE`, so the inflected month is right) + short time, sourced
+  once over `iptvs/clock` (`clock_format.dart`) so the native GDI overlay and the shared Flutter
+  overlay cannot disagree, with the hand-rolled English `Sat 8 Aug · 16:02` as the fail-closed
+  fallback everywhere else.
+  See docs/player.md "Player chrome preferences" and "The clock badge's regional format".
 - **The live chrome is one layout on every surface that draws its own overlay.** Where the VOD
   scrubber sits, live gets a three-row EPG strip (programme title + `HH:mm – HH:mm`, progress bar,
   `Next · HH:mm – HH:mm · title`); LIVE is a **top-bar badge**, and the badges read source, LIVE,
@@ -1321,7 +1326,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   jumps randomly. The shuffle marker is `ZapBannerState.random`, drawn beside the countdown chip
   (which renders when the countdown is on **or** random is on, so the mode stays answerable with the
   chrome gone); `onRandomChanged` persists it back from the channel list. docs/player.md
-  "Live zapping" → "Auto-switch countdown + random zapping".
+  "Live zapping" → "Auto-switch countdown + random zapping". The countdown **holds (freezes), never
+  reselects, while the window is hidden to the tray** (`AutoSwitchHold.silenced`, driven off the
+  process-wide `silenceRequest`): the F12/close-to-tray hide pauses playback and swallows every
+  input, so switching channels on is reconnects into a window nobody can see; restore un-freezes the
+  same countdown rather than restarting it. Pinned by the `silenced` group in
+  `test/auto_switch_test.dart` and the tray-hide test in `test/live_zap_controller_test.dart`.
 - **A typed number in the fullscreen player is a zap, not a second input system.** `PlayerScreen`
   owns **no** `ChannelNumberEntry`: it reads the session's `LiveZapController.numberEntry` and draws
   the shared `ChannelNumberChip`, so a digit moves the same cursor PgDn/PgUp move, in the same range,
@@ -1469,18 +1479,25 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   filtered out of it".
 - **`media_kit_video` is vendored and patched — `packages/media_kit_video`, a `path:` dependency, not
   pub.dev 2.0.1.** Its Windows texture callbacks run **inside the Flutter engine** on the raster
-  thread, where a C++ exception has no handler and is `std::terminate` by definition; upstream's
-  `pixel_buffer_textures_.at(texture_id_)` threw `std::out_of_range` there whenever a resize or
-  teardown erased the entry while `texture_id_` was still live (it was cleared outside the mutex),
-  killing the process with `0xC0000409` and **no Dart-side log at all**. Every lookup is now a
-  non-throwing `find()`, the id is cleared under the lock, and the `Post`/promise paths around
-  teardown can't throw. Re-applying this on a version bump is a documented checklist —
+  thread, where a C++ throw is fatal to the process: the engine *does* catch it (it is not an
+  unhandled `std::terminate` — that reading was wrong and a dump corrected it), then deliberately
+  calls `__fastfail(FAST_FAIL_FATAL_APP_EXIT)`, which surfaces as
+  `STATUS_STACK_BUFFER_OVERRUN 0xC0000409` **with no Dart log at all**, despite the name
+  implying a buffer overflow. Upstream's `pixel_buffer_textures_.at(texture_id_)` threw
+  `std::out_of_range` there whenever a resize or teardown erased the entry while `texture_id_`
+  was still live (it was cleared outside the mutex), killing the process with `0xC0000409`.
+  Every lookup is now a non-throwing `find()`, the id is cleared under the lock, the `Post`/promise
+  paths around teardown can't throw, **and every boundary the engine calls into is wrapped in
+  `try`/`catch(...)` — both texture callbacks and `HandleMethodCall`** — because the dump's throwing
+  frame could not be attributed to any line of ours (no `.at(` anywhere in the package, so it came
+  from a header, and there is no Release PDB to name it). Re-applying this on a version bump is a documented checklist —
   `packages/media_kit_video/VENDORED.md`, every edit marked `// iptvs patch:` in place — and
   **`app.so` cannot witness it**, since no Dart changed: verify the `.text` section of
   `build/windows/x64/runner/Release/media_kit_video_plugin.dll` (a whole-file hash is useless, the PE
-  `TimeDateStamp` differs between builds of identical source). Also set the file's mtime after copying
-  a new version in: a pub-cache timestamp is older than the object file, MSBuild skips the recompile,
+  `TimeDateStamp` differs between builds of identical source). Also set the file's mtime after copying a
+  new version in: a pub-cache timestamp is older than the object file, MSBuild skips the recompile,
   and the build reports success while shipping the old DLL. Detail: docs/player.md "Windows".
+
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in

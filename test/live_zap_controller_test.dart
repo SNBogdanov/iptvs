@@ -7,6 +7,7 @@ import 'package:iptvs/player/buffer_preset.dart';
 import 'package:iptvs/player/channel_dwell.dart';
 import 'package:iptvs/player/channel_number_entry.dart';
 import 'package:iptvs/player/live_zap_controller.dart';
+import 'package:iptvs/player/tray.dart';
 import 'package:iptvs/player/zap_command.dart';
 import 'package:iptvs/player/zap_quick_list.dart';
 import 'package:iptvs/sources/source.dart';
@@ -373,6 +374,23 @@ void main() {
       addTearDown(controller.dispose);
       controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
       expect(controller.autoSwitch.hold, AutoSwitchHold.nothingToSwitch);
+    });
+
+    test('stands down while the window is hidden to the tray', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.autoSwitch));
+      expect(controller.autoSwitch.hold, AutoSwitchHold.none);
+
+      requestSilence();
+      expect(controller.autoSwitch.hold, AutoSwitchHold.silenced);
+
+      // A second hide while already hidden stays idempotent.
+      requestSilence();
+      expect(controller.autoSwitch.hold, AutoSwitchHold.silenced);
+
+      requestResume();
+      expect(controller.autoSwitch.hold, AutoSwitchHold.none);
     });
 
     test('an automatic switch reuses the ordinary zap path', () async {

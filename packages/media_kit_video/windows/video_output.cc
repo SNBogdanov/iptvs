@@ -346,20 +346,33 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
     texture->format = kFlutterDesktopPixelFormatBGRA8888;
     auto texture_variant =
         std::make_unique<flutter::TextureVariant>(flutter::GpuSurfaceTexture(
-            kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle, [&](auto, auto) {
-              std::lock_guard<std::mutex> lock(textures_mutex_);
-              // iptvs patch: this callback runs on the Flutter raster thread,
-              // inside engine-called C++ that has no handler for C++ exceptions,
-              // so |at()| throwing here ends the process via std::terminate.
-              // The entry can be absent: |Resize| unregisters and erases the
-              // previous texture, and |texture_id_| is only zeroed afterwards.
-              auto it = textures_.find(texture_id_);
-              if (it != textures_.end()) {
-                surface_manager_->Read();
-                return it->second.get();
-              } else {
-                return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+            kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle,
+            [&](auto, auto) -> FlutterDesktopGpuSurfaceDescriptor* {
+              // iptvs patch: whole-body barrier. The Flutter engine calls this
+              // from engine-owned C++ on the raster thread, and a crash dump
+              // proves the consequence is a hard process kill with no Dart log:
+              // a C++ throw reaches the engine's own handler, which fastfails
+              // (`__fastfail(FAST_FAIL_FATAL_APP_EXIT)` -> STATUS_STACK_BUFFER_
+              // OVERRUN 0xC0000409) instead of unwinding into us. The bounds
+              // check below is a find(), so this catch is deliberately NOT
+              // there for it - it is here because the throwing frame could not
+              // be attributed to any line of ours (no .at() anywhere in this
+              // package), so whatever `.at()` is inlined into this 358-byte
+              // lambda may live in a header we do not own. A dropped frame is
+              // recoverable; a dead process is not.
+              try {
+                std::lock_guard<std::mutex> lock(textures_mutex_);
+                // The entry can legitimately be absent: `Resize` unregisters
+                // and erases the previous texture, and `texture_id_` is only
+                // zeroed afterwards.
+                auto it = textures_.find(texture_id_);
+                if (it != textures_.end()) {
+                  surface_manager_->Read();
+                  return it->second.get();
+                }
+              } catch (...) {
               }
+              return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
             }));
     // Register new texture.
     texture_id_ =
@@ -382,16 +395,21 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
     pixel_buffer_texture->release_context = nullptr;
     pixel_buffer_texture->release_callback = [](void*) {};
     auto texture_variant = std::make_unique<flutter::TextureVariant>(
-        flutter::PixelBufferTexture([&](auto, auto) {
-          std::lock_guard<std::mutex> lock(textures_mutex_);
-          // iptvs patch: as above - a throw here terminates the process.
-          auto it = pixel_buffer_textures_.find(texture_id_);
-          if (it != pixel_buffer_textures_.end()) {
-            return it->second.get();
-          } else {
-            return (FlutterDesktopPixelBuffer*)nullptr;
-          }
-        }));
+        flutter::PixelBufferTexture(
+            [&](auto, auto) -> FlutterDesktopPixelBuffer* {
+              // iptvs patch: as above - the software texture callback has the
+              // same engine-owned caller and the same fatal outcome, so it gets
+              // the same whole-body barrier rather than only a find().
+              try {
+                std::lock_guard<std::mutex> lock(textures_mutex_);
+                auto it = pixel_buffer_textures_.find(texture_id_);
+                if (it != pixel_buffer_textures_.end()) {
+                  return it->second.get();
+                }
+              } catch (...) {
+              }
+              return (FlutterDesktopPixelBuffer*)nullptr;
+            }));
     // Register new texture.
     texture_id_ =
         registrar_->texture_registrar()->RegisterTexture(texture_variant.get());

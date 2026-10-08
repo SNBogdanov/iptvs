@@ -1018,6 +1018,70 @@ void main() {
       },
     );
 
+    test('updateLearnedMediaDuration backfills the runtime only a play can '
+        'know, and only forward', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      const kind = ContentKind.movie;
+      await db.replaceMediaLibrary(
+        'src',
+        kind,
+        const [MediaCategory(id: 'vod', title: 'VOD', kind: kind)],
+        const [
+          MediaItem(id: 'm1', title: 'No runtime', kind: kind),
+          MediaItem(
+            id: 'm2',
+            title: 'Claimed runtime',
+            kind: kind,
+            durationSeconds: 3600,
+          ),
+        ],
+        loadedPages: 1,
+        totalPages: 1,
+      );
+      // The actual play is ground truth: it fills the blank M3U row…
+      await db.updateLearnedMediaDuration(
+        'src',
+        kind,
+        'm1',
+        const Duration(minutes: 105),
+      );
+      // …and corrects a provider-claimed runtime.
+      await db.updateLearnedMediaDuration(
+        'src',
+        kind,
+        'm2',
+        const Duration(minutes: 92),
+      );
+      final items = await db.readMediaItems('src', kind);
+      expect(items.map((i) => i.durationSeconds), [6300, 5520]);
+
+      // A non-positive "duration" is never stored — a paused-at-zero read
+      // must not blank 6300.
+      await db.updateLearnedMediaDuration(
+        'src',
+        kind,
+        'm1',
+        Duration.zero,
+      );
+      expect((await db.readMediaItems('src', kind))[0].durationSeconds, 6300);
+
+      // Unknown ids / other kinds match nothing and no-op.
+      await db.updateLearnedMediaDuration(
+        'src',
+        ContentKind.series,
+        'm1',
+        const Duration(minutes: 5),
+      );
+      await db.updateLearnedMediaDuration(
+        'src',
+        kind,
+        'ghost',
+        const Duration(minutes: 5),
+      );
+      expect((await db.readMediaItems('src', kind)).map((i) => i.id), ['m1', 'm2']);
+      await db.close();
+    });
+
     test(
       'finishing a title clears its row; early positions are ignored',
       () async {

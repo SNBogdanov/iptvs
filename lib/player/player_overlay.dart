@@ -12,6 +12,7 @@ import '../data/net.dart' show cleanImageUrl;
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/image_utils.dart';
+import 'clock_format.dart';
 import 'playback_audio_session.dart';
 import 'player_chrome_prefs.dart';
 import 'zap_quick_list.dart';
@@ -188,6 +189,12 @@ class PlayerVideoSurface extends StatefulWidget {
   /// Sends `zap:list` (open the quick list). Null off a zapping route.
   final VoidCallback? onOpenQuickList;
 
+  /// Steps to the previous/next entry of the session's list. See
+  /// [EmbeddedPlayerControls.onPreviousEntry] — one pair of controls for both
+  /// live channels and VOD episodes/films, resolved by the route.
+  final VoidCallback? onPreviousEntry;
+  final VoidCallback? onNextEntry;
+
   /// Sends a `zap:` command string — the panel's own click and wheel gestures.
   ///
   /// A **string**, not a [ZapCommand], and that is the whole point: the
@@ -261,6 +268,8 @@ class PlayerVideoSurface extends StatefulWidget {
     this.zapEnabled = false,
     this.onOpenQuickList,
     this.onQuickListCommand,
+    this.onPreviousEntry,
+    this.onNextEntry,
     required this.aspectLabel,
     required this.videoFit,
     required this.dynamicRangeLabel,
@@ -379,6 +388,8 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             zapEnabled: widget.zapEnabled,
             onOpenQuickList: widget.onOpenQuickList,
             onQuickListCommand: widget.onQuickListCommand,
+            onPreviousEntry: widget.onPreviousEntry,
+            onNextEntry: widget.onNextEntry,
             aspectLabel: widget.aspectLabel,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
@@ -525,6 +536,8 @@ class EmbeddedPlayerControls extends StatefulWidget {
     this.zapEnabled = false,
     this.onOpenQuickList,
     this.onQuickListCommand,
+    this.onPreviousEntry,
+    this.onNextEntry,
     required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
@@ -561,6 +574,29 @@ class EmbeddedPlayerControls extends StatefulWidget {
 
   /// Sends `zap:list`. See [PlayerVideoSurface.onOpenQuickList].
   final VoidCallback? onOpenQuickList;
+
+  /// Steps to the **previous entry** of whatever the session is walking, or null
+  /// when there is nothing to step to.
+  ///
+  /// Deliberately named for the *entry* rather than the channel: one pair of
+  /// controls serves both modes, and the route — not this overlay — decides what
+  /// an entry is. Live sends `zap:down` (`LiveZapController.channelDown`, which
+  /// is where random zapping applies); VOD moves within the playlist the title
+  /// was launched from. A caller that has no list simply leaves this null and
+  /// the buttons are absent rather than disabled — there is no "end of the
+  /// playlist" state to explain, and two dead buttons are worse than none.
+  ///
+  /// Both callbacks are read as a pair: the pair is drawn together or not at all,
+  /// so a one-sided implementation is a bug rather than a half-feature.
+  final VoidCallback? onPreviousEntry;
+
+  /// Steps to the **next entry** — the mirror of [onPreviousEntry].
+  final VoidCallback? onNextEntry;
+
+  /// Whether this route has anything to step to, i.e. both entry callbacks are
+  /// wired. The pair's presence is the whole condition; there is no separate flag
+  /// to fall out of step with them.
+  bool get canStepEntry => onPreviousEntry != null && onNextEntry != null;
 
   /// Sends a `zap:` command from a panel click or wheel notch. See
   /// [PlayerVideoSurface.onQuickListCommand].
@@ -708,12 +744,23 @@ String? sourceBadgeLabel(String? name) {
 }
 
 /// The clock badge. Pointer surfaces (Windows/Linux) carry the **dated** form
-/// their native counterparts do (GDI `%a %d %b · %H:%M`, Android TV's
-/// `EEE d MMM · HH:mm`); the touch surface stays bare `HH:mm`, matching the iOS
-/// controller's `playerClockHm`. Weekday/month names are hand-rolled English
-/// rather than localized — the C-locale `wcsftime` the GDI overlay uses prints
-/// exactly these, and parity with the surface next door is the point.
+/// their native counterparts do; the touch surface stays bare time, matching
+/// the iOS controller's `playerClockHm`.
+///
+/// When the operating system's regional format has been resolved (`clockFormat`,
+/// native on Windows), the badge follows it: the OS **long date** — already
+/// formatted by NLS, inflected month and all — plus its **short time**,
+/// localized: "пятница, 6 октября 2026 г. · 12:34". The Windows GDI overlay calls
+/// the same Windows APIs and prints the same string, which is the whole reason
+/// this is sourced from the platform instead of guessed: two surfaces on one
+/// machine must not disagree.
+///
+/// With no format resolved — every non-Windows platform, and Windows before (or
+/// after a failure of) `iptvs/clock` — the badge falls back to the hand-rolled
+/// English `Sat 8 Aug · 16:02` it has always shown.
 String playerClockLabel(DateTime now, {required bool dated}) {
+  final format = clockFormat;
+  if (format != null) return format.format(now, dated: dated);
   final hm =
       '${now.hour.toString().padLeft(2, '0')}:'
       '${now.minute.toString().padLeft(2, '0')}';
@@ -1010,7 +1057,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     _paramsSub = widget.controls.stream.videoParams.listen((_) => _refresh());
     _clockTimer = Timer.periodic(
       const Duration(seconds: 30),
-      (_) => _refresh(),
+      (_) {
+        // The native long date is a string for *today*, so a session left
+        // running across midnight has to re-ask; this tick is the only place
+        // that reliably notices. A no-op on every other tick and platform.
+        unawaited(refreshClockFormatIfStale());
+        _refresh();
+      },
     );
     _scheduleHide();
     if (widget.zap != null) _armZapBanner();
@@ -1572,6 +1625,35 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                   widget.controls.state.playing ? 'Pause' : 'Play',
                   () => unawaited(widget.onPlayPause()),
                 ),
+                // Previous / next entry, in the transport beside play/pause — the
+                // music-player slot, and deliberately *not* in the right-hand
+                // cluster with the aspect and info chips: those are settings for
+                // the item on screen, while these move between items. One pair
+                // serves both modes, so on live it steps channels and on VOD it
+                // steps episodes or films; the route decides which (see
+                // [EmbeddedPlayerControls.onPreviousEntry]).
+                //
+                // Drawn only when the route wired both callbacks
+                // ([canStepEntry]) — absent, never disabled, so a surface with
+                // no list to walk shows no affordance it cannot honour.
+                if (widget.canStepEntry) ...[
+                  _button(
+                    Icons.skip_previous,
+                    // The keyboard binding differs by mode (PgUp/PgDown vs
+                    // PgDn/PgUp read the other way round), so the shortcut is
+                    // named only where it is the same gesture on both — the
+                    // keys. The visible tooltip stays the plain action.
+                    'Previous (PgUp)',
+                    widget.onPreviousEntry!,
+                    semanticsLabel: 'Previous',
+                  ),
+                  _button(
+                    Icons.skip_next,
+                    'Next (PgDown)',
+                    widget.onNextEntry!,
+                    semanticsLabel: 'Next',
+                  ),
+                ],
                 if (!widget.isLive) ...[
                   _button(Icons.replay_10, 'Back 10 seconds', () {
                     final next =

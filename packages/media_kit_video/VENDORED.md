@@ -35,16 +35,39 @@ So a frame callback that takes the lock in that window sees a live
 return pixel_buffer_textures_.at(texture_id_).get();   // throws
 ```
 
-throws `std::out_of_range` into engine C++ that has no handler for C++
-exceptions: `std::terminate` → `abort()`. The process dies with
-`0xC0000409` and no Dart-side log, because nothing on the Dart side ever ran.
-There is a second instance of the same window between `RegisterTexture`
-returning and the new entry being emplaced.
+throws `std::out_of_range` into engine-owned C++ on the raster thread. The
+process dies with `0xC0000409` and no Dart-side log, because nothing on the
+Dart side ever ran. There is a second instance of the same window between
+`RegisterTexture` returning and the new entry being emplaced.
+
+**The engine does have a handler — that correction matters, because it changes
+where the fix has to go.** An earlier version of this file claimed the throw had
+"no handler and is `std::terminate` by definition". The dump disagrees, and the
+registers are decisive: `ecx = 7`, and `.exr -1` reports
+`Subcode: 0x7 FAST_FAIL_FATAL_APP_EXIT`. The stack is
+
+```
+msvcp140!std::_Xout_of_range
+media_kit_video_plugin!…            <- 50-byte function, throws
+media_kit_video_plugin!…            <- its caller, 358 bytes
+flutter_windows!…                   <- engine C++ that called into the plugin
+  _CxxThrowException → RaiseException
+  ntdll!RtlpExecuteHandlerForException   <- engine DID catch it
+  int 29h / __fastfail(7)               <- and killed the process itself
+```
+
+So the engine catches the C++ exception and then deliberately terminates, rather
+than unwinding into us — same observable outcome (dead process, no Dart log,
+`0xC0000409`), different mechanism, and `0xC0000409` here is *not* a stack
+buffer overflow despite the exception's name. Every function name in that trace
+is a `dbghelp` guess: there is no Release PDB for the plugin or for
+`flutter_windows.dll`, so the symboliser attributed the frames to whatever export
+was textually nearest. Only the CRT frames and the module+offset pairs are real.
 
 Observed on this repo as six identical WER minidumps during live zapping (each
-one a `texture_id_` lookup that terminated the player), all with the same stack:
+one a `texture_id_` lookup that killed the player), all with the same stack:
 `media_kit_video_plugin` → `std::_Xout_of_range` → `CxxThrowException` →
-`flutter_windows!terminate` → `abort`.
+`flutter_windows` handler → `__fastfail(FAST_FAIL_FATAL_APP_EXIT)`.
 
 Note what is *not* the cause: exceptions raised inside a `ThreadPool::Post`ed
 task are captured by `std::packaged_task` into the task's future, which
@@ -75,6 +98,24 @@ engine-invoked callback, outside the pool.
    output that never received one.
 6. **`video_output.h` — `width()`/`height()`.** Non-throwing lookup; a `const`
    accessor must not throw during texture replacement.
+7. **Whole-body `try`/`catch` on both texture callbacks**, and on
+   `MediaKitVideoPlugin::HandleMethodCall`. Added *after* the `at()` → `find()`
+   conversion, because those conversions were not enough — and because the
+   dump's throwing frame could not be attributed to any line of ours. There is
+   no `.at(` anywhere in this package, so the `std::out_of_range` came from an
+   `.at()` inlined out of a header, not out of a `.cc`, and with no PDB there is
+   no way to name it. The barrier therefore does not try to find the bug: it
+   makes every boundary the engine calls into incapable of throwing past it,
+   so the failure mode degrades from a killed process to a dropped frame. That
+   is the only defence available when the throwing frame is unattributable, and
+   it is what the engine's own handler would otherwise turn fatal.
+   `HandleMethodCall` needs it most: its arguments arrive over the method channel
+   rather than from our own code, and `std::get` on a mismatched
+   `EncodableValue` or `std::stoll` on a non-numeric / oversized string throws
+   (`std::bad_variant_access`, `std::invalid_argument`, and `std::out_of_range`
+   — the last is literally the `std::_Xout_of_range` the dump names). The catch
+   deliberately does not touch `result`, because several branches move it into a
+   continuation and replying an error could use a moved-from `unique_ptr`.
 7. **`thread_pool.h` — worker loop.** Catch around `task()`. `packaged_task`
    already captures exceptions from the callable; this covers the task
    machinery itself throwing, so no posted task can ever reach `terminate`.

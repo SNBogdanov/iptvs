@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/media_duration.dart';
 import '../data/net.dart' show cleanImageUrl;
 import '../data/source_hint_parser.dart';
 import '../data/vod_card_orientation.dart';
@@ -1309,6 +1310,8 @@ class _MediaListTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Parsed once per tile build — see [_MediaGridTile.build].
+    final duration = formatMediaDuration(item.durationSeconds);
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
@@ -1316,6 +1319,7 @@ class _MediaListTile extends StatelessWidget {
       semanticsLabel: [
         item.title,
         if (item.year != null) item.year!,
+        ?duration,
         '$position of $total',
         if (favorite) 'Favorite',
         if (progress != null) '${(progress! * 100).ceil()}% watched',
@@ -1354,27 +1358,50 @@ class _MediaListTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
-                  if (item.year != null || _hasRating(item)) ...[
+                  if (item.year != null ||
+                      _hasRating(item) ||
+                      duration != null) ...[
                     const SizedBox(height: 4),
                     Row(
                       children: [
-                        if (item.year != null)
-                          Flexible(
-                            child: Text(
-                              item.year!,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppColors.textLo,
-                                fontSize: 12,
+if (item.year != null)
+                              Expanded(
+                                child: Text(
+                                  item.year!,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              )
+                            // Keeps the runtime right-aligned in the year row
+                            // even for a title the panel dated nothing. A
+                            // `Spacer` alongside an `Expanded` date would split
+                            // the row 1:1 on flex - the date then had half the
+                            // width and ellipsised the moment a runtime
+                            // appeared, which is exactly the squeeze this
+                            // layout is supposed to put on the date alone.
+                            else if (duration != null)
+                              const Spacer(),
+                            if (item.year != null && _hasRating(item))
+                              const SizedBox(width: 10),
+                            _RatingBadge(rating: item.rating),
+                            // The runtime is rigid and laid out after the
+                            // flexible date, so a long date ellipsises rather
+                            // than pushing the runtime out of the tile.
+                            if (duration != null)
+                              Text(
+                                duration,
+                                maxLines: 1,
+                                style: const TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 12,
+                                ),
                               ),
-                            ),
-                          ),
-                        if (item.year != null && _hasRating(item))
-                          const SizedBox(width: 10),
-                        _RatingBadge(rating: item.rating),
-                      ],
-                    ),
+                          ],
+                        ),
                   ],
                   // Parsed once per tile build: the pattern binds the list so
                   // the emptiness test and the widget share one parse.
@@ -1460,6 +1487,10 @@ class _MediaGridTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Parsed once per tile build: the pattern binds the list so the emptiness
+    // test and the widget share one parse, and this formats for every visible
+    // tile rather than only for the ones that print it.
+    final duration = formatMediaDuration(item.durationSeconds);
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
@@ -1467,6 +1498,7 @@ class _MediaGridTile extends StatelessWidget {
       semanticsLabel: [
         item.title,
         if (item.year != null) item.year!,
+        ?duration,
         '$position of $total',
         if (favorite) 'Favorite',
         if (progress != null) _progressSemantics,
@@ -1559,15 +1591,41 @@ class _MediaGridTile extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
-                      if (item.year != null)
-                        Text(
-                          item.year!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 12,
-                          ),
+                      // The catalogue's runtime, right-aligned in the same row as
+                      // the date — never a row of its own. [textBudget] is the
+                      // budget `childAspectRatio` was computed from, so an added
+                      // line would move every cell's poster height; a sibling in
+                      // the year row costs nothing and the year ellipsises first.
+                      if (item.year != null || duration != null)
+                        Row(
+                          children: [
+if (item.year != null)
+                                Expanded(
+                                  child: Text(
+                                    item.year!,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: AppColors.textLo,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                )
+                              // See the list row: a `Spacer` here would take half
+                              // the row's flex and ellipsise the date the moment
+                              // a runtime appeared.
+                              else if (duration != null)
+                                const Spacer(),
+                            if (duration != null)
+                              Text(
+                                duration,
+                                maxLines: 1,
+                                style: const TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 12,
+                                ),
+                              ),
+                          ],
                         ),
                       if (sourceHintLabels(item) case final hints
                           when hints.isNotEmpty) ...[
@@ -1845,6 +1903,16 @@ class _Poster extends StatelessWidget {
   }
 }
 
+/// Plays one episode, together with the list it was picked from.
+///
+/// The sibling list travels with the episode because that list **is** what the
+/// previous/next pair steps through: it is the season, in the season's own
+/// order. Passing only the episode — as this used to — makes "next" mean
+/// something the route has to invent, and the only invented answer (a second
+/// query, or the whole series) steps across a season boundary the user never
+/// crossed on screen.
+typedef PlayEpisode = void Function(MediaItem episode, List<MediaItem> siblings);
+
 class MediaDetailsSheet extends StatefulWidget {
   final LibraryRepository repo;
   final MediaItem item;
@@ -1856,7 +1924,7 @@ class MediaDetailsSheet extends StatefulWidget {
   /// Plays one episode picked from the series browser. Routed back through the
   /// screen's own play path (rather than pushing a player here) so the
   /// "Continue watching" rail reloads on return, exactly like a movie does.
-  final ValueChanged<MediaItem>? onPlayEpisode;
+  final PlayEpisode? onPlayEpisode;
 
   const MediaDetailsSheet({
     super.key,
@@ -1979,13 +2047,13 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
     }
   }
 
-  void _play(MediaItem item) {
+  void _play(MediaItem item, List<MediaItem> siblings) {
     // Close the sheet, then hand the episode to the screen's play path (which
     // resolves, plays, and — critically — reloads "Continue watching" on
     // return). Pushing a player straight from here bypassed that reload, so the
     // series rail went stale until a manual refresh.
     Navigator.of(context).pop();
-    widget.onPlayEpisode?.call(item);
+    widget.onPlayEpisode?.call(item, siblings);
   }
 
   @override
@@ -2221,7 +2289,7 @@ String _episodeSemanticsLabel(MediaItem episode) {
 class _SeriesBrowser extends StatelessWidget {
   final Future<List<MediaItem>> seasons;
   final Future<List<MediaItem>> Function(MediaItem season) episodesFor;
-  final ValueChanged<MediaItem> onPlayEpisode;
+  final PlayEpisode onPlayEpisode;
 
   /// Called once, during build, with the first season header's own
   /// (ExpansionTile-internal) [FocusNode] as soon as it exists — so the
@@ -2347,7 +2415,7 @@ class _SeriesBrowser extends StatelessWidget {
                               FocusableCard(
                                 debugLabel: 'media.episode.${episode.id}',
                                 semanticsLabel: _episodeSemanticsLabel(episode),
-                                onTap: () => onPlayEpisode(episode),
+                                onTap: () => onPlayEpisode(episode, episodes),
                                 child: Padding(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 10,
