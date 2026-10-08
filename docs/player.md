@@ -653,6 +653,22 @@ the key rather than storing it.
   with: changing the setting and returning did nothing until an app restart, and previewing a
   cross-source favorite ran on the previous source's buffering. These are plain mpv properties,
   settable at runtime, so unlike ExoPlayer's `LoadControl` this needs no engine rebuild.
+  **And it applies them *before* `player.open`, awaited** (`_mpvOptionsApplied`, awaited in
+  `_start`). Left fire-and-forget (the old `unawaited(...)`) the sweep raced the open, so the
+  demuxer read `demuxer-lavf-analyzeduration`/`probesize` at their defaults and the preview sat
+  black with `state.width == null` for 8–12 s before any video params arrived — the first preview
+  *and* every retarget. The fullscreen's `_configureNativePlayer` already awaited its options
+  before its own `open`, which is why only the preview showed it; with the await the same stream
+  opened in ~3–4 s.
+  **The preview is paused, not stopped, around a pushed non-playing screen** (Sources, Diagnostics,
+  Help) and resumed on return (`channel_list_screen._withPreviewPaused`), so a settings detour keeps
+  the channel the user was previewing. The old `stop()` nulled the stream but kept `channelId`, and
+  the panel drew that as a black video box under a "Preview" badge; the panel and the channel row
+  now gate on `LivePreviewController.previewLive` (`stream != null || loading || nativeActive`), so
+  any stopped-but-selected preview — a kept-selection `stop()`, a rebuilt repository — falls back to
+  the channel's logo. If the pushed screen rebuilt the repository (catalog inputs changed), the
+  preview was disposed with it and the return leg restarts the same channel, re-resolved against the
+  current catalog.
 - **A cross-source favorite uses its *owning* source's preset**
   (`_bufferPresetForChannel`), the same rule its repository, EPG and reconnect already follow —
   reading the active source's would apply one provider's setting to another provider's stream.

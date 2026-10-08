@@ -164,6 +164,13 @@ class LivePreviewController extends ChangeNotifier {
   Player? _player;
   Player get player => _player ??= _createPlayer();
 
+  /// Completes once the player's mpv options have all been applied. `_start`
+  /// awaits this before `player.open` so the demuxer/network tuning is in force
+  /// for the *initial* parse — applied fire-and-forget it raced the open, mpv
+  /// probed the stream with defaults, and the preview sat black for 8-12s
+  /// (`state.width == null`) before video params ever arrived.
+  Future<void>? _mpvOptionsApplied;
+
   /// True once the embedded media_kit player exists (it's created lazily, and
   /// never at all while the native path serves every preview).
   bool get hasEmbeddedPlayer => _player != null;
@@ -207,15 +214,13 @@ class LivePreviewController extends ChangeNotifier {
     // config above — that's the one place `hwdec` isn't overridden.)
     final platform = player.platform;
     if (platform is NativePlayer) {
-      unawaited(
-        applyMpvOptions(platform, {
-          ...kLiveMpvOptions,
-          ...mpvBufferOptions(_bufferPreset),
-          ...embeddedVideoOptionsForPlatform(),
-          ...embeddedMpvOverrides(),
-          ...kMpvLogFilter,
-        }),
-      );
+      _mpvOptionsApplied = applyMpvOptions(platform, {
+        ...kLiveMpvOptions,
+        ...mpvBufferOptions(_bufferPreset),
+        ...embeddedVideoOptionsForPlatform(),
+        ...embeddedMpvOverrides(),
+        ...kMpvLogFilter,
+      });
       // Log the decoder mpv actually engaged once frames start flowing, so the
       // exportable diagnostics confirm hardware decode (not a silent software
       // fallback) on the low-power TV boxes where this matters.
@@ -386,6 +391,14 @@ class LivePreviewController extends ChangeNotifier {
   /// pair-keyed on purpose, because the cross-source view can have two
   /// providers' channels sharing an id.
   bool get hasPreview => channelId != null;
+
+  /// Whether the preview is *actually* showing (or loading) a picture right
+  /// now — a live stream, a resolve in flight, or the Android native engine.
+  /// Distinct from [hasPreview], which stays true after a `stop()` keeps the
+  /// selection: a stopped preview has a `channelId` but nothing on screen, and
+  /// the panel must fall back to the channel's logo rather than draw an empty
+  /// (black) video box under a "Preview" badge.
+  bool get previewLive => stream != null || loading || nativeActive;
 
   /// True while the app (not a genuine EOF) has paused the preview around a
   /// fullscreen handoff — an EOF landing in this window is ignored.
@@ -604,8 +617,17 @@ class LivePreviewController extends ChangeNotifier {
       // activates the session itself). Only the embedded path needs it; the
       // Android shared-engine path above returns before here. Inert off iOS.
       await _audioSession.acquire();
-      await player.open(Media(resolved.url, httpHeaders: resolved.headers));
-      await player.setVolume(muted ? 0 : 100);
+      // Apply the mpv tuning *before* opening: the demuxer reads
+      // `demuxer-lavf-analyzeduration`/`probesize` at open, and applying them
+      // fire-and-forget raced the open, leaving the preview black for seconds.
+      final embeddedPlayer = player;
+      final optionsApplied = _mpvOptionsApplied;
+      if (optionsApplied != null) await optionsApplied;
+      if (_disposed || requestId != _requestId) return;
+      await embeddedPlayer.open(
+        Media(resolved.url, httpHeaders: resolved.headers),
+      );
+      await embeddedPlayer.setVolume(muted ? 0 : 100);
       if (_disposed || requestId != _requestId) return;
       _set(() {
         stream = resolved;
@@ -828,6 +850,7 @@ class LivePreviewController extends ChangeNotifier {
     _activeChannel = null;
     _player = null;
     _controller = null;
+    _mpvOptionsApplied = null;
     channelId = null;
     loading = false;
     error = null;

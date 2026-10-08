@@ -404,7 +404,7 @@ class ChannelListScreen extends StatefulWidget {
   /// labels each row with its owning source and builds that source's
   /// repository on demand to play it — see [_ChannelListScreenState._repoFor].
   final SourceStore store;
-  final VoidCallback? onManageSources;
+  final Future<void> Function()? onManageSources;
 
   /// The active profile's display name (used for the avatar initial) and its
   /// index into the avatar colour palette.
@@ -1044,6 +1044,34 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   bool _isPreviewing(Channel channel) =>
       _preview.isPreviewing(_sourceIdForChannel(channel), channel.id);
+
+  /// Pauses the preview around a pushed, non-playing screen and resumes it on
+  /// return, so a settings/help/diagnostics detour doesn't cost the user the
+  /// channel they were previewing. If the screen changed the catalog — the
+  /// repository was rebuilt, disposing the preview — restart it on the same
+  /// channel (re-resolved against the current catalog, so a removed or
+  /// re-sourced channel isn't revived by id).
+  Future<void> _withPreviewPaused(Future<void> Function() open) async {
+    final channelId = _preview.channelId;
+    final wasMuted = _preview.isMuted;
+    if (channelId != null) unawaited(_preview.pause());
+    await open();
+    if (!mounted || channelId == null) return;
+    final channel = _findChannelById(channelId);
+    if (channel == null) return;
+    if (_preview.channelId == channel.id && _preview.stream != null) {
+      unawaited(_preview.play());
+    } else {
+      unawaited(
+        _preview.start(
+          channel,
+          from: _repoForChannel(channel),
+          muted: wasMuted,
+          bufferPreset: _bufferPresetForChannel(channel),
+        ),
+      );
+    }
+  }
 
   Future<void> _disposeForeignRepos() async {
     final repos = _foreignRepos.values.toList();
@@ -3611,41 +3639,45 @@ onPlay:
                       AppBarAction(
                         label: 'Sources',
                         icon: Icons.dns_outlined,
-                        onPressed: () {
-                          unawaited(_preview.stop());
-                          widget.onManageSources?.call();
-                        },
+                        onPressed: () => unawaited(
+                          _withPreviewPaused(
+                            () async => widget.onManageSources?.call(),
+                          ),
+                        ),
                       ),
                     AppBarAction(
                       label: 'Diagnostics',
                       icon: Icons.bug_report_outlined,
-                      onPressed: () async {
-                        await _preview.stop();
-                        if (!context.mounted) return;
-                        await Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => DiagnosticsScreen(
-                              database: widget.repo.db,
-                              sourceId: widget.repo.source.id,
-                              onReingest: () => _loadLive(forceRefresh: true),
+                      onPressed: () => unawaited(
+                        _withPreviewPaused(() async {
+                          if (!context.mounted) return;
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => DiagnosticsScreen(
+                                database: widget.repo.db,
+                                sourceId: widget.repo.source.id,
+                                onReingest: () =>
+                                    _loadLive(forceRefresh: true),
+                              ),
                             ),
-                          ),
-                        );
-                      },
+                          );
+                        }),
+                      ),
                     ),
                     AppBarAction(
                       label: 'Help',
                       tooltip: 'Help & about',
                       icon: Icons.help_outline,
-                      onPressed: () async {
-                        await _preview.stop();
-                        if (!context.mounted) return;
-                        await Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const LegalScreen(),
-                          ),
-                        );
-                      },
+                      onPressed: () => unawaited(
+                        _withPreviewPaused(() async {
+                          if (!context.mounted) return;
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const LegalScreen(),
+                            ),
+                          );
+                        }),
+                      ),
                     ),
                     ListenableBuilder(
                       listenable: _dataListenable,
@@ -3924,7 +3956,11 @@ onPlay:
       previewChannelId: _preview.channelId,
       // Source-aware, for the cross-source view: two providers can both carry
       // a channel with this id, and only one of them is previewing.
-      isPreviewingRow: _isPreviewing,
+      // A stopped preview (e.g. after leaving for the sources screen when the
+      // repository was rebuilt) keeps its `channelId` but has nothing on screen
+      // — the panel and the row must read that as "not previewing" and fall
+      // back to the channel's logo rather than a black box under a badge.
+      isPreviewingRow: (c) => _isPreviewing(c) && _preview.previewLive,
       // In the cross-source view a row's favorite state belongs to *its* source,
       // not the active one. Reading it from `FavoritesController` (keyed to the
       // active source) drew every foreign row with an empty star, and toggling

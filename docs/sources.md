@@ -590,6 +590,15 @@ Two predicates decide instead, both pure and both unit-tested
   refresh must not be deferred. The metadata half is `MetadataConfig.sameConfiguration`, because the
   repository's `MetadataProvider`s are `final`: a changed key, provider or `autoEnrich` flag has to
   rebuild, or enrichment keeps credentials the user just replaced.
+
+  The third predicate term is the one that stores no store value at all, which is what makes it the
+  dangerous one to get wrong: `LibraryRepository.autoEnrichMetadata` is compared against
+  `wantsEnrich` (the global `autoEnrich` ANDed with the per-source `settings['enrichMetadata']`),
+  so the repository must be **constructed** with that same ANDed value. Passing the global flag
+  alone means a source with per-source enrichment off compares `true == false` on every return from
+  the sources screen - the predicate fails forever, every visit pays the full
+  `_loading`-spinner rebuild, and the channel list remounts at the top each time. (That was the
+  "leaving the sources screen scrolls to the top" regression on this repo.)
 - **`SourceConfig.sameSourceInputs`** - the narrower question of whether the *built* `Source` itself
   is stale. Hidden categories, aspect mode, buffer preset and the resume preference never reach
   `build()`, so the common edit keeps the source object as well: nothing to swap, nothing to retire,

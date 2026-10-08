@@ -352,7 +352,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               source: src,
               db: widget.db,
               metadataProviders: providers,
-              autoEnrichMetadata: metadata.autoEnrich,
+              autoEnrichMetadata: wantsEnrich,
             );
       _loading = false;
     });
