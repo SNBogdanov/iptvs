@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 
 import '../data/diagnostics_log.dart';
+import '../sources/release_date.dart' show systemShortDatePattern;
 
 /// The operating system's regional date/time format, resolved once at boot and
 /// used by the player's clock badge (docs/player.md "The clock badge's regional
@@ -24,6 +25,7 @@ class ClockFormat {
     required this.shortTime,
     required this.am,
     required this.pm,
+    this.shortDate = '',
   });
 
   /// NLS's long date for [dateFor], e.g. `6 октября 2026 г.`.
@@ -41,6 +43,12 @@ class ClockFormat {
   final String am;
   final String pm;
 
+  /// The `LOCALE_SSHORTDATE` picture, e.g. `dd.MM.yyyy`. Not used by the clock
+  /// badge itself; it is carried here so `detectClockFormat` can hand it to
+  /// `formatReleaseDate`, which prints VOD release dates the machine's way.
+  /// Empty when the platform sent none.
+  final String shortDate;
+
   /// Parses the native map, or null if the patterns are missing or blank. **Fail
   /// closed:** a half-understood format must leave the English fallback in charge
   /// rather than throw while a player is being drawn.
@@ -55,6 +63,7 @@ class ClockFormat {
       shortTime: shortTime,
       am: raw['am'] is String ? raw['am']! as String : '',
       pm: raw['pm'] is String ? raw['pm']! as String : '',
+      shortDate: raw['shortDate'] is String ? raw['shortDate']! as String : '',
     );
   }
 
@@ -185,6 +194,8 @@ Future<void> detectClockFormat() async {
       return;
     }
     clockFormat = parsed;
+    systemShortDatePattern =
+        parsed.shortDate.isEmpty ? null : parsed.shortDate;
   } catch (error) {
     DiagnosticsLog.instance.addAndPrint(
       'player',

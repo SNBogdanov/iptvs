@@ -95,7 +95,7 @@ class AppDatabase {
   /// branch in between over a schema that may already have the change, so each
   /// branch must be idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`, the
   /// `_isDuplicateColumn` guard).
-  static const schemaVersion = 14;
+  static const schemaVersion = 15;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -173,6 +173,7 @@ class AppDatabase {
           await _createMediaTables(db);
           await _createFavorites(db);
           await _createPlaybackPositions(db);
+          await _createWatchedMedia(db);
           await _createFavoritesOutbox(db);
           await db.execute(
             'CREATE INDEX idx_channels_source ON channels(source_id)',
@@ -269,7 +270,7 @@ class AppDatabase {
             // `_createMediaTables`), so this one branch covers every upgrade
             // path including pre-v3 — which skips the v3+ media branches
             // entirely. Idempotent.
-            await _createFavoritesOutbox(db);
+await _createFavoritesOutbox(db);
             // The seed below reads `favorites`, which an upgrade recorded at
             // v9+ never re-creates — and a database that never had it (an old
             // partial fixture, or any path where the v9 branch was skipped)
@@ -306,6 +307,13 @@ class AppDatabase {
             ''',
               [DateTime.now().millisecondsSinceEpoch],
             );
+          }
+          if (oldV < 15) {
+            // Titles played to the end — what a finished card's full bar means.
+            // Standalone table (like `favorites` and `playback_positions`,
+            // outside `_createMediaTables`), so this one branch covers every
+            // upgrade path including pre-v3. Idempotent.
+            await _createWatchedMedia(db);
           }
         },
       ),
@@ -704,6 +712,30 @@ class AppDatabase {
     );
   }
 
+  static Future<void> _createWatchedMedia(Database db) async {
+    // Titles a user has played to the end (past `kFinishedFraction`) — the
+    // *terminal* "seen it" fact behind a finished card's full progress bar.
+    // Deliberately a separate table, not a flag on `playback_positions`: that
+    // table's rows are unfinished by construction (sessions upsert one and a
+    // completion deletes it), while "watched once" is a fact about the title
+    // that survives until a *new* session reopens it. Keyed like `favorites`
+    // and `playback_positions` by the source-stable ids, so a library refresh
+    // can never drop the marks. `updated_at` is when it was finished.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS watched_media (
+        source_id  TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        item_id    TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind, item_id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_watched_source_kind '
+      'ON watched_media(source_id, kind)',
+    );
+  }
+
   /// Atomically moves every cache and user-state row from the pre-PR4
   /// credential-derived namespace to the stable [SourceConfig.id] namespace.
   ///
@@ -743,6 +775,7 @@ class AppDatabase {
         // would have sent favorites for a source the profile no longer has.
         'favorites_outbox',
         'playback_positions',
+        'watched_media',
       ]) {
         final keys = await _keyColumnsOtherThanSource(txn, table);
         if (keys.isNotEmpty) {
@@ -936,9 +969,19 @@ class AppDatabase {
 
   // ── playback positions (VOD resume) ───────────────────────────────────────
 
-  /// Upsert the resume position for an item; clears the row instead when the
-  /// user is effectively done (past [kFinishedFraction] of the duration), so
-  /// finished titles drop out of "Continue watching".
+  /// Upsert the resume position for an item.
+  ///
+  /// Three outcomes, total:
+  /// - past [kFinishedFraction] of the duration: the title is **watched** — the
+  ///   position row is dropped (finished titles leave "Continue watching") and
+  ///   the title is recorded in `watched_media`, the far side of the full bar
+  ///   a finished card draws;
+  /// - at least ten seconds in, under the threshold: a normal in-progress row,
+  ///   and any `watched_media` mark is **cleared** — the user is watching the
+  ///   title again, so it is not done, it is in progress (the last state a card
+  ///   shows is the current state);
+  /// - under ten seconds: a no-op that leaves **both** tables untouched — a
+  ///   stray write after a sub-10 s reopen must not un-watch a finished film.
   static const kFinishedFraction = 0.95;
 
   Future<void> savePlaybackPosition(
@@ -951,11 +994,15 @@ class AppDatabase {
     if (duration > Duration.zero &&
         position.inMilliseconds >=
             duration.inMilliseconds * kFinishedFraction) {
+      await markWatched(sourceId, kind, itemId);
       await clearPlaybackPosition(sourceId, kind, itemId);
       return;
     }
-    // Ignore the first instants — a resume row for second 0 is just noise.
+    // Ignore the first instants — a resume row for second 0 is just noise. This
+    // early-return is deliberate before the in-progress write: it also guards
+    // the watched mark from being cleared by a sub-10 s session.
     if (position < const Duration(seconds: 10)) return;
+    await clearWatched(sourceId, kind, itemId);
     await _db.insert('playback_positions', {
       'source_id': sourceId,
       'kind': kind.name,
@@ -1015,6 +1062,51 @@ class AppDatabase {
     whereArgs: [sourceId, kind.name, itemId],
   );
 
+  /// Records that [itemId] has been played to the end (see `watched_media`).
+  /// Idempotent: re-finishing an already-watched title just refreshes its stamp.
+  /// Written by [savePlaybackPosition]'s completion branch — treat that method
+  /// as the only writer, exactly like `playback_positions` rows.
+  Future<void> markWatched(
+    String sourceId,
+    ContentKind kind,
+    String itemId, {
+    DateTime? at,
+  }) async {
+    await _db.insert('watched_media', {
+      'source_id': sourceId,
+      'kind': kind.name,
+      'item_id': itemId,
+      'updated_at': (at ?? DateTime.now()).millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// Removes a title's watched mark (a new in-progress session starts).
+  Future<void> clearWatched(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+  ) => _db.delete(
+    'watched_media',
+    where: 'source_id = ? AND kind = ? AND item_id = ?',
+    whereArgs: [sourceId, kind.name, itemId],
+  );
+
+  /// The item ids of [kind] finished for [sourceId] — the titles whose cards
+  /// draw a full bar. Projected to ids only, like [readPlaybackProgress]:
+  /// nothing that could touch the sealed-locator path.
+  Future<Set<String>> readWatchedIds(
+    String sourceId,
+    ContentKind kind,
+  ) async {
+    final rows = await _db.query(
+      'watched_media',
+      columns: ['item_id'],
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, kind.name],
+    );
+    return {for (final row in rows) row['item_id'] as String};
+  }
+
   /// Most recently watched in-progress items for [sourceId], newest first —
   /// the data behind the "Continue watching" rail.
   Future<List<PlaybackPosition>> readRecentPositions(
@@ -1044,7 +1136,10 @@ class AppDatabase {
   /// **Every row in this table is unfinished by construction** —
   /// [savePlaybackPosition] deletes at [kFinishedFraction] and ignores anything
   /// under ten seconds — so the map never carries a ~100% bar, and a card whose
-  /// progress has finished simply has no entry at all.
+  /// progress has finished simply has no entry *here*. The finished card's bar
+  /// comes from a different source: `watched_media` (see [markWatched] and
+  /// [readWatchedIds]) is read alongside and painted as a full bar, so "done" is
+  /// a full bar while the partial fractions this method returns stay partial.
   ///
   /// A row whose duration is unusable contributes **nothing**, rather than a
   /// `0.0`: a zero-width bar draws nothing, so keeping the row would only make

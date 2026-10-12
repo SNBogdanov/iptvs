@@ -705,7 +705,7 @@ class LiveTabView extends StatelessWidget {
       favoriteFocusNode: focus.previewFavoriteFocusNode,
       catchupFocusNode: focus.previewCatchupFocusNode,
       onControlKey: focus.handlePreviewControlKey,
-      onOpenFullscreen: () => onPlayChannel(preview),
+                  onActivate: () => onPlayChannel(preview),
       metrics: metrics,
     );
   }
@@ -950,18 +950,21 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.catchupFocusNode,
     required this.onControlKey,
     required this.metrics,
-    this.onOpenFullscreen,
+    this.onActivate,
   });
 
-  /// Double-click on the picture: go fullscreen on the previewed channel.
+  /// Pointer activation of the panel, run through the **same** `onPlayChannel`
+  /// path OK and a row tap use, so the deliberate-preview reconciliation applies
+  /// unchanged.
   ///
-  /// The picture is a [IgnorePointer] (the video surface must not take hits), so
-  /// the detector wraps it rather than sitting inside it. It runs the **same**
-  /// `onPlayChannel` path a second OK does, which means the deliberate-preview
-  /// reconciliation applies unchanged — a double click on a preview that is
-  /// still resolving waits for that resolve rather than superseding it, and
-  /// only a preview that is actually running is a target.
-  final VoidCallback? onOpenFullscreen;
+  /// With nothing running the panel shows the selected channel's logo and a
+  /// **single click** is that "preview this" — it starts the preview. With a
+  /// preview actually running a **double click** escalates to fullscreen (a
+  /// single click then belongs to the running preview). The picture is an
+  /// [IgnorePointer] (the video surface must not take hits), so the detector
+  /// wraps it rather than sitting inside it; a double click on a preview that is
+  /// still resolving waits for that resolve rather than superseding it.
+  final VoidCallback? onActivate;
 
   /// How this platform's pointer reads in the hints below. `deliberate` is a
   /// *touch/remote* posture (Android today, iOS next), so this is "tap" wherever
@@ -986,12 +989,15 @@ class _LivePreviewPanel extends StatelessWidget {
   /// a ~170 px thumbnail and ellipsizes past roughly 22 characters.
   String? get _hint {
     if (previewActive && previewError == null) {
-      // Both inputs, on both postures: a second activation goes fullscreen
-      // whether it arrives as OK or as a pointer, and the desktop wording used
-      // to name only the key even though `_pointerVerb` was right there.
+      // Both inputs, on both postures: the panel's activation goes fullscreen
+      // whether it arrives as OK/Select or as a pointer. "again" belongs only to
+      // the deliberate (touch/remote) posture, where the panel was *clicked* to
+      // start the preview; on desktop a preview auto-starts on hover, so a click
+      // is the first and only pointer gesture and "again" read as a step the
+      // user had never taken.
       return deliberate
           ? 'OK or $_pointerVerb again for fullscreen'
-          : 'OK/Select or $_pointerVerb again for fullscreen';
+          : 'OK/Select or $_pointerVerb for fullscreen';
     }
     if (deliberate) return 'OK or $_pointerVerb to preview';
     return null;
@@ -1038,14 +1044,18 @@ class _LivePreviewPanel extends StatelessWidget {
                 key: previewSurfaceKey,
                 borderRadius: BorderRadius.circular(10),
                 child: GestureDetector(
-                  // A double click is the pointer path to "watch this now": one
-                  // click on a row already starts a preview, and a second click
-                  // goes fullscreen — the two-press gesture that reads as "I
-                  // want to watch", rather than the row's single-click play that
-                  // a preview panel is not a row.
+                  // The panel is a play target through one gesture that means
+                  // "activate this channel": with nothing running it starts a
+                  // preview (the pointer's "preview this"), and with a preview
+                  // already running it escalates to fullscreen — the same second
+                  // activation OK/Select runs on the row. A single click is the
+                  // whole of it; there is deliberately no double-click rung, so
+                  // the "… again for fullscreen" hint is literally true.
                   //
-                  // Null unless something is actually previewing, so the logo /
-                  // error placeholders are not a fullscreen target.
+                  // Gated on `previewLoading` alone: while a resolve is in
+                  // flight the panel shows a spinner and the same click would
+                  // supersede it, so it waits (the deliberate-preview rule the
+                  // row's OK also follows).
                   //
                   // **Opaque**, because the default `deferToChild` is a trap
                   // here: the running video is deliberately wrapped in
@@ -1055,9 +1065,7 @@ class _LivePreviewPanel extends StatelessWidget {
                   // background and vanish. The picture is the target, and it is
                   // the panel's own rect that answers for it.
                   behavior: HitTestBehavior.opaque,
-                  onDoubleTap: previewActive && !previewLoading
-                      ? onOpenFullscreen
-                      : null,
+                  onTap: previewLoading ? null : onActivate,
                   child: Stack(
                     fit: StackFit.expand,
                     children: [

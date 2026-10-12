@@ -78,6 +78,7 @@ void main() {
       'shortTime': 'H:mm',
       'am': 'AM',
       'pm': 'PM',
+      'shortDate': 'dd.MM.yyyy',
     };
 
     test('accepts a complete map and stamps the local day', () {
@@ -87,6 +88,17 @@ void main() {
           '6 октября 2026 г. · 12:34');
       expect(f.dateFor.year, 2026);
       expect(f.dateFor.hour, 0);
+    });
+
+    test('carries the short-date picture for the VOD card', () {
+      final f = ClockFormat.fromMap(valid(), DateTime(2026, 10, 6));
+      expect(f!.shortDate, 'dd.MM.yyyy');
+      expect(
+        ClockFormat.fromMap(valid()..remove('shortDate'), DateTime(2026, 10, 6))!
+            .shortDate,
+        '',
+        reason: 'an absent picture must not stop the clock badge from working',
+      );
     });
 
     test('rejects a missing or blank pattern', () {

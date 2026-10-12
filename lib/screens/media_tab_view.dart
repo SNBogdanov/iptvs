@@ -11,6 +11,7 @@ import '../data/media_duration.dart';
 import '../data/net.dart' show cleanImageUrl;
 import '../data/source_hint_parser.dart';
 import '../data/vod_card_orientation.dart';
+import '../sources/release_date.dart' show formatReleaseDate;
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/favorite_controls.dart';
@@ -1312,17 +1313,21 @@ class _MediaListTile extends StatelessWidget {
   Widget build(BuildContext context) {
     // Parsed once per tile build — see [_MediaGridTile.build].
     final duration = formatMediaDuration(item.durationSeconds);
+    // The provider's own date string is reprinted in the OS's short-date
+    // format; a bare year or an unmatched shape comes back unchanged.
+    final date = formatReleaseDate(item.year);
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
       debugLabel: 'media.item.${item.id}',
       semanticsLabel: [
         item.title,
-        if (item.year != null) item.year!,
+        if (date.isNotEmpty) date,
         ?duration,
         '$position of $total',
         if (favorite) 'Favorite',
-        if (progress != null) '${(progress! * 100).ceil()}% watched',
+        if (progress != null)
+          progress == 1.0 ? 'Watched' : '${(progress! * 100).ceil()}% watched',
       ].join(', '),
       onTap: onTap,
       child: Padding(
@@ -1358,16 +1363,16 @@ class _MediaListTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
-                  if (item.year != null ||
+                  if (date.isNotEmpty ||
                       _hasRating(item) ||
                       duration != null) ...[
                     const SizedBox(height: 4),
                     Row(
                       children: [
-if (item.year != null)
+if (date.isNotEmpty)
                               Expanded(
                                 child: Text(
-                                  item.year!,
+                                  date,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
@@ -1385,7 +1390,7 @@ if (item.year != null)
                             // layout is supposed to put on the date alone.
                             else if (duration != null)
                               const Spacer(),
-                            if (item.year != null && _hasRating(item))
+                            if (date.isNotEmpty && _hasRating(item))
                               const SizedBox(width: 10),
                             _RatingBadge(rating: item.rating),
                             // The runtime is rigid and laid out after the
@@ -1481,9 +1486,11 @@ class _MediaGridTile extends StatelessWidget {
   /// Whole percent, for the semantics label — a D-pad user cannot see the bar,
   /// and "Resume" is the one thing about an in-progress title they would
   /// otherwise have to guess. Rounded *up*, so 0.4% still reads "1%" rather than
-  /// claiming nothing is watched.
-  String get _progressSemantics =>
-      '${(progress! * 100).ceil()}% watched';
+  /// claiming nothing is watched. A full bar means the title was played to the
+  /// end, which reads as "Watched", not "100%" — the two states are different.
+  String get _progressSemantics => progress == 1.0
+      ? 'Watched'
+      : '${(progress! * 100).ceil()}% watched';
 
   @override
   Widget build(BuildContext context) {
@@ -1491,13 +1498,16 @@ class _MediaGridTile extends StatelessWidget {
     // test and the widget share one parse, and this formats for every visible
     // tile rather than only for the ones that print it.
     final duration = formatMediaDuration(item.durationSeconds);
+    // See [_MediaListTile.build]: the provider's date string reprinted in the
+    // OS's short-date format.
+    final date = formatReleaseDate(item.year);
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
       debugLabel: 'media.item.${item.id}',
       semanticsLabel: [
         item.title,
-        if (item.year != null) item.year!,
+        if (date.isNotEmpty) date,
         ?duration,
         '$position of $total',
         if (favorite) 'Favorite',
@@ -1596,13 +1606,13 @@ class _MediaGridTile extends StatelessWidget {
                       // budget `childAspectRatio` was computed from, so an added
                       // line would move every cell's poster height; a sibling in
                       // the year row costs nothing and the year ellipsises first.
-                      if (item.year != null || duration != null)
+                      if (date.isNotEmpty || duration != null)
                         Row(
                           children: [
-if (item.year != null)
+if (date.isNotEmpty)
                                 Expanded(
                                   child: Text(
-                                    item.year!,
+                                    date,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -2066,6 +2076,9 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
             final narrow = constraints.maxWidth < 520;
             final poster = _Poster(item: _item, width: 124, height: 180);
             final seasonsFuture = _seasonsFuture;
+            // See [_MediaListTile.build]: the provider's date string reprinted
+            // in the OS's short-date format.
+            final date = formatReleaseDate(_item.year);
             final details = Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -2090,16 +2103,16 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                     ),
                   ],
                 ),
-                if (_item.year != null || _hasRating(_item)) ...[
+                if (date.isNotEmpty || _hasRating(_item)) ...[
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      if (_item.year case final date?)
+                      if (date.isNotEmpty)
                         Text(
                           date,
                           style: const TextStyle(color: AppColors.textLo),
                         ),
-                      if (_item.year != null && _hasRating(_item))
+                      if (date.isNotEmpty && _hasRating(_item))
                         const SizedBox(width: 12),
                       _RatingBadge(rating: _item.rating),
                     ],

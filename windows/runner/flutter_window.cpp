@@ -1946,6 +1946,12 @@ std::string ToUtf8(const std::wstring &text) {
 // as a picture, because it ticks - Dart formats that one each minute - while the
 // date is constant for the day and is best left to the same
 // `GetDateFormatEx` the GDI badge calls, so the two cannot disagree.
+//
+// `shortDate` is the `LOCALE_SSHORTDATE` picture (`dd.MM.yyyy`, `M/d/yyyy`) with
+// no date applied - the clock badge has no use for it, but the VOD card does:
+// a provider's `2026-09-29` is printed back the machine's way
+// (`release_date.dart`'s `formatReleaseDate`) instead of in the portal's own
+// shape.
 flutter::EncodableMap ClockFormatMap() {
   flutter::EncodableMap map;
   map[flutter::EncodableValue("longDate")] =
@@ -1956,6 +1962,8 @@ flutter::EncodableMap ClockFormatMap() {
       flutter::EncodableValue(ToUtf8(LocaleInfoString(LOCALE_S1159)));
   map[flutter::EncodableValue("pm")] =
       flutter::EncodableValue(ToUtf8(LocaleInfoString(LOCALE_S2359)));
+  map[flutter::EncodableValue("shortDate")] =
+      flutter::EncodableValue(ToUtf8(LocaleInfoString(LOCALE_SSHORTDATE)));
   return map;
 }
 
@@ -3641,13 +3649,17 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
         }
         return 0;
       }
-      // The panel itself is a target now, so a press on the header, the
-      // padding around the rows, or the empty/loading body is swallowed here
-      // instead of falling through as a press on nothing - it must not reach
-      // the chrome toggle underneath either, which is what a press in the
-      // shared Flutter overlay's margin does *only because its panel is still
-      // behind an `IgnorePointer`.
+      // The panel's own area - the header, the padding around the rows, the
+      // empty/loading body - is a dismiss target: a press there closes the
+      // list, the way an outside click closes any popup. It must not fall
+      // through to the chrome toggle underneath either.
       if (PointInRect(x, y, QuickListRect(client))) {
+        if (HWND parent = NativeControlsOwner(hwnd)) {
+          PostMessage(parent, kNativeControlCommandMessage,
+                      reinterpret_cast<WPARAM>(
+                          new std::string("zap:close")),
+                      0);
+        }
         return 0;
       }
     }
@@ -3783,6 +3795,18 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
     }
     break;
   case WM_LBUTTONDOWN:
+    // While the quick list is open this surface is, by construction, the area
+    // *outside* the list: the overlay's region covers only the panel, so a
+    // press arriving here did not land on it. It dismisses the list, exactly as
+    // a press in the panel margin does on the overlay — a dismiss, not a
+    // click-through, so it must not also reveal the chrome or act on the video.
+    if (QuickListShown()) {
+      if (HWND parent = GetParent(hwnd)) {
+        PostMessage(parent, kNativeControlCommandMessage,
+                    reinterpret_cast<WPARAM>(new std::string("zap:close")), 0);
+      }
+      return 0;
+    }
     // A press on the video is an outside press while a popup menu is up — the
     // controls overlay's region covers only its bars and the menu, so this
     // surface is the rest of the window. The overlay closes on a press on its
@@ -4002,6 +4026,15 @@ void FlutterWindow::HideToTray() {
   if (hwnd) {
     ShowWindow(hwnd, SW_HIDE);
   }
+  // The controls overlay is an *owned* WS_POPUP of the top-level, and Windows
+  // auto-hides owned windows only when the owner is minimized — `SW_HIDE`
+  // leaves it up alone, still drawing the chrome on an otherwise hidden
+  // window. The video surface is a WS_CHILD and hides with the parent, which
+  // is exactly the reported shape (VOD on the native HDR surface). Hide it
+  // alongside the window; RestoreFromTray re-applies its tracked state.
+  if (native_controls_overlay_) {
+    ShowWindow(native_controls_overlay_, SW_HIDE);
+  }
   // Tell Dart to silence playback directly: `SW_HIDE` does not drive the
   // engine to `AppLifecycleState.hidden` on Windows, so the lifecycle observers
   // never fire and the stream keeps playing behind the hidden window.
@@ -4017,6 +4050,9 @@ void FlutterWindow::RestoreFromTray() {
     return;
   }
   ShowWindow(hwnd, SW_SHOW);
+  // Mirror of HideToTray's explicit overlay hide: reshow it if the tracked
+  // chrome state calls for one.
+  ApplyNativeControlsVisibility();
   SetForegroundWindow(hwnd);
   // Mirror of HideToTray's `trayHidden`: tell Dart the window came back so the
   // preview/player the hide paused can resume.
@@ -4221,6 +4257,20 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   // otherwise fall through to the surface teardown below and close outright.
   if (message == kTrayCallbackMessage) {
     return HandleTrayCallback(lparam);
+  }
+  // Mirror every *actual* top-level visibility transition to Dart, whichever
+  // path caused it. HideToTray/RestoreFromTray send their own `trayHidden`/
+  // `trayShown`, but they are the tray's call sites only: a window restored by
+  // any other route — an OS-driven show, a surviving taskbar button — left the
+  // tray-hide's silence in force, so playback stayed paused and the auto-switch
+  // countdown stayed frozen at "hidden" with no event to release it. `wparam`
+  // is TRUE when the window is becoming visible. `IsIconic` keeps ordinary
+  // minimize/restore out of this: a minimize is not a hide. Deliberately not
+  // consumed — the base handler still runs.
+  if (message == WM_SHOWWINDOW && tray_channel_ && !IsIconic(hwnd)) {
+    tray_channel_->InvokeMethod(
+        wparam ? "trayShown" : "trayHidden",
+        std::make_unique<flutter::EncodableValue>(true));
   }
   if (message == WM_CLOSE) {
     if (close_to_tray_ && !force_quit_) {
@@ -4843,7 +4893,10 @@ bool FlutterWindow::NativeOverlayTargetVisible() const {
 }
 
 void FlutterWindow::BringNativeControlsToFront() {
-  if (!NativeOverlayTargetVisible()) {
+  // `SWP_SHOWWINDOW` is the one re-show that does not run through
+  // ApplyNativeControlsVisibility's tray gate (ResizeNativeVideoSurface calls
+  // this directly), so it carries the same must-not-appear-while-hidden rule.
+  if (!NativeOverlayTargetVisible() || !IsWindowVisible(GetHandle())) {
     return;
   }
   if (native_controls_overlay_) {
@@ -5035,6 +5088,18 @@ void FlutterWindow::ShowNativeControls(bool visible) {
 
 void FlutterWindow::ApplyNativeControlsVisibility() {
   if (!native_controls_overlay_) {
+    return;
+  }
+  // While the top-level is hidden (tray), the overlay must stay hidden no
+  // matter what Dart sends. Silencing a paused player pins the chrome
+  // (`native_controls_pinned_`), and the re-show from that call would otherwise
+  // put the owned WS_POPUP right back over the hidden window within a
+  // millisecond of HideToTray. RestoreFromTray shows the window first, so this
+  // gate reopens in the same breath.
+  if (!IsWindowVisible(GetHandle())) {
+    if (IsWindowVisible(native_controls_overlay_) != FALSE) {
+      ShowWindow(native_controls_overlay_, SW_HIDE);
+    }
     return;
   }
   if (native_controls_region_dirty_) {

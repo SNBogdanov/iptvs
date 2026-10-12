@@ -1331,9 +1331,13 @@ any value that *holds* a map, so a row needs no second set of helpers) and then 
     `selected_index`, because the panel draws 9 of the ~40 rows Dart shipped. Rows are hit-tested
     from the painted geometry rather than restated constants; a click below the last row clamps
     onto it, since the panel's bottom padding is drawn over the same pixels. A press inside the
-    panel that misses every row is swallowed rather than falling through — with the rows reachable,
-    "not a hit" inside the panel must not become "toggle the chrome", which is what the
-    `IgnorePointer`-behind-the-panel arrangement gives the shared Flutter overlay for free.
+    panel that misses every row — the header, the padding, the empty/loading body — **closes the
+    list** (`zap:close`), the way an outside click closes any popup; so does a press on the video
+    **outside** the panel, which is handled on the video surface (`QuickListShown()` there), since
+    the overlay's region covers only the panel. Neither is allowed to fall through to the chrome
+    toggle underneath — "not a hit on a row" must not become "toggle the chrome" (the shared
+    Flutter overlay reaches the same end by handling the outside tap on the panel and on the
+    background layer).
   - docs/tv-navigation.md's rule that the list is a selection model driven by the surface's key
   ring is unchanged: **rows are not focus targets and not navigable by geometry traversal.** A
   pointer names a row directly, which is what a pointer is for; it never moves a focus ring.
@@ -1451,7 +1455,23 @@ window. `ShowWindow(SW_HIDE)` does **not** drive the engine to `AppLifecycleStat
 `inactive`), which is why the runner sends a native `trayHidden` event on the `iptvs/tray` channel
 instead; Dart raises `silenceRequest` (`lib/player/tray.dart`), and the channel list pauses the
 preview while the player pauses — so no stream keeps playing behind a window the user cannot see.
-Restoring sends the mirror `trayShown`, and `resumeRequest` resumes what was paused. Quitting goes
+`HideToTray` also explicitly hides the **native controls overlay**: that window is an *owned*
+`WS_POPUP` of the top-level (the video surface is a `WS_CHILD` and hides with the parent), and
+Windows auto-hides owned windows only when the owner is **minimized** — `SW_HIDE` alone would leave
+the chrome floating over the desktop on an otherwise hidden window (VOD on the native HDR surface,
+reported live vs SDR-embedded live). That single hide is not enough on its own: silencing a paused
+player pins the chrome and would re-show the owned popup within a millisecond, so the hide is
+**authoritative** — both `ApplyNativeControlsVisibility` and `BringNativeControlsToFront` (the one
+re-show that bypasses it, via `ResizeNativeVideoSurface`) refuse to render the overlay while the
+top-level is not visible, and `RestoreFromTray` shows the window first and then re-applies the
+chrome state it was tracked at.
+Restoring sends the mirror `trayShown`, and `resumeRequest` resumes what was paused. **The
+visibility events follow the window, not just the tray's own calls:** `FlutterWindow::MessageHandler`
+mirrors `WM_SHOWWINDOW` (guarded by `!IsIconic`, so an ordinary minimize is not a hide) as
+`trayShown`/`trayHidden`. `HideToTray`/`RestoreFromTray` still send their own (the notifications are
+idempotent), but they are only the tray's call sites — a window restored by any other route left the
+tray-hide's silence in force, and the release that never came left playback paused and the
+auto-switch countdown frozen on `AutoSwitchHold.silenced` ("… hidden") with no way back. Quitting goes
 through the tray menu's **Exit**, or the in-app double-Back exit, both of which set `force_quit_`
 before posting `WM_CLOSE` so the real close cannot be re-intercepted. The in-app exit uses the
 runner's `exitApp` method rather than `SystemNavigator.pop()`, because the Windows engine handles
@@ -1565,7 +1585,9 @@ read the same source:
   GDI badge (`FormatClock`) joins them with the middle dot, and `ClockFormatMap` (the `iptvs/clock`
   answer) sends the **same long-date string** plus the short-time *picture* and the AM/PM
   designators. This replaced a C-locale `wcsftime("%a %#d %b · %H:%M")`, which was English
-  regardless of the desktop.
+  regardless of the desktop. The same map also carries the `LOCALE_SSHORTDATE` **picture**
+  (`shortDate`) with no date applied — the badge has no use for it, but `formatReleaseDate`
+  (`lib/sources/release_date.dart`) applies it to VOD release dates (see "VOD/series card shape").
 - **Dart** (`lib/player/clock_format.dart`): `detectClockFormat()` — fired unawaited from `main()`
   on Windows — asks `iptvs/clock`'s `locale` once and stores a `ClockFormat`, which
   `playerClockLabel` (`player_overlay.dart`) renders.
@@ -1635,6 +1657,18 @@ publish-then-persist, and the notifier surviving a simulated reboot) and, in
 height budget's *shape* and that file is the only one in the suite with real font
 metrics.
 
+**The date a card prints is the OS's short date, not the provider's shape.** The panel writes
+`MediaItem.year` as it likes (`2026-09-29`, `29.09.2026`, a bare `2026`); the grid card, the narrow
+list row and the details sheet all page it through the short-date picture the OS resolved —
+`LOCALE_SSHORTDATE` on Windows, e.g. `dd.MM.yyyy` on a Russian desktop and `M/d/yyyy` on an
+American one. `formatReleaseDate` (`lib/sources/release_date.dart`) applies that picture over the
+**same parse** `releaseSortKey` uses, so display and ordering never disagree on a date's shape. A
+bare year needs no reformatting, and an unparseable string or an out-of-range month/day is left
+verbatim, never blanked; with no picture resolved (any non-Windows surface) the raw string is
+unchanged, which is the shipped behaviour. The picture rides the `iptvs/clock` answer (see "The
+clock badge's regional format"), so the card and the player read one locale. Pinned by
+`test/release_date_format_test.dart` and the `shortDate` group in `test/clock_format_test.dart`.
+
 ### The card's watched-progress bar
 
 A movie card that has been started and not finished carries a **4 px green bar across
@@ -1651,12 +1685,24 @@ follow a progress value that changes while you scroll. As a `Positioned` child o
 unchanged `BoxFit.cover` poster it costs nothing. `test/media_progress_bar_test.dart`
 asserts a card's size is identical with and without its bar.
 
-**The fraction comes from `playback_positions`, so the bar is gone at the end of a
-film by construction rather than by a rule here**: `savePlaybackPosition` deletes the
-row at `kFinishedFraction` (95%) and ignores anything under 10 s, and
-`AppDatabase.readPlaybackProgress` returns one fraction per remaining row
-(`position_ms / duration_ms`, clamped, `duration_ms > 0`). A finished title has no row,
-so no bar — the same reason it stops appearing in Continue Watching.
+**The fractions come from `playback_positions`, and the finished card's *full* bar comes
+from a separate `watched_media` table — the two states never share a row.** The partial bar
+is one fraction per remaining row (`position_ms / duration_ms`, clamped, `duration_ms > 0`),
+and **every row in that table is unfinished by construction**: `savePlaybackPosition`
+deletes the row at `kFinishedFraction` (95%) and ignores anything under 10 s. So an
+in-progress title draws its real fraction, and a finished title has *no* position row —
+but "watched to the end" is a fact of its own, kept in
+`AppDatabase.watched_media` (keyed `(source_id, kind, item_id)`, outside
+`_createMediaTables` so the v15 upgrade covers every path). The completion branch of
+`savePlaybackPosition` writes that mark and clears the resume row; a **new in-progress
+session clears it** the other way, so a film you re-open is *in progress* again — the card
+always shows the title's current state, never "done and then half-watched". A sub-10 s
+write touches neither table, so it cannot un-watch a finished film it was a stray report
+about. `MediaTabController._loadResumeProgress` merges the watched ids into the grid map as
+`1.0`, and `WatchProgressBar(value: 1.0)` is just a full bar — the finished card keeps the
+bar rather than losing its indication, which is the point (the original report: "no bar at
+the end of a film"). Both writes funnel through `savePlaybackPosition` (`_persistPlaybackPosition`
+and the Android/iOS `nativeClosed` relay), so there is exactly one place the fact is decided.
 
 **Movie tab only, and that is a property of the data rather than a shortcut.** On the
 movie tab a row's `itemId` *is* the movie the card shows, so the map answers the grid's
@@ -1687,9 +1733,13 @@ whereas letting it throw would take the rail down with it (same unawaited call f
 `load`).
 
 Pinned by the `card progress` group in `test/media_tab_controller_test.dart` (publish,
-early-return clear, Remove dropping the bar in memory and the row on disk, and the series
-tab publishing nothing while the row is still readable), the DB group in
-`test/persistence_test.dart`, and `test/media_progress_bar_test.dart`.
+early-return clear, a **finished `m3` arriving as `1.0` in the grid map while it leaves the
+rail**, Remove dropping the bar in memory and the row on disk, and the series tab
+publishing nothing while the row is still readable), the DB group in
+`test/persistence_test.dart` (the `watched marks` group: finish → mark + no row,
+re-open → un-watch, sub-10 s touches neither, and the stable-identity migration moving a
+watched mark with its source), and `test/media_progress_bar_test.dart` (including a
+`resumeProgress: {'m0': 1.0}` full bar).
 
 ## Linux
 
@@ -3153,14 +3203,19 @@ up to 1.6x) so the reveal is exact `index * extent` arithmetic, and the row's te
 `ClipRect` → `OverflowBox` so a `RenderFlex` overflow is structurally impossible whatever the font
 metrics do — the same split the live tab's fixed-extent rows use, swept with the real Inter font in
 `test/layout_overflow_test.dart`. The selection ring is a `foregroundDecoration`, never a laid-out
-border. The panel is behind an `IgnorePointer` on its **heading and margins** — a press there still
-reaches the background tap the touch Back ladder depends on — while its **rows** are pointer targets
-where the platform is a pointer at all: `zapQuickListRowMoveDelta` then `zap:activate` for a click
-(the keys' OK verbatim), `zapQuickListWheelDelta` (`kZapWheelRows`, 3) for a notch, which moves the
-cursor and never plays. Rows only build that handler when `onQuickListCommand` is wired, and the
-whole thing is skipped in `touch` mode. The `zap:move` is dropped by the controller when it is 0, so
-a click on the row already under the cursor sends the activation alone rather than needing a special
-case.
+border. On a pointer platform the panel is a **dismiss target**: its fill (`BoxDecoration` with a
+colour) absorbs hits across the whole rect, so a press the rows do not claim — the heading, the
+padding, the empty/loading body — closes the list (`zap:close`), and so does a press on the exposed
+video behind it (the background tap, which otherwise reveals chrome). Its **rows** are the pointer
+targets that select: `zapQuickListRowMoveDelta` then `zap:activate` for a click (the keys' OK
+verbatim), `zapQuickListWheelDelta` (`kZapWheelRows`, 3) for a notch, which moves the cursor and
+never plays — and the notch is **claimed** through `PointerSignalResolver.register`, because a
+`Listener.onPointerSignal` is a `void` callback and the enclosing `ListView` would otherwise scroll
+on the same notch, so the wheel re-centred the cursor while the page scrolled underneath (the "list
+jumps on every notch" report). Rows only build that handler when `onQuickListCommand` is wired, and
+the whole thing is skipped in `touch` mode (rows inert, outside-tap left to the touch Back ladder).
+The `zap:move` is dropped by the controller when it is 0, so a click on the row already under the
+cursor sends the activation alone rather than needing a special case.
 
 #### Android's quick list (Phase 6b)
 

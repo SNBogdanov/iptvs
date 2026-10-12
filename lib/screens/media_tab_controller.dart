@@ -227,6 +227,14 @@ class MediaTabController extends ChangeNotifier {
   /// read throw would take the rail down with it, since it runs in the same
   /// unawaited call from [load].
   ///
+  /// A **finished** title has no position row (it was cleared at
+  /// [AppDatabase.kFinishedFraction]), so it cannot come out of
+  /// [AppDatabase.readPlaybackProgress] - but being finished is precisely the
+  /// case this map exists for. Its `watched_media` mark ([AppDatabase.readWatchedIds])
+  /// is merged in as a full bar (1.0), because [savePlaybackPosition] clears the
+  /// mark whenever a new in-progress session starts: a card's bar always
+  /// describes the film's *current* state, progress or done, and never both.
+  ///
   /// **Movie tab only.** Not because episodes have no progress - they do, this
   /// read answers them fine - but because those keys are *episode* ids while that
   /// tab's grid lists *series*, so not one of them can match a card. An
@@ -236,9 +244,16 @@ class MediaTabController extends ChangeNotifier {
   Future<void> _loadResumeProgress() async {
     Map<String, double> progress;
     try {
-      progress = _resumeKind == ContentKind.movie
-          ? await repo.db.readPlaybackProgress(repo.source.id, _resumeKind)
-          : const <String, double>{};
+      if (_resumeKind != ContentKind.movie) {
+        progress = const <String, double>{};
+      } else {
+        progress =
+            await repo.db.readPlaybackProgress(repo.source.id, _resumeKind);
+        for (final id
+            in await repo.db.readWatchedIds(repo.source.id, _resumeKind)) {
+          progress[id] = 1.0;
+        }
+      }
     } catch (error) {
       DiagnosticsLog.instance.add(
         'library',

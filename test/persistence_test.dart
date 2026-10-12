@@ -29,7 +29,21 @@ void main() {
   });
 
   tearDown(() {
-    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    if (!tempDir.existsSync()) return;
+    // Windows keeps SQLite's WAL/-shm handles open for a tick past the test's
+    // last `close()`; deleting the directory on that tick races
+    // FileSystemException (errno 145, "directory not empty"), which surfaces
+    // as a *random* test failing — the tearDown's, not the one that leaked.
+    // Retry briefly before accepting the failure.
+    for (var attempt = 0; attempt < 20; attempt++) {
+      try {
+        tempDir.deleteSync(recursive: true);
+        return;
+      } on FileSystemException {
+        sleep(const Duration(milliseconds: 25));
+      }
+    }
+    tempDir.deleteSync(recursive: true);
   });
 
   String dbPath() => '${tempDir.path}/iptv.db';
@@ -1159,9 +1173,11 @@ void main() {
           duration: const Duration(minutes: 100),
         );
         // Just under the finish threshold: this one *does* get a bar, and it is
-        // the highest any card can ever show — [savePlaybackPosition] deletes
-        // the row at [AppDatabase.kFinishedFraction], so no poster can end up
-        // with a full bar, and none is missing one it should have.
+        // the highest fraction *this* read can ever return — the DB side of the
+        // split: [savePlaybackPosition] deletes the row at
+        // [AppDatabase.kFinishedFraction], so the partial-bar map never carries
+        // a ~100% bar. A finished poster's *full* bar comes from watched_media
+        // (see the watched-ids tests below), not from this method.
         await db.savePlaybackPosition(
           'src',
           ContentKind.movie,
@@ -1228,6 +1244,106 @@ void main() {
         await db.close();
       },
     );
+
+    group('watched marks (played to the end)', () {
+      test('finishing a title marks it watched and keeps the no-bar contract',
+          () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'done',
+          position: const Duration(minutes: 88),
+          duration: const Duration(minutes: 90),
+        );
+        // The resume row is gone (the rail drops finished titles)...
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'done'),
+          isNull,
+        );
+        // ...but the finished *fact* survives, separately, for the card's bar.
+        expect(
+          await db.readWatchedIds('src', ContentKind.movie),
+          contains('done'),
+        );
+        // And the partial-bar read stays clean of it: the full bar comes from
+        // the watched set, so the two maps answer different questions.
+        expect(
+          await db.readPlaybackProgress('src', ContentKind.movie),
+          isNot(contains('done')),
+        );
+        await db.close();
+      });
+
+      test('a new in-progress session clears the watched mark', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.markWatched('src', ContentKind.movie, 'm1');
+        // Under the threshold, over the 10 s floor: a real session is running
+        // again, so the title is in progress, not done.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 30),
+          duration: const Duration(minutes: 120),
+        );
+        expect(await db.readWatchedIds('src', ContentKind.movie), isEmpty);
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+          isNotNull,
+        );
+        await db.close();
+      });
+
+      test('a sub-10-second write neither marks nor un-watches', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.markWatched('src', ContentKind.movie, 'm1');
+        // A stray report a hair over the start (a reopened player, a native
+        // close a few seconds in) must not un-watch a finished film.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(seconds: 5),
+          duration: const Duration(minutes: 120),
+        );
+        expect(await db.readWatchedIds('src', ContentKind.movie), {'m1'});
+        // And it cannot *finish* a film whose duration is unknown: no mark
+        // without a duration to measure the threshold against.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'unknown',
+          position: const Duration(seconds: 5),
+          duration: Duration.zero,
+        );
+        expect(
+          await db.readWatchedIds('src', ContentKind.movie),
+          {'m1'},
+        );
+        await db.close();
+      });
+
+      test('re-finishing an already-watched title stays a single mark', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 88),
+          duration: const Duration(minutes: 90),
+        );
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 90),
+          duration: const Duration(minutes: 90),
+        );
+        expect(await db.readWatchedIds('src', ContentKind.movie), {'m1'});
+        await db.close();
+      });
+    });
 
     test('v10 database gains the playback_positions table on upgrade', () async {
       // Simulate a pre-v11 install: open at v10 (no positions table), then
@@ -1765,6 +1881,11 @@ void main() {
         position: const Duration(minutes: 12),
         duration: const Duration(minutes: 90),
       );
+      await db.markWatched(
+        'xtream:http://provider.invalid|old-user',
+        ContentKind.movie,
+        'movie-8',
+      );
 
       await db.migrateSourceNamespace(
         'xtream:http://provider.invalid|old-user',
@@ -1782,6 +1903,10 @@ void main() {
           'movie-7',
         ),
         isNotNull,
+      );
+      expect(
+        await db.readWatchedIds('stable-source-uuid', ContentKind.movie),
+        contains('movie-8'),
       );
       expect(
         (await db.nowNext('stable-source-uuid', now)).now['42']?.title,

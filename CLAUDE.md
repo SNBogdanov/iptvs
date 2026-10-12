@@ -284,9 +284,12 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   for the card *and* the rail (the rail moved off `AppColors.accent` onto `AppColors.success` so
   the two agree). It's a `Positioned` child **inside the poster's `Stack`**, which is what keeps
   `childAspectRatio`, `textBudget` and `memCacheWidth` untouched; a bar below the poster would make
-  the cell geometry follow a value that changes while you scroll. No bar at the end of a film
-  because `playback_positions` has no row by then (`kFinishedFraction` 95%, sub-10 s ignored), not
-  by a rule in the widget. **Movie tab only** — a movie row's `itemId` *is* the card's id, while a
+  the cell geometry follow a value that changes while you scroll. A **finished** film keeps
+  the bar, full, rather than losing it: `savePlaybackPosition` clears the position row past
+  `kFinishedFraction` (95%, sub-10 s ignored) — the rail for that reason, and the card's
+  *finished* fact in its own `watched_media` table (v15) that `_loadResumeProgress` merges
+  in as `1.0`, with a new in-progress session clearing the mark so the bar always shows the
+  title's current state. **Movie tab only** — a movie row's `itemId` *is* the card's id, while a
   series tab's rows are episodes and its grid lists series, so `_loadResumeProgress` publishes an
   empty map there rather than an episode-keyed one that can never match a card (which would read as
   the feature working and invite an invented "average of your started episodes" aggregate).
@@ -337,9 +340,15 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
    provider-supplied **`String?`** holding ISO `2026-09-29`, dotted/slashed `29.09.2026`, a bare
    `2026`, or something unparseable — so `releaseSortKey` normalises shape into one integer
    (`yyyyMMdd`) and **an unparseable row sorts last in both directions**, never as year 1: "unknown"
-   dragging a name sort or reading as ancient is worse than admitting the provider said nothing.
-   Day-first vs month-first slash dates is genuinely ambiguous, and `releaseSortKey` picks **day-first
-   for every row**, never per row — a convention misread uniformly still leaves relative order intact,
+dragging a name sort or reading as ancient is worse than admitting the provider said nothing.
+    **Cards don't print the raw shape either:** the grid tile, list row and details sheet run the
+    value through `formatReleaseDate` (`sources/release_date.dart`), which applies the OS's
+    short-date picture (`LOCALE_SSHORTDATE`, carried by the `iptvs/clock` answer) over the *same*
+    `releaseDateParts` parse `releaseSortKey` uses, so display and ordering agree — `2026-09-29`
+    reads `29.09.2026` on a Russian Windows, `9/29/2026` on an American one; a bare year, an
+    unparseable string, or any platform without a resolved picture keeps the raw value.
+    Day-first vs month-first slash dates is genuinely ambiguous, and `releaseSortKey` picks **day-first
+    for every row**, never per row — a convention misread uniformly still leaves relative order intact,
    while guessing per row does not. A row with only a year takes part in both directions. **Ties keep
    their incoming order** (`favorites_order.dart`'s explicit-last rule, same reason: `List.sort` is not
    stable), which is why Favorites is `orderedByCatalog`-grouped *first* and sorted after — and the
@@ -705,9 +714,11 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   `_selectCategory` takes `scrollToTop: false` for that case. A channel no view can draw is not
   matchable, because the chip would name it and
   then select nothing — and re-enabling a category the user disabled is not a keystroke's decision.
-  The preview **picture** takes a double click as fullscreen (a single click is already "preview
-  this"), which requires `HitTestBehavior.opaque` because the running video is `IgnorePointer` and
-  nothing else under the middle of the picture would satisfy a `deferToChild` detector.
+  The preview **picture** is a play target through one pointer gesture: a single click starts the
+  preview when the panel shows the logo and goes fullscreen when one is running — the row's second
+  activation, so the "… again for fullscreen" hint is literally true — which requires
+  `HitTestBehavior.opaque` because the running video is `IgnorePointer` and nothing else under the
+  middle of the picture would satisfy a `deferToChild` detector.
   Pinned by `test/channel_number_entry_test.dart`, `test/channel_number_chip_test.dart`, the
   `number entry` and `revealing a jumped-to channel` groups in
   `test/live_focus_coordinator_test.dart` and the preview-picture group in
@@ -772,10 +783,16 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   OK verbatim (`zap:move:<delta>` only when the row is not already under the cursor, then
   `zap:activate`), and one wheel notch is `zap:move:±kZapWheelRows` — a cursor move, never a channel
   change. That is a rule about *meaning*, not about focus: rows are still not focus targets, and a
-  press in the panel's margin is swallowed rather than reaching the chrome toggle underneath. On the
-  Windows native surface it costs `WS_EX_TRANSPARENT`, which the **banner keeps** and the open list
-  drops, and the wheel has to be handled on the native **video** surface too, because Win32 sends
-  `WM_MOUSEWHEEL` to the focus window rather than to the one under the cursor. **Every surface renders it** (Flutter overlay, Android Compose, Windows
+  press the rows do not claim — the panel's header/margin, or the video outside it — **closes the
+  list** (`zap:close`), the way an outside click closes any popup. The wheel must **claim** the
+  pointer signal (`PointerSignalResolver.register`), not merely observe it: a Flutter
+  `Listener.onPointerSignal` is a `void` callback, so the enclosing `Scrollable` registers its own
+  handler and would scroll on the same notch, and the cursor move and the page scroll then fight —
+  the "list jumps on every wheel notch" report. On the Windows native surface the outside press costs
+  `WS_EX_TRANSPARENT`, which the **banner keeps** and the open list drops, and `QuickListShown()` is
+  checked on the **video** surface too, because a press outside the panel's region lands there; the
+  wheel likewise has to be handled on the video surface, because Win32 sends `WM_MOUSEWHEEL` to the
+  focus window rather than to the one under the cursor. **Every surface renders it** (Flutter overlay, Android Compose, Windows
   GDI, Linux Lua) and every renderer **prints, never formats or derives**; the highlight is drawn at
   `selectedIndex - windowStart`, never from a row's own `selected` flag, so scroll and highlight are
   one computation. **While the list is open, its surface claims the arrows and Back regardless of
@@ -959,7 +976,12 @@ position, the same row the alphabetical read would have shown. Pinned by `persis
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 14` (v14: `favorites_outbox`, the pending local favorite
+`AppDatabase` is at `schemaVersion = 15` (v15: `watched_media`, the `(source_id, kind,
+item_id)`-keyed "played to the end" marks behind a finished card's full progress bar —
+separate from `playback_positions` by design, whose rows are unfinished by construction
+(`savePlaybackPosition` clears a row at `kFinishedFraction`), while "watched once" is a
+terminal fact that survives until a new in-progress session clears it; v14: `favorites_outbox`,
+the pending local favorite
 changes a cloud *delta* push sends — a favorite in the cloud but not locally is either "deleted
 here" or "added there and not pulled yet", and `favorites` alone can't tell those apart; written
 only by `setFavorite` (user intent), never by the pull, which mirrors through
@@ -1059,7 +1081,11 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `tray_owner_hwnd_` because the base class has already nulled its own handle by then. Hiding sends a
   native `trayHidden` event on `iptvs/tray` (the Windows `hidden` lifecycle does **not** fire for a
   `SW_HIDE`), and Dart pauses the preview/player on it via `silenceRequest`; restoring sends
-  `trayShown` and resumes via `resumeRequest`. The **boss key** is F12 (a `HardwareKeyboard` handler
+  `trayShown` and resumes via `resumeRequest`. The runner also mirrors the window's **actual**
+  `WM_SHOWWINDOW` transition (guarded by `!IsIconic`) as those same events, because the explicit
+  sends are the tray's call sites only — a restore by any other route left the silence in force, with
+  playback paused and the auto-switch countdown frozen on `silenced` and no event to release it. The
+  **boss key** is F12 (a `HardwareKeyboard` handler
   on the app root, plus a runner-side `WM_KEYDOWN`/`VK_F12` for the native HDR surface) and just calls
   `hideToTray`. A global Settings screen (avatar menu → Settings) hosts the close-to-tray, random
   zapping and always-on-top-in-fullscreen preferences in `AppSettingsStore`.

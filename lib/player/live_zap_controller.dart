@@ -1461,6 +1461,7 @@ _rangeCatId = rangeCategoryId,
   void _setSilenced(bool value) {
     if (_silenced == value) return;
     _silenced = value;
+    catalog.log('auto-switch silenced=$value');
     _syncAutoSwitch();
   }
 

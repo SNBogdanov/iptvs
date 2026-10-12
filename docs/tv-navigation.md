@@ -211,11 +211,14 @@ tile-width band.
   so the line height — and therefore the extent — is still set by the title alone, and
   `layout_overflow_test.dart` sweeps it with real font metrics at text scales up to 2.0.
 
-- **The preview picture is a play target, and a double click is what reaches it.** A single click on
-  a *row* already means "preview this", and inside a running preview a single click lands on the
-  channel the panel is showing, so it cannot also mean "watch it". The panel's picture area
-  therefore takes a **double click** as fullscreen, and only while something is actually previewing
-  — the logo and error placeholders are not a way to launch a channel. The detector is
+- **The preview picture is a play target through one pointer gesture.** With nothing running the
+  panel shows the selected channel's logo, and a **single click** there is the pointer's "preview
+  this" — it runs the same `onActivate` (`onPlayChannel`) a *row* tap does, so the deliberate-preview
+  reconciliation applies unchanged and a preview still resolving is not superseded. With a preview
+  actually running the **same single click** goes fullscreen — the second activation OK/Select runs
+  on the row, and exactly what the hint beneath the panel promises ("… again for fullscreen"). There
+  is deliberately **no double-click rung**: the hint always described one gesture, and a double-click
+  that a two-single-click user could not discover was the mismatch. The detector is
   **`HitTestBehavior.opaque`**, and that is load-bearing rather than tidy: the running video inside
   the panel is deliberately wrapped in `IgnorePointer` (the panel's own controls live on top of it),
   so under the default `deferToChild` there is nothing at the middle of the picture for the gesture to
@@ -753,13 +756,16 @@ focus ring; the glyph is each platform's own bulleted-list icon (Material
 `format_list_bulleted`, Compose `Icons.AutoMirrored.Filled.List`, Segoe MDL2 `\xE8FD`).
 
 **Once it is open the pointer drives it too** — a click on a row is the keys' OK verbatim (cursor
-to that row, then play it), and a wheel notch moves the cursor three rows. The opener was the first
-half; without this the panel on screen was readable but not usable without a keyboard, which on a
-desktop is the same as broken. **A row names itself — this is not geometry traversal**, and no
-focus ring moves: the selection model is unchanged, and rows are still not focus targets. Only the
-two surfaces that can host a Flutter or GDI overlay implement it today (the shared Flutter overlay
-and the Windows GDI one); Android Compose and the Lua OSD are keyboard/keyring surfaces and stay as
-they are. The arrows it *was* reached by are a separate matter, and the ordering there is
+to that row, then play it), and a wheel notch moves the cursor three rows. The wheel is **claimed**
+from the enclosing `ListView` (`PointerSignalResolver.register`), or the page scrolls on the same
+notch and fights the cursor re-centre. A press the rows do not claim — the panel's header/margin, or
+the video outside it — **closes the list**, the way an outside click dismisses any popup. The opener
+was the first half; without this the panel on screen was readable but not usable without a keyboard,
+which on a desktop is the same as broken. **A row names itself — this is not geometry traversal**,
+and no focus ring moves: the selection model is unchanged, and rows are still not focus targets. Only
+the two surfaces that can host a Flutter or GDI overlay implement it today (the shared Flutter
+overlay and the Windows GDI one); Android Compose and the Lua OSD are keyboard/keyring surfaces and
+stay as they are. The arrows it *was* reached by are a separate matter, and the ordering there is
 load-bearing: **an open list claims them even while the chrome is visible**, because the chrome can
 come back *underneath* it — a mouse hover over the video reveals it — and a gate that asked
 "chrome hidden?" first handed Up/Down to volume instead of the cursor. The native key ring already
@@ -854,19 +860,19 @@ nothing the second time reads as a dead remote.
 cluster**: quick list → "Go to live" → favourite star → speed/audio/CC → aspect → info →
 fullscreen (`FocusableItems`), matching the visual order. It is an ordinary focus stop, exactly
 like the star, and it is the one opener that **toggles** (`zap:list`/`zap:close`) — this surface
-keeps its chrome up over an open list, so the button stays reachable under the pointer and is still
-the only way to *close* the panel from the mouse: a row press answers "play this row", and a press
-in the panel's margin is deliberately swallowed. Every other surface's opener only opens, because
-opening stands their chrome down.
+keeps its chrome up over an open list, so the button stays reachable under the pointer; a row press
+answers "play this row", and a press the rows do not claim — the panel's margin, or the video
+outside it — closes the list, the way an outside click closes any popup. Every other surface's opener
+only opens, because opening stands their chrome down.
 
 The rendered *panel* is a **selection model**, never a focus target — and its rows are a pointer
 target and nothing more (a click names a row; it does not move a focus ring). That is what
 `WS_EX_TRANSPARENT` was doing before the rows became clickable: with only the list (or the banner)
 drawn, a mouse move over its band had to reach the video surface's `WM_MOUSEMOVE`, the only thing
 that reveals the chrome. The **banner keeps that pass-through; the open list does not** — it drops
-the style for as long as it is up so its rows take the press, and swallows a press in its margin
-rather than letting it fall through as a chrome toggle. See docs/player.md "The quick list on the
-native HWND surface (Phase 6c)".
+the style for as long as it is up so its rows take the press, and a press in its margin (or on the
+video outside it, which the video surface handles) **closes the list** rather than falling through as
+a chrome toggle. See docs/player.md "The quick list on the native HWND surface (Phase 6c)".
 
 ### Android's key map (`ZapKeyPolicy`, implemented)
 

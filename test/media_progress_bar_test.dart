@@ -91,6 +91,53 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('a finished title draws a full bar, and nothing else marks it',
+        (tester) async {
+      // A film played to the end has no position row, but it *was* watched —
+      // the controller merges its watched mark as 1.0. The full bar is that
+      // indicator: the resize-resistance and per-item conditionality of a
+      // partial bar apply to it exactly.
+      final items = _items(4);
+      final scroll = ScrollController();
+      addTearDown(scroll.dispose);
+
+      await tester.pumpWidget(
+        _app(
+          MediaTabView(
+            kind: ContentKind.movie,
+            visible: items,
+            snapshot: null,
+            loading: false,
+            loadingMore: false,
+            error: null,
+            showingSearch: false,
+            lastPlayedId: null,
+            scrollController: scroll,
+            firstFocusNode: null,
+            isFavorite: (_) => false,
+            onOpenMedia: (_) {},
+            onLoadMore: () {},
+            onRetry: () {},
+            // m0 seen to the end; m1 is mid-film.
+            resumeProgress: const {'m0': 1.0, 'm1': 0.4},
+            onResume: (_) {},
+            onRemoveContinueWatching: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final bars = tester.widgetList<WatchProgressBar>(
+        find.byType(WatchProgressBar),
+      );
+      expect(
+        bars.map((b) => b.value),
+        unorderedEquals([1.0, 0.4]),
+        reason: 'the full bar and the partial bar are the same widget',
+      );
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('no bar anywhere when nothing is in progress', (tester) async {
       final items = _items(6);
       final scroll = ScrollController();

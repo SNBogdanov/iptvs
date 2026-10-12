@@ -3,7 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/gestures.dart' show PointerScrollEvent;
+import 'package:flutter/gestures.dart' show GestureBinding, PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -1245,6 +1245,20 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// "reveal", since hover already reveals and hiding under the cursor is not
   /// what any desktop player does.
   void _handleSurfaceTap() {
+    // An open quick list is modal: a press it does not otherwise claim — the
+    // exposed video, or the panel's own margin/header — closes it, exactly as
+    // an outside click dismisses any other popup in the app. The rows claim
+    // their own presses ([_quickListRowTile]), so a press reaching here was
+    // never on a row. Touch/postless overlays have no list commands and fall
+    // through to the chrome ladder below.
+    final list = widget.quickList;
+    if (list != null &&
+        list.open &&
+        !widget.touch &&
+        widget.onQuickListCommand != null) {
+      widget.onQuickListCommand!('zap:close');
+      return;
+    }
     if (_showInfo) {
       handleBackPeel();
       return;
@@ -2407,13 +2421,18 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       // Pointer-transparent as a whole on **touch**, where a finger has no
       // hover and the Back ladder is a tap: absorbing presses over the panel
       // would strand a press that is meant to reach the background layer.
-      // On a pointer platform the rows opt back in (see [_quickListRowTile]),
-      // and only the rows — the header and the empty/loading bodies below stay
-      // transparent, so a press in the panel's margin still toggles the chrome
-      // the way a press on the video does.
+      // On a pointer platform the panel is a dismiss target: its own fill
+      // (`BoxDecoration` with a colour) absorbs hits across the whole rect, so
+      // a press in the header/padding/empty body must be handled *here* — it
+      // closes the list. The rows are descendants, so their own tap wins the
+      // arena and still selects; only a press the rows did not claim reaches
+      // this handler.
       child: IgnorePointer(
         ignoring: widget.touch || widget.onQuickListCommand == null,
-        child: DecoratedBox(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => widget.onQuickListCommand?.call('zap:close'),
+          child: DecoratedBox(
           decoration: BoxDecoration(
             color: AppColors.panel.withValues(alpha: 0.96),
             borderRadius: BorderRadius.circular(AppRadius.tile),
@@ -2464,6 +2483,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               Expanded(child: _quickListBody(state)),
             ],
           ),
+          ),
         ),
       ),
     );
@@ -2511,15 +2531,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// are layout-neutral — a pointer affordance that changes constraints is the
   /// poster-reload bug this panel's foreground ring already avoids.
   ///
-  /// The wheel is handled on the row rather than on an ancestor of the
-  /// [ListView] on purpose: `PointerSignalResolver` lets exactly one
-  /// `Listener` per signal have it, and the hit-test path is walked leaf-first,
-  /// so only a listener *below* the `Scrollable` keeps the wheel from scrolling
-  /// the window as well. That is all this placement buys — a `Listener`'s
-  /// `onPointerSignal` is a `void` callback, so there is no "handled" flag to
-  /// return; being the innermost listener *is* the claim. The cursor move then
-  /// re-centres the viewport through [_revealQuickListRow], so the two scrolls
-  /// never compound.
+  /// The wheel is **claimed** through `PointerSignalResolver`, not merely
+  /// observed: a `Listener.onPointerSignal` is a `void` callback, so being
+  /// innermost buys nothing on its own — the enclosing `Scrollable` registers
+  /// its own handler and would scroll the viewport on the same notch. Registering
+  /// here first (the hit-test path is walked leaf-first) takes the signal, the
+  /// cursor move alone drives the viewport through [_revealQuickListRow], and the
+  /// two scrolls stop compounding — which is what made the list jump on every
+  /// notch.
   Widget _quickListRowTile(
     ZapQuickListRow row, {
     required ZapQuickListState state,
@@ -2614,7 +2633,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           if (event is! PointerScrollEvent) return;
           final delta = zapQuickListWheelDelta(event.scrollDelta.dy);
           if (delta == 0) return;
-          send('zap:move:$delta');
+          // Claim the notch so the enclosing `ListView` does not also scroll
+          // — see this method's doc comment. Only then move the cursor.
+          GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+            send('zap:move:$delta');
+          });
         },
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,

@@ -1211,7 +1211,7 @@ void main() {
         expect(sent, ['zap:move:-$kZapWheelRows']);
       });
 
-      testWidgets('the heading and an empty list claim nothing', (
+      testWidgets('a press in the margin closes the list', (
         tester,
       ) async {
         final sent = <String>[];
@@ -1225,11 +1225,31 @@ void main() {
             emptyLabel: 'No channels here',
           ),
         );
-        // A press in the panel's margin still belongs to the chrome, so only
-        // rows - and only when there are any - are pointer targets.
+        // The list is modal: a press it does not otherwise claim - here the
+        // empty body / panel margin - dismisses it, exactly as an outside click
+        // closes any popup, and must not fall through to the chrome.
         await tester.tapAt(tester.getCenter(find.text('No channels here')));
-        await tester.pump();
-        expect(sent, isEmpty);
+        // The background detector carries an `onDoubleTap` on pointer
+        // platforms, so its single tap resolves only once the double-tap
+        // window has elapsed.
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(sent, const ['zap:close']);
+      });
+
+      testWidgets('a press on the exposed video closes the list', (
+        tester,
+      ) async {
+        final sent = <String>[];
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          onQuickListCommand: sent.add,
+          quickList: _quickList(labels: const ['One', 'Two']),
+        );
+        // Away from the left-hand panel the background layer is the "outside".
+        await tester.tapAt(const Offset(800, 360));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(sent, const ['zap:close']);
       });
 
       testWidgets('the rows stay inert in touch mode', (tester) async {

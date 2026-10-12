@@ -244,18 +244,16 @@ void main() {
   });
 
   group('the preview picture as a play target', () {
-    // The panel is where "I want to *watch* this" lives once a preview is
-    // running, and on a pointer that is the double click. The single click is
-    // already spoken for: it is what starts a preview from the list, and inside
-    // the panel a first click lands on the channel the panel is showing.
+    // One pointer gesture on the panel, on both states of it: a single click
+    // starts a preview when the panel shows the selected channel's logo, and a
+    // single click on a running preview goes fullscreen — the second activation
+    // the hint beneath it promises. There is deliberately no double-click rung.
     // The panel's own rect, not the video inside it: that video is
     // IgnorePointer while a preview runs, so it is deliberately not a tap
     // target and a finder pointed at it could only ever warn.
     Finder previewPicture() => find.byKey(previewSurfaceKey);
 
-    testWidgets('a double click on a running preview goes fullscreen', (
-      tester,
-    ) async {
+    testWidgets('a click on a running preview goes fullscreen', (tester) async {
       final played = await pumpLiveTab(
         tester,
         size: const Size(1280, 800),
@@ -265,18 +263,15 @@ void main() {
       expect(find.text('Preview'), findsOneWidget, reason: 'a preview is up');
 
       await tester.tap(previewPicture());
-      await tester.pump(const Duration(milliseconds: 50));
-      await tester.tap(previewPicture());
       await tester.pumpAndSettle();
 
       expect(played, ['c0']);
     });
 
-    testWidgets('a double click without a preview is not a play target', (
-      tester,
-    ) async {
-      // Nothing is showing, so there is nothing to escalate — and the logo /
-      // error placeholders must not be a way to launch a channel.
+    testWidgets('a click on the logo starts a preview', (tester) async {
+      // Nothing is running, so the panel shows the selected channel's logo; a
+      // click there is the pointer's "preview this", the same `onPlayChannel`
+      // a tap on a channel row runs.
       final played = await pumpLiveTab(
         tester,
         size: const Size(1280, 800),
@@ -285,11 +280,9 @@ void main() {
       expect(find.text('Preview'), findsNothing);
 
       await tester.tap(previewPicture());
-      await tester.pump(const Duration(milliseconds: 50));
-      await tester.tap(previewPicture());
       await tester.pumpAndSettle();
 
-      expect(played, isEmpty);
+      expect(played, ['c0']);
     });
   });
 

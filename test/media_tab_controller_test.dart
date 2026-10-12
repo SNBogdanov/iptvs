@@ -358,7 +358,9 @@ void main() {
         position: const Duration(minutes: 10),
         duration: const Duration(minutes: 100),
       );
-      // Finished -> row deleted -> no bar, which is the point of the threshold.
+      // Finished -> its position row is cleared (it leaves the rail) but the
+      // card must *not* lose its indication: the watched mark lands in
+      // resumeProgress as a full bar.
       await db.savePlaybackPosition(
         'demo',
         ContentKind.movie,
@@ -371,9 +373,12 @@ void main() {
 
       expect(controller.continueWatching.map((e) => e.item.id),
           unorderedEquals(['m1', 'm2']));
-      expect(controller.resumeProgress.keys, unorderedEquals(['m1', 'm2']));
+      expect(controller.resumeProgress.keys,
+          unorderedEquals(['m1', 'm2', 'm3']));
       expect(controller.resumeProgress['m1'], closeTo(0.25, 0.001));
       expect(controller.resumeProgress['m2'], closeTo(0.1, 0.001));
+      expect(controller.resumeProgress['m3'], 1.0,
+          reason: 'a finished title draws a full bar from its watched mark');
     });
 
     test('an empty table clears the map as well as the rail', () async {
