@@ -15,6 +15,7 @@ class AppSettingsStore {
   static const _kVodCardOrientation = 'app_vod_card_orientation';
   static const _kShowPlayerClock = 'app_show_player_clock';
   static const _kShowPlaybackTimes = 'app_show_playback_times';
+  static const _kShowChannelName = 'app_show_channel_name';
 
   final FlutterSecureStorage _storage;
 
@@ -152,6 +153,26 @@ class AppSettingsStore {
       await _storage.delete(key: _kShowPlaybackTimes);
     } else {
       await _storage.write(key: _kShowPlaybackTimes, value: 'false');
+    }
+  }
+
+  /// Whether the channel/title name is drawn. Defaults to true; only an
+  /// explicit `false` is written.
+  ///
+  /// The name lives in the chrome's top bar, so this is the peer of
+  /// [showPlayerClock] for the picture's other side: **when on, the shared
+  /// Flutter overlay also keeps the name top-left while the chrome is
+  /// hidden** (see [showPlayerClock]) — the top-left counterpart of the clock
+  /// badge it keeps top-right, so a live session still says which channel
+  /// is on without moving the mouse.
+  Future<bool> showChannelName() async =>
+      (await _storage.read(key: _kShowChannelName)) != 'false';
+
+  Future<void> setShowChannelName(bool value) async {
+    if (value) {
+      await _storage.delete(key: _kShowChannelName);
+    } else {
+      await _storage.write(key: _kShowChannelName, value: 'false');
     }
   }
 }

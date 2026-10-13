@@ -1540,32 +1540,37 @@ none either. Pinned by `test/window_placement_test.dart` (encode/decode incl. th
 left-of-primary monitor reports, the reject cases, and both directions against a real `AppSettingsStore`
 over the mocked keychain plus a mocked runner).
 
-### Player chrome preferences: the clock and the VOD time readout
+### Player chrome preferences: the clock, the VOD time readout, and the channel name
 
-Two **device-wide** preferences (Settings → "Clock in the player" / "Playback time in the player",
-`AppSettingsStore`, `lib/player/player_chrome_prefs.dart`) hide chrome every surface already draws,
-so an absent key reads as **on** and only an explicit `false` is ever written — the same
-no-surprise rule the tray toggles use. Both reach a session synchronously from a notifier
-(`showPlayerClock` / `showPlaybackTimes`) rather than through a listener: the only writer is
-Settings, and a player route cannot reach Settings, so a listener could never fire. They arrive on
-the `open`/`setControlState` payload natively (`showClock` / `showPlaybackTimes`) or from the
-notifier in the shared Flutter overlay, and are constant for the life of the session.
+Three **device-wide** preferences (Settings → "Clock in the player" / "Playback time in the player"
+/ "Channel name in the player", `AppSettingsStore`, `lib/player/player_chrome_prefs.dart`) hide
+chrome every surface already draws, so an absent key reads as **on** and only an explicit `false`
+is ever written — the same no-surprise rule the tray toggles use. All three reach a session
+synchronously from a notifier (`showPlayerClock` / `showPlaybackTimes` / `showChannelName`) rather
+than through a listener: the only writer is Settings, and a player route cannot reach Settings, so
+a listener could never fire. The clock and times arrive on the `open`/`setControlState` payload
+natively (`showClock` / `showPlaybackTimes`) or from the notifier in the shared Flutter overlay,
+and are constant for the life of the session. The channel name is a shared-overlay element for now
+(no native HUD exists on Windows GDI/HDR, Android Compose, iOS or the Linux Lua OSD for it to
+persist on), so it is not carried on the native payloads.
 
 **They gate two separable things.** The clock is one badge in the top bar; the playback readout is
-the two texts either side of the VOD scrubber. `showPlaybackTimes` hides the **labels only** — the
-scrubber stays draggable, so a user who wants a cleaner picture keeps the ability to seek (the same
-split Android's `Scrubber`, the Windows GDI overlay and iOS's `positionLabel`/`durationLabel`
-make). Live has no readout, so the key is inert there and can never switch a scrubber *on*.
+the two texts either side of the VOD scrubber; the channel name is the top-bar title. `showPlaybackTimes`
+hides the **labels only** — the scrubber stays draggable, so a user who wants a cleaner picture keeps
+the ability to seek (the same split Android's `Scrubber`, the Windows GDI overlay and iOS's
+`positionLabel`/`durationLabel` make). Live has no readout, so the key is inert there and can never
+switch a scrubber *on*.
 
 **The clock and readout do not disappear with the chrome.** When the chrome auto-hides, the shared
 Flutter overlay draws a **persistent HUD** (`player_overlay.dart`'s `_persistentHud`): the clock
-top-right, the VOD readout bottom-right, in the same corners the chrome uses, gated by the same two
-preferences and wrapped in `IgnorePointer` so a press in the corner still reaches the
-tap-to-reveal layer. That is what keeps them readable *during playback* instead of only while the
-mouse is moving. It is scoped to the embedded/shared surface today; applying the same HUD to the
-native surfaces (Windows GDI/HDR, Android Compose, iOS, the Linux Lua OSD — which currently apply
-the preferences to their chrome badge/readout only) is outstanding. Pinned by
-`test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
+top-right, the VOD readout bottom-right, and the channel/title name top-left — the mirror of the
+clock's corner, so the picture still says which channel is on during playback — in the same corners
+the chrome uses, gated by the same three preferences and wrapped in `IgnorePointer` so a press in a
+corner still reaches the tap-to-reveal layer. That is what keeps them readable *during playback*
+instead of only while the mouse is moving. It is scoped to the embedded/shared surface today;
+applying the same HUD to the native surfaces (Windows GDI/HDR, Android Compose, iOS, the Linux Lua
+OSD — which currently apply the preferences to their chrome badge/readout only) is outstanding.
+Pinned by `test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
 
 ### The clock badge's regional format
 

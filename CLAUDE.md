@@ -1175,15 +1175,17 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   list, so a zap is remembered as the last channel too. A failure to read it is a log line, never a
   snackbar: the app is fully usable starting normally. Pinned by `test/last_channel_resume_test.dart`.
 
-- **Two device-wide preferences hide the clock badge and the VOD time readout, and the shared
-  overlay keeps both on screen while the chrome is down.** `showPlayerClock` /
-  `showPlaybackTimes` (Settings, `lib/player/player_chrome_prefs.dart`; default-on, only an explicit
-  `false` written) gate the top-bar clock and the two texts either side of the VOD scrubber — hiding
-  the readout keeps the scrubber. When the chrome auto-hides, `player_overlay.dart`'s
-  `_persistentHud` draws the clock top-right and the readout bottom-right (`IgnorePointer`), so they
-  are readable *during playback* rather than only while the mouse moves. The preference reaches every
-  surface (`showClock`/`showPlaybackTimes` on the native payloads); the always-on HUD is implemented
-  on the embedded/shared overlay, with the native surfaces applying it to their chrome only so far.
+- **Three device-wide preferences hide the clock badge, the VOD time readout and the channel
+  name, and the shared overlay keeps all three on screen while the chrome is down.**
+  `showPlayerClock` / `showPlaybackTimes` / `showChannelName` (Settings, `lib/player/player_chrome_prefs.dart`;
+  default-on, only an explicit
+  `false` written) gate the top-bar clock, the two texts either side of the VOD scrubber — hiding
+  the readout keeps the scrubber — and the top-bar channel/title name. When the chrome auto-hides, `player_overlay.dart`'s
+  `_persistentHud` draws the clock top-right, the readout bottom-right and the name top-left (`IgnorePointer`), so they
+  are readable *during playback* rather than only while the mouse moves. The clock/times preference reaches every
+  surface (`showClock`/`showPlaybackTimes` on the native payloads); the channel name is a shared-overlay element for now
+  (no native HUD exists for it to persist on); the always-on HUD is implemented
+  on the embedded/shared overlay, with the native surfaces applying the chromium preferences to their chrome only so far.
   **The dated clock badge is the machine's own regional format on Windows** — the OS long date
   (formatted by NLS from `LOCALE_SLONGDATE`, so the inflected month is right) + short time, sourced
   once over `iptvs/clock` (`clock_format.dart`) so the native GDI overlay and the shared Flutter

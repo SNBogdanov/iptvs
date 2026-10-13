@@ -1435,12 +1435,14 @@ void main() {
     setUp(() {
       showPlayerClock.value = true;
       showPlaybackTimes.value = true;
+      showChannelName.value = true;
     });
 
     tearDown(() {
-      // Never leak a "off" into another test in this file.
+      // Never leak an "off" into another test in this file.
       showPlayerClock.value = true;
       showPlaybackTimes.value = true;
+      showChannelName.value = true;
     });
 
     testWidgets('the clock badge is drawn when the preference is on', (
@@ -1537,7 +1539,7 @@ void main() {
       expect(bareClock, findsOneWidget);
     });
 
-    testWidgets('turning the clock off also empties the hidden-chrome HUD', (
+    testWidgets('turning the clock off also removes the hidden-chrome HUD clock', (
       tester,
     ) async {
       showPlayerClock.value = false;
@@ -1551,6 +1553,46 @@ void main() {
       await tester.pump();
 
       expect(bareClock, findsNothing);
+    });
+
+    // The channel-name HUD: mirrored in the top-left corner of the clock, so
+    // the picture still says which channel is on while the chrome is down.
+    testWidgets('the channel name stays on screen once the chrome auto-hides', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        touch: true,
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      // Chrome is down, the top bar's title is gone with it, and the pill has
+      // taken its place — exactly one 'Channel One' (the pill, not the title)
+      // proves the HUD carried it over rather than the bar still being up.
+      expect(find.text('Channel One'), findsOneWidget);
+    });
+
+    testWidgets('turning the channel name off drops the bar\'s title and the '
+        'HUD name', (tester) async {
+      // The chrome's own title is the name display, so the preference hides it
+      // with the rest of the name — same "the name the accounts for everywhere"
+      // bargain the clock setting makes.
+      showChannelName.value = false;
+      await pumpOverlay(tester, isLive: true, touch: true);
+      expect(find.text('Channel One'), findsNothing);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        touch: true,
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      expect(find.text('Channel One'), findsNothing);
     });
 
     testWidgets('the VOD readout stays on screen once the chrome auto-hides', (

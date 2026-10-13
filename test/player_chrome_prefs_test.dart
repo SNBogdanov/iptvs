@@ -6,7 +6,7 @@ import 'package:iptvs/data/app_settings_store.dart';
 import 'package:iptvs/player/linux_native_session.dart';
 import 'package:iptvs/player/player_chrome_prefs.dart';
 
-/// The two player-chrome preferences are one default-on boolean behind three
+/// The three player-chrome preferences are one default-on boolean behind three
 /// layers — the keychain, the notifier every surface reads, and each native
 /// overlay's own default — and the only way they break is a disagreement
 /// between them. So this drives the real store over the mocked keychain the
@@ -22,23 +22,27 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     showPlayerClock.value = true;
     showPlaybackTimes.value = true;
+    showChannelName.value = true;
   });
 
   group('the keychain contract', () {
-    test('an untouched install reads both as on', () async {
+    test('an untouched install reads all as on', () async {
       // The whole point of default-on: an absent key is what every surface
       // draws today, so a missing/never-written preference cannot be
       // distinguished from a user who never touched the tile.
       expect(await store.showPlayerClock(), isTrue);
       expect(await store.showPlaybackTimes(), isTrue);
+      expect(await store.showChannelName(), isTrue);
     });
 
     test('only an explicit false turns one off', () async {
       await store.setShowPlayerClock(false);
       await store.setShowPlaybackTimes(false);
+      await store.setShowChannelName(false);
 
       expect(await store.showPlayerClock(), isFalse);
       expect(await store.showPlaybackTimes(), isFalse);
+      expect(await store.showChannelName(), isFalse);
     });
 
     test('turning one back on deletes the key, not stores "true"', () async {
@@ -61,28 +65,34 @@ void main() {
       const storage = FlutterSecureStorage();
       await storage.write(key: 'app_show_player_clock', value: 'false');
       await storage.write(key: 'app_show_playback_times', value: 'no');
+      await storage.write(key: 'app_show_channel_name', value: '0');
 
       expect(await store.showPlayerClock(), isFalse);
       expect(await store.showPlaybackTimes(), isTrue);
+      expect(await store.showChannelName(), isTrue);
     });
 
-    test('the two keys are independent', () async {
+    test('the three keys are independent', () async {
       await store.setShowPlayerClock(false);
+      await store.setShowChannelName(false);
 
       expect(await store.showPlayerClock(), isFalse);
       expect(await store.showPlaybackTimes(), isTrue);
+      expect(await store.showChannelName(), isFalse);
     });
   });
 
   group('the notifier every surface reads', () {
-    test('loads both stored values', () async {
+    test('loads all stored values', () async {
       await store.setShowPlayerClock(false);
       await store.setShowPlaybackTimes(false);
+      await store.setShowChannelName(false);
 
       await loadPlayerChromePrefs(store: store);
 
       expect(showPlayerClock.value, isFalse);
       expect(showPlaybackTimes.value, isFalse);
+      expect(showChannelName.value, isFalse);
     });
 
     test('an untouched install loads on', () async {
@@ -90,6 +100,7 @@ void main() {
 
       expect(showPlayerClock.value, isTrue);
       expect(showPlaybackTimes.value, isTrue);
+      expect(showChannelName.value, isTrue);
     });
 
     test('survives a reboot', () async {

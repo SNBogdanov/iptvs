@@ -32,6 +32,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool? _rememberPlacement;
   bool? _showClock;
   bool? _showPlaybackTimes;
+  bool? _showChannelName;
   VodCardOrientation? _cards;
 
   @override
@@ -47,6 +48,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final rememberPlacement = await widget.store.rememberWindowPlacement();
     final showClock = await widget.store.showPlayerClock();
     final showPlaybackTimes = await widget.store.showPlaybackTimes();
+    final showChannelName = await widget.store.showChannelName();
     final cards = VodCardOrientation.parse(
       await widget.store.rawVodCardOrientation(),
     );
@@ -58,6 +60,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _rememberPlacement = rememberPlacement;
         _showClock = showClock;
         _showPlaybackTimes = showPlaybackTimes;
+        _showChannelName = showChannelName;
         _cards = cards;
       });
     }
@@ -130,6 +133,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _showPlaybackTimes = next);
     showPlaybackTimes.value = next;
     await widget.store.setShowPlaybackTimes(next);
+  }
+
+  Future<void> _toggleShowChannelName() async {
+    final next = !(_showChannelName ?? true);
+    setState(() => _showChannelName = next);
+    showChannelName.value = next;
+    await widget.store.setShowChannelName(next);
   }
 
   @override
@@ -209,6 +219,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'changes nothing there.',
               trailing: (_showPlaybackTimes ?? true) ? 'On' : 'Off',
               onTap: _toggleShowPlaybackTimes,
+            ),
+            _SettingTile(
+              icon: Icons.label_outline,
+              title: 'Channel name in the player',
+              subtitle:
+                  'Show the channel or title. When on, the name also stays on '
+                  'screen top-left while the controls are hidden, mirroring the '
+                  'clock top-right.',
+              trailing: (_showChannelName ?? true) ? 'On' : 'Off',
+              onTap: _toggleShowChannelName,
             ),
           ],
         ),

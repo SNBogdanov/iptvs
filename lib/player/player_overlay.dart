@@ -1484,16 +1484,21 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               // visible way the Windows SDR overlay didn't look like the
               // Windows GDI one it is supposed to be at parity with.
               Expanded(
-                child: Text(
-                  widget.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                child: showChannelName.value
+                    ? Text(
+                        widget.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      )
+                    // The whole name, not just its HUD copy: with the
+                    // preference off the bar keeps its back button and badges
+                    // and simply drops the title.
+                    : const SizedBox.shrink(),
               ),
               const SizedBox(width: 8),
               // Badges are capped to a fraction of the bar and wrap onto a
@@ -2666,19 +2671,21 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     style: const TextStyle(color: Colors.white70),
   );
 
-  /// The clock (top-right) and the VOD position/duration (bottom-right) that
-  /// stay on screen while the chrome is down.
+  /// The clock (top-right), the channel name (top-left) and the VOD
+  /// position/duration (bottom-right) that stay on screen while the chrome is
+  /// down.
   ///
-  /// **Two independent preferences, not one HUD switch.** `showPlayerClock` is
+  /// **Independent preferences, not one HUD switch.** `showPlayerClock` is
   /// device-wide (every kind of stream has a wall clock); `showPlaybackTimes` is
-  /// VOD/series only, because live has no duration to read. Both are read
+  /// VOD/series only, because live has no duration to read; `showChannelName`
+  /// applies to both, the top-left counterpart of the clock. All are read
   /// synchronously — Settings is unreachable from a player route, so a listener
   /// here could never fire — matching the chrome's own badge/readout.
   ///
   /// Present only while the chrome is hidden: with it up, the top bar already
-  /// carries the clock and the transport row the readout, so drawing both would
-  /// double them. They live at the same corners the chrome puts them in, so the
-  /// clock does not jump when the bars fade.
+  /// carries the name and the clock, and the transport row the readout, so
+  /// drawing both would double them. They live at the same corners the chrome
+  /// puts them in, so nothing jumps when the bars fade.
   ///
   /// `IgnorePointer` throughout: this is information, never a target — a press
   /// in the corner must still reach the tap-to-show/video layer beneath, or the
@@ -2686,7 +2693,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Widget _persistentHud() {
     final clock = showPlayerClock.value;
     final times = !widget.isLive && showPlaybackTimes.value;
-    if (!clock && !times) return const SizedBox.shrink();
+    final name = showChannelName.value && widget.title.trim().isNotEmpty;
+    if (!clock && !times && !name) return const SizedBox.shrink();
     return Positioned.fill(
       child: IgnorePointer(
         child: Stack(
@@ -2697,6 +2705,21 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 right: 20 + _barInsets.right,
                 child: _badge(
                   playerClockLabel(DateTime.now(), dated: !widget.touch),
+                ),
+              ),
+            if (name)
+              Positioned(
+                // Mirror of the clock's corner, so the two ends of the top edge
+                // read as one HUD and nothing jumps when the bars fade.
+                top: 12 + _barInsets.top,
+                left: 20 + _barInsets.left,
+                child: ConstrainedBox(
+                  // Cap the run so it can never reach the clock on the other
+                  // side of the same edge; a long title ellipsizes inside it.
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.sizeOf(context).width * 0.6,
+                  ),
+                  child: _hudNamePill(),
                 ),
               ),
             if (times)
@@ -2710,6 +2733,26 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       ),
     );
   }
+
+  /// The channel/title pill's body, styled like [_hudTimePill] (and the chrome's
+  /// badges) so the HUD corners read as one surface.
+  Widget _hudNamePill() => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: AppColors.panel.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      widget.title,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        color: Color(0xFFCED2E0),
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
 
   /// The readout pill's body; the position it prints is scoped by
   /// [_positionRebuild] at the call site, so a per-tick rebuild never touches
