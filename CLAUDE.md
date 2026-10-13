@@ -1182,7 +1182,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `false` written) gate the top-bar clock, the two texts either side of the VOD scrubber — hiding
   the readout keeps the scrubber — and the top-bar channel/title name. When the chrome auto-hides, `player_overlay.dart`'s
   `_persistentHud` draws the clock top-right, the readout bottom-right and the name top-left (`IgnorePointer`), so they
-  are readable *during playback* rather than only while the mouse moves. The clock/times preference reaches every
+  are readable *during playback* rather than only while the mouse moves. The name pill leads with the
+  live channel's **number** when the provider supplied one (`5 · Channel One`), fed from the zap
+  session's settled entry so a zap re-renders the running number too. The clock/times preference reaches every
   surface (`showClock`/`showPlaybackTimes` on the native payloads); the channel name is a shared-overlay element for now
   (no native HUD exists for it to persist on); the always-on HUD is implemented
   on the embedded/shared overlay, with the native surfaces applying the chromium preferences to their chrome only so far.

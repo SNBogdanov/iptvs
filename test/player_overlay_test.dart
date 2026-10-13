@@ -33,6 +33,7 @@ void main() {
     bool liveSynced = true,
     Programme? epgNow,
     Programme? epgNext,
+    int? channelNumber,
     String? sourceName,
     double width = 1000,
     double height = 720,
@@ -73,6 +74,7 @@ void main() {
               key: controlsKey,
               controls: stub,
               title: 'Channel One',
+              channelNumber: channelNumber,
               sourceName: sourceName,
               aspectLabel: 'Fill',
               epgNow: epgNow,
@@ -1573,6 +1575,25 @@ void main() {
       // taken its place — exactly one 'Channel One' (the pill, not the title)
       // proves the HUD carried it over rather than the bar still being up.
       expect(find.text('Channel One'), findsOneWidget);
+    });
+
+    testWidgets('the HUD pill leads with the channel number when it has one', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        touch: true,
+        channelNumber: 5,
+        state: const PlayerState(playing: true),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      // The pill reads `5 · Channel One`, the same identity run the zap banner
+      // prints; the number stays part of it rather than a second pill.
+      expect(find.text('5 · Channel One'), findsOneWidget);
+      expect(find.text('Channel One'), findsNothing);
     });
 
     testWidgets('turning the channel name off drops the bar\'s title and the '

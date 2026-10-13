@@ -164,6 +164,12 @@ class PlayerVideoSurface extends StatefulWidget {
   final Player player;
   final VideoController controller;
   final String title;
+
+  /// The playing channel's number (live only; null for VOD/catch-up and for a
+  /// provider that gave none). Drawn ahead of the name in the HUD pill,
+  /// mirroring the way the live rows and the zap banner identify a channel.
+  final int? channelNumber;
+
   final String? sourceName;
   final Programme? epgNow;
   final Programme? epgNext;
@@ -256,6 +262,7 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.player,
     required this.controller,
     required this.title,
+    this.channelNumber,
     required this.sourceName,
     required this.epgNow,
     required this.epgNext,
@@ -376,6 +383,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             controls: _controls,
             touch: Platform.isIOS,
             title: widget.title,
+            channelNumber: widget.channelNumber,
             sourceName: widget.sourceName,
             epgNow: widget.epgNow,
             epgNext: widget.epgNext,
@@ -524,6 +532,7 @@ class EmbeddedPlayerControls extends StatefulWidget {
     super.key,
     required this.controls,
     required this.title,
+    this.channelNumber,
     required this.sourceName,
     required this.epgNow,
     required this.epgNext,
@@ -551,6 +560,11 @@ class EmbeddedPlayerControls extends StatefulWidget {
 
   final EmbeddedControls controls;
   final String title;
+
+  /// The playing channel's number (live only) — see
+  /// [PlayerVideoSurface.channelNumber].
+  final int? channelNumber;
+
   final String? sourceName;
   final Programme? epgNow;
   final Programme? epgNext;
@@ -2735,24 +2749,31 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   }
 
   /// The channel/title pill's body, styled like [_hudTimePill] (and the chrome's
-  /// badges) so the HUD corners read as one surface.
-  Widget _hudNamePill() => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-    decoration: BoxDecoration(
-      color: AppColors.panel.withValues(alpha: 0.85),
-      borderRadius: BorderRadius.circular(6),
-    ),
-    child: Text(
-      widget.title,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(
-        color: Color(0xFFCED2E0),
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
+  /// badges) so the HUD corners read as one surface. A live channel with a
+  /// number reads `5 · Channel One`, the same identity run the zap banner's
+  /// channel row prints — a bare number would be read as a time/position rather
+  /// than a channel, but the `·` in the middle marks the shape.
+  Widget _hudNamePill() {
+    final number = widget.channelNumber;
+    final label = number != null ? '$number · ${widget.title}' : widget.title;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.panel.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(6),
       ),
-    ),
-  );
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: Color(0xFFCED2E0),
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
 
   /// The readout pill's body; the position it prints is scoped by
   /// [_positionRebuild] at the call site, so a per-tick rebuild never touches

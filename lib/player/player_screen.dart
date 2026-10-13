@@ -3650,6 +3650,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       player: _player,
       controller: _controller,
       title: _title,
+      channelNumber: _zap?.playing.number,
       sourceName: _sourceName,
       aspectLabel: kAspectModes[_aspectModeIndex].label,
       // Windows fullscreen is a window operation the runner owns; media_kit's

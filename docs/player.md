@@ -1566,7 +1566,11 @@ Flutter overlay draws a **persistent HUD** (`player_overlay.dart`'s `_persistent
 top-right, the VOD readout bottom-right, and the channel/title name top-left — the mirror of the
 clock's corner, so the picture still says which channel is on during playback — in the same corners
 the chrome uses, gated by the same three preferences and wrapped in `IgnorePointer` so a press in a
-corner still reaches the tap-to-reveal layer. That is what keeps them readable *during playback*
+corner still reaches the tap-to-reveal layer. The name pill leads with the live channel's
+**number** when the provider supplied one (`5 · Channel One`, the same identity run the zap banner's
+channel row prints — `PlayerScreen` feeds it as `PlayerVideoSurface.channelNumber` from the zap
+session's settled entry, so a zap re-renders the running number too; VOD/catch-up carries no number
+and stays name-only). That is what keeps them readable *during playback*
 instead of only while the mouse is moving. It is scoped to the embedded/shared surface today;
 applying the same HUD to the native surfaces (Windows GDI/HDR, Android Compose, iOS, the Linux Lua
 OSD — which currently apply the preferences to their chrome badge/readout only) is outstanding.
