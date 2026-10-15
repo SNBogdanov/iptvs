@@ -96,6 +96,13 @@ constexpr UINT kNativeZapBannerVisibleMs = 3000;
 constexpr UINT kNativeVideoResyncIntervalMs = 250;
 constexpr int kNativeVideoResyncPasses = 4;
 constexpr int kNativeTopControlsHeight = 64;
+// Additional height the top bar takes when it draws the VOD description block
+// below the title: two lines of 13 px text plus a little padding. The title,
+// back button and badges stay anchored to the ordinary 64 px band, so this only
+// ever extends the bar downward.
+constexpr int kNativeDescriptionBlockHeight = 44;
+// Lines of the description block the ellipsizer will fill before it truncates.
+constexpr int kNativeDescriptionMaxLines = 2;
 // The bottom bar is a single row for live (no scrubber) and two rows for VOD
 // (scrubber row + control row).
 constexpr int kNativeBottomControlsHeightLive = 80;
@@ -221,6 +228,11 @@ double g_native_slider_last_sent = -1.0;
 
 enum class NativeFocusItem {
   kBack,
+  // The VOD progress bar. Its own focus row (below Back, above the transport
+  // row): arrows reach it, and Left/Right on it *seek* rather than walk the
+  // ring — the only control that is also a gesture axis. Live has no scrubber,
+  // so this item is absent there and Up/Down step Back <-> transport as before.
+  kScrubber,
   kFavorite,
   kPlay,
   // Previous / next entry - the music-player slot beside play/pause. One pair
@@ -292,6 +304,10 @@ struct NativeControlState {
   std::wstring audio_channels;
   // Active source name (badge).
   std::wstring source_name;
+  // VOD/catch-up synopsis for the current title, shown in the top bar's
+  // description block when the chrome is up. Empty means "nothing to show" and
+  // the top bar stays its ordinary height. Live never carries one.
+  std::wstring description;
   // Whether this route has a `LiveZapController` behind it (Windows-only key
   // on setControlState). The key ring reads it to decide whether the arrows
   // belong to zapping: a live route opened *without* a controller (the EPG
@@ -316,6 +332,13 @@ struct NativeControlState {
   // VOD only: hides the position/duration text either side of the scrubber and
   // leaves the scrubber itself alone, so seeking still works without it.
   bool show_playback_times = true;
+  // Device-wide VOD seek step (Settings → "VOD seek step"), in seconds. Labels
+  // and steps the `-N`/`+N` transport buttons; the Left/Right-on-scrubber seek
+  // is resolved Dart-side from the same value. Defaults to 10 (the hardcoded
+  // step these buttons used to print) so a Dart build that omits the key, or a
+  // route opened before the first push, labels and steps exactly as before.
+  // Mirrors `seekStepSeconds` in lib/player/player_chrome_prefs.dart.
+  int seek_step_seconds = 10;
   // Live EPG now/next snapshot (epoch ms; 0 = absent).
   std::wstring epg_now_title;
   double epg_now_start_ms = 0.0;
@@ -1255,6 +1278,48 @@ void DrawTextWithFont(HDC hdc, const std::wstring &text, RECT rect, UINT format,
   SelectObject(hdc, old_font);
 }
 
+// Draws [text] wrapped to at most [max_lines] lines inside [rect], appending an
+// ellipsis when it cannot fit. GDI's `DT_END_ELLIPSIS` only truncates a single
+// line, so the fit is found by measuring: a binary search for the longest prefix
+// that still measures within [max_lines] lines once the ellipsis is appended.
+// Each `DT_CALCRECT | DT_WORDBREAK` pass wraps the candidate against [rect]'s
+// width, which is what makes the answer the real laid-out height.
+void DrawWrappedTextEllipsized(HDC hdc, const std::wstring &text, RECT rect,
+                               HFONT font, COLORREF color, int max_lines) {
+  const int width = RectWidth(rect);
+  if (text.empty() || max_lines <= 0 || width <= 0) {
+    return;
+  }
+  HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
+  SetTextColor(hdc, color);
+  auto measure_height = [&](const std::wstring &s) {
+    RECT r = {0, 0, width, 0};
+    DrawText(hdc, s.c_str(), -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    return static_cast<int>(r.bottom - r.top);
+  };
+  RECT line = {0, 0, width, 0};
+  DrawText(hdc, L"Ag", -1, &line, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+  const int line_h = std::max(1, static_cast<int>(line.bottom - line.top));
+  const int max_h = line_h * max_lines;
+  std::wstring out = text;
+  if (measure_height(out) > max_h) {
+    const std::wstring ellipsis = L"\x2026";
+    size_t lo = 0;
+    size_t hi = text.size();
+    while (lo < hi) {
+      const size_t mid = (lo + hi + 1) / 2;
+      if (measure_height(text.substr(0, mid) + ellipsis) <= max_h) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    out = text.substr(0, lo) + ellipsis;
+  }
+  DrawText(hdc, out.c_str(), -1, &rect, DT_WORDBREAK | DT_NOPREFIX);
+  SelectObject(hdc, old_font);
+}
+
 // [active] is the *focused/engaged* chrome (accent fill). [fg_override] tints
 // only the glyph, which is a different thing: the favorite star is accent when
 // favourited but keeps a neutral background unless it is also focused — the
@@ -1339,8 +1404,27 @@ double RatioFromX(int x, const RECT &rect) {
                     0.0, 1.0);
 }
 
+// Whether the **top bar** draws the VOD description block under its title:
+// only for a non-live route that actually carries a synopsis, so every live
+// route and every description-less film keep the bar they always had. The key
+// arrives empty on every push that has nothing to say (see
+// UpdateNativeControlState), so this is the single gate the whole feature hangs
+// off — height, region, paint and hit-test all read it through TopControlsHeight.
+bool ShowsDescription() {
+  return !g_native_control_state.is_live &&
+         !g_native_control_state.description.empty();
+}
+
+int TopControlsHeight() {
+  int height = kNativeTopControlsHeight;
+  if (ShowsDescription()) {
+    height += kNativeDescriptionBlockHeight;
+  }
+  return NativeScale(height);
+}
+
 RECT TopControlsRect(const RECT &rect) {
-  return RectFrom(0, 0, rect.right, NativeScale(kNativeTopControlsHeight));
+  return RectFrom(0, 0, rect.right, TopControlsHeight());
 }
 
 bool HasLiveEpg() {
@@ -1592,17 +1676,26 @@ std::string QuickListToggleCommand() {
   return QuickListShown() ? "zap:close" : "zap:list";
 }
 
-// The overlay is two rows, and arrow-key navigation treats them differently:
-// Left/Right cycles within a row, Up returns to Back, Down drops into the
-// transport. Back is the only control in the top row — the favorite star used
-// to sit beside it and now lives in the control row with everything else.
-bool IsTopBarFocusItem(NativeFocusItem item) {
-  return item == NativeFocusItem::kBack;
+// The overlay is three rows for arrow-key navigation: Back on top, the VOD
+// scrubber beneath it, and the transport/utility row at the bottom. Up/Down
+// step between rows; Left/Right walk within a row (and, on the scrubber, seek).
+// Live has no scrubber, so row 1 is simply absent there and Up/Down step
+// Back <-> transport exactly as the old two-row form did.
+int FocusRowOf(NativeFocusItem item) {
+  switch (item) {
+  case NativeFocusItem::kBack:
+    return 0;
+  case NativeFocusItem::kScrubber:
+    return 1;
+  default:
+    return 2;
+  }
 }
 
 std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   std::vector<NativeFocusItem> out;
   out.push_back(NativeFocusItem::kBack);
+  if (l.has_scrubber) out.push_back(NativeFocusItem::kScrubber);
   out.push_back(NativeFocusItem::kPlay);
   if (l.has_step) {
     out.push_back(NativeFocusItem::kStepPrevious);
@@ -1632,6 +1725,10 @@ std::string CommandForFocusedItem(NativeFocusItem item) {
   switch (item) {
   case NativeFocusItem::kBack:
     return "back";
+  // The scrubber has no OK action: Left/Right seek (handled before the command
+  // path), and OK is a deliberate no-op rather than a second play/pause.
+  case NativeFocusItem::kScrubber:
+    return "show";
   case NativeFocusItem::kFavorite:
     return "favorite";
   case NativeFocusItem::kPlay:
@@ -2062,7 +2159,7 @@ RECT InfoPanelRect(const RECT &rect) {
   const int left =
       MaxInt(NativeScale(12), static_cast<int>(rect.right) - NativeScale(14) -
                                   width);
-  const int top = NativeScale(kNativeTopControlsHeight) + NativeScale(10);
+  const int top = TopControlsHeight() + NativeScale(10);
   return RectFrom(left, top, left + width, top + height);
 }
 
@@ -3040,10 +3137,19 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   // fade reaches ~0 exactly where the region already stops clipping, which is
   // what removes the old hard 20%-to-nothing step at the bar edge.
   static constexpr ScrimStop kTopScrim[] = {{0.0, 0xB3}, {1.0, 0x00}};
+  // With a description the top bar is taller; hold the scrim solid through the
+  // title row and most of the description block, then fade over the last third
+  // so the bottom edge stays as soft as the ordinary bar's and the wrapped text
+  // keeps a readable backdrop.
+  static constexpr ScrimStop kTopScrimWithDescription[] = {
+      {0.0, 0xB3}, {0.72, 0xB3}, {1.0, 0x00}};
   static constexpr ScrimStop kBottomScrim[] = {
       {0.0, 0x00}, {0.45, 0x99}, {1.0, 0xCC}};
-  FillVerticalScrim(pixels, width, height, top, kTopScrim,
-                    std::size(kTopScrim));
+  const bool shows_description = ShowsDescription();
+  FillVerticalScrim(pixels, width, height, top,
+                    shows_description ? kTopScrimWithDescription : kTopScrim,
+                    shows_description ? std::size(kTopScrimWithDescription)
+                                      : std::size(kTopScrim));
   FillVerticalScrim(pixels, width, height, bottom, kBottomScrim,
                     std::size(kBottomScrim));
 
@@ -3063,7 +3169,9 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
            focusables[g_native_focus_index] == item;
   };
 
-  const int top_cy = (top.top + top.bottom) / 2;
+  // Anchor the title row to the ordinary 64 px band even when the bar has grown
+  // for a description, so the back button, badges and title never move.
+  const int top_cy = NativeScale(kNativeTopControlsHeight) / 2;
   DrawIconButton(paint_hdc,
                  RectFrom(NativeScale(16), top_cy - NativeScale(19),
                           NativeScale(54), top_cy + NativeScale(19)),
@@ -3125,10 +3233,24 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawTextWithFont(paint_hdc, g_native_control_state.title,
                    RectFrom(NativeScale(66), top.top,
                             MaxInt(NativeScale(80), badge_right - NativeScale(12)),
-                            top.bottom),
+                            NativeScale(kNativeTopControlsHeight)),
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                    title_font, RGB(246, 247, 251));
   DeleteObject(title_font);
+
+  if (shows_description) {
+    // The VOD/catch-up synopsis, wrapped to two lines under the title. Aligned
+    // with the title's left edge so the two read as one block; the bottom
+    // padding keeps the fade from eating the second line.
+    HFONT desc_font = UiFont(13, FW_NORMAL);
+    DrawWrappedTextEllipsized(
+        paint_hdc, g_native_control_state.description,
+        RectFrom(NativeScale(66),
+                 NativeScale(kNativeTopControlsHeight) + NativeScale(3),
+                 top.right - NativeScale(16), top.bottom - NativeScale(5)),
+        desc_font, RGB(200, 205, 216), kNativeDescriptionMaxLines);
+    DeleteObject(desc_font);
+  }
 
   DrawIconButton(
       paint_hdc, l.play,
@@ -3145,9 +3267,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                    is_focused(NativeFocusItem::kStepNext));
   }
   if (l.has_seek) {
-    DrawTextButton(paint_hdc, l.seek_back, L"-10",
+    // The step is a device-wide setting (Settings → "VOD seek step"); the label
+    // prints it so the button never claims a distance it does not apply.
+    const std::wstring step = std::to_wstring(g_native_control_state.seek_step_seconds);
+    DrawTextButton(paint_hdc, l.seek_back, L"-" + step,
                    is_focused(NativeFocusItem::kSeekBack));
-    DrawTextButton(paint_hdc, l.seek_forward, L"+10",
+    DrawTextButton(paint_hdc, l.seek_forward, L"+" + step,
                    is_focused(NativeFocusItem::kSeekForward));
   }
   DrawIconButton(paint_hdc, l.mute,
@@ -3170,6 +3295,20 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                        RGB(184, 190, 204));
     }
     const double duration = std::max(1.0, g_native_control_state.duration_ms);
+    // Focus marks the whole track: the 6 px bar is too thin to read as a focus
+    // stop on its own, and this is the one control Left/Right acts on rather
+    // than walks past. Same fill as a focused button (the `active` colour in
+    // DrawIconButton/DrawTextButton), drawn under the bar and thumb.
+    if (is_focused(NativeFocusItem::kScrubber)) {
+      RECT ring = l.progress;
+      const int pad = NativeScale(8);
+      ring.left -= pad;
+      ring.right += pad;
+      ring.top -= pad;
+      ring.bottom += pad;
+      FillRoundRectAA(paint_hdc, ring, NativeScale(kNativeButtonRadius),
+                      RGB(38, 34, 78));
+    }
     // While the scrubber is being dragged the thumb follows the pointer; the
     // seek itself is committed on release.
     DrawSlider(paint_hdc, l.progress,
@@ -4396,32 +4535,55 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         };
 
         if (is_nav) {
+          const int row = FocusRowOf(focusables[g_native_focus_index]);
           if (wparam == VK_UP) {
-            const int back_index = focus_index_of(NativeFocusItem::kBack);
-            if (back_index >= 0) g_native_focus_index = back_index;
-          } else if (wparam == VK_DOWN) {
-            if (IsTopBarFocusItem(focusables[g_native_focus_index])) {
-              const int play_index = focus_index_of(NativeFocusItem::kPlay);
-              if (play_index >= 0) g_native_focus_index = play_index;
+            // Up never skips a row: transport -> scrubber -> Back.
+            int target = g_native_focus_index;
+            if (row == 2) {
+              target = focus_index_of(l.has_scrubber
+                                          ? NativeFocusItem::kScrubber
+                                          : NativeFocusItem::kBack);
+            } else if (row == 1) {
+              target = focus_index_of(NativeFocusItem::kBack);
             }
+            if (target >= 0) g_native_focus_index = target;
+          } else if (wparam == VK_DOWN) {
+            int target = g_native_focus_index;
+            if (row == 0) {
+              target = focus_index_of(l.has_scrubber
+                                          ? NativeFocusItem::kScrubber
+                                          : NativeFocusItem::kPlay);
+            } else if (row == 1) {
+              target = focus_index_of(NativeFocusItem::kPlay);
+            }
+            if (target >= 0) g_native_focus_index = target;
+          } else if (row == 1) {
+            // The scrubber row: Left/Right is the seek gesture itself, not a
+            // focus move. The step is resolved Dart-side from the same
+            // device-wide setting that labels the -N/+N buttons, so this routes
+            // through the ordinary command path and never moves the ring.
+            NotifyNativeControlCommand(wparam == VK_LEFT ? "seekBack"
+                                                         : "seekForward");
+            InvalidateNativeControls();
+            return 0;
           } else {
-            // The top bar is Back; everything else is the bottom bar.
-            // Left/Right walks the row you are on and steps off its end into
-            // the other row — so from Back, Right lands on the first bottom
-            // item and Left on the last. The general two-row form is kept
-            // rather than special-cased back to a single control, since the
-            // top row has held more than one before and may again.
+            // Back (row 0) and the transport/utility row (row 2). Left/Right
+            // walks the row you are on; from Back it steps off into the bottom
+            // row — Right lands on the first item and Left on the last — the
+            // long-standing form, kept rather than special-cased, since the top
+            // row has held more than one before and may again.
             std::vector<int> top_indices;
             std::vector<int> bottom_indices;
             for (int i = 0; i < static_cast<int>(focusables.size()); ++i) {
-              if (IsTopBarFocusItem(focusables[i])) {
+              const int r = FocusRowOf(focusables[i]);
+              if (r == 0) {
                 top_indices.push_back(i);
-              } else {
+              } else if (r == 2) {
                 bottom_indices.push_back(i);
               }
             }
             const bool go_left = (wparam == VK_LEFT);
-            if (IsTopBarFocusItem(focusables[g_native_focus_index])) {
+            if (row == 0) {
               int pos = 0;
               for (int i = 0; i < static_cast<int>(top_indices.size()); ++i) {
                 if (top_indices[i] == g_native_focus_index) {
@@ -5174,8 +5336,10 @@ void FlutterWindow::UpdateNativeControlState(
   const bool was_pinned = native_controls_pinned_;
   // The bottom bar grows for live-with-EPG; if its height changes (e.g. the EPG
   // snapshot arrives after the first frame), the clip region must be rebuilt or
-  // the taller bar is clipped until the next resize.
+  // the taller bar is clipped until the next resize. The top bar grows the same
+  // way when a VOD route carries a description.
   const int prev_bottom_height = BottomControlsHeight();
+  const int prev_top_height = TopControlsHeight();
   g_native_control_state.title =
       EncodableStringArg(args, "title", g_native_control_state.title);
   g_native_control_state.is_live =
@@ -5229,6 +5393,11 @@ void FlutterWindow::UpdateNativeControlState(
       args, "audioChannels", g_native_control_state.audio_channels);
   g_native_control_state.source_name =
       EncodableStringArg(args, "sourceName", g_native_control_state.source_name);
+  // Defaults to empty like the EPG fields: the block is VOD-only and a push
+  // that omits the key (every live frame, or an older Dart build) must clear it
+  // rather than keep the previous film's synopsis.
+  g_native_control_state.description =
+      EncodableStringArg(args, "description", L"");
   g_native_control_state.zap_enabled =
       EncodableBoolArg(args, "zapEnabled", g_native_control_state.zap_enabled);
   g_native_control_state.step_enabled =
@@ -5240,6 +5409,13 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableBoolArg(args, "showClock", g_native_control_state.show_clock);
   g_native_control_state.show_playback_times = EncodableBoolArg(
       args, "showPlaybackTimes", g_native_control_state.show_playback_times);
+  // Absent key keeps the previous value, so the default-10 init is what an
+  // older Dart build renders. The step is only ever read as a label/seek amount,
+  // so clamping to a sane floor guards a zero/negative a hand-edited payload
+  // could otherwise make a dead button out of.
+  g_native_control_state.seek_step_seconds = std::max(
+      1, EncodableIntArg(args, "seekStepSeconds",
+                         g_native_control_state.seek_step_seconds));
   // EPG now/next ride along on every setControlState, so default to empty: that
   // clears them for VOD and keeps live in sync.
   g_native_control_state.epg_now_title =
@@ -5258,6 +5434,11 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableDoubleArg(args, "epgNextStopMs", 0.0);
 
   if (BottomControlsHeight() != prev_bottom_height) {
+    native_controls_region_dirty_ = true;
+  }
+  // Same for the top bar's description block: a synopsis arriving or clearing
+  // moves the clip region's top edge.
+  if (TopControlsHeight() != prev_top_height) {
     native_controls_region_dirty_ = true;
   }
 

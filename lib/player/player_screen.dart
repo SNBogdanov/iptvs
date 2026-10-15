@@ -29,6 +29,7 @@ import 'resource_counters.dart';
 import 'linux_native_session.dart';
 import 'playback_audio_session.dart';
 import 'tray.dart';import 'zap_command.dart';
+import 'next_video_policy.dart';
 import 'zap_quick_list.dart';
 
 /// Buffering/dropped this long before a non-forced live reconnect fires.
@@ -356,12 +357,20 @@ class PlaybackContext {
   /// player); null/zero plays from the top.
   final Duration? resumeFrom;
 
+  /// Whether to automatically advance to the next sibling (VOD/series only).
+  final bool autoPlayNext;
+
+  /// How to treat the next sibling when it's already been watched.
+  final NextVideoPlayedBehavior nextBehavior;
+
   const PlaybackContext({
     required this.db,
     required this.sourceId,
     required this.kind,
     required this.itemId,
     this.resumeFrom,
+    this.autoPlayNext = false,
+    this.nextBehavior = NextVideoPlayedBehavior.resumeOrSkip,
   });
 }
 
@@ -374,6 +383,23 @@ class PlayerScreen extends StatefulWidget {
 
   /// Active source's display name, shown as a badge in the player overlay.
   final String? sourceName;
+
+  /// VOD/catch-up synopsis for the launch item, shown in the chrome when the
+  /// user reveals it. Null for live. The stepped-to item's own description wins
+  /// once a previous/next or auto-advance moves off the launch item (see
+  /// [_PlayerScreenState._vodDescription]).
+  final String? description;
+
+  /// The launch [MediaItem] for a VOD/catch-up route. [description] alone cannot
+  /// be enriched on demand — the player needs the item to ask [describe] for a
+  /// synopsis the provider never supplied.
+  final MediaItem? mediaItem;
+
+  /// Resolves a synopsis for a VOD item from cached/enriched metadata, used when
+  /// the item carries none of its own (the stepped-to sibling of a title the
+  /// provider gave no plot). Host-supplied (`LibraryRepository.describeMedia`)
+  /// so the player keeps no repository. Null disables the lookup.
+  final Future<String?> Function(MediaItem item)? describe;
 
   /// EPG now/next for a live channel (a one-shot snapshot taken at play time),
   /// surfaced in the overlay instead of the VOD scrubber. Null for VOD.
@@ -503,6 +529,9 @@ class PlayerScreen extends StatefulWidget {
     required this.title,
     required this.stream,
     this.sourceName,
+    this.description,
+    this.mediaItem,
+    this.describe,
     this.epgNow,
     this.epgNext,
     this.existingPlayer,
@@ -722,6 +751,80 @@ class _PlayerScreenState extends State<PlayerScreen>
   String? _vodTitle;
 
   String get _title => _vodTitle ?? _zap?.title ?? widget.title;
+
+  /// The VOD sibling the route is *currently* on: the stepped-to item once a
+  /// previous/next or an auto-advance has moved [_vodIndex], otherwise the
+  /// launch item. Position and learned-duration writes follow it, because a
+  /// step changes the item underneath a route whose [PlaybackContext] still
+  /// names the one it was launched with.
+  MediaItem? get _currentVodItem {
+    final session = _vodStep;
+    final index = _vodIndex;
+    if (session == null || index == null) return null;
+    if (index < 0 || index >= session.items.length) return null;
+    return session.items[index];
+  }
+
+  /// Synopsis shown in the chrome for the VOD title currently playing. Follows
+  /// [_currentVodItem] when a step session exists (a previous/next or an
+  /// auto-advance changes it), otherwise the launch item. When the item's own
+  /// description is empty, an on-demand lookup result (see [_ensureVodDescription])
+  /// stands in. Trimmed to null when empty, so the native overlay has one signal.
+  String? get _vodDescription {
+    if (_isLive) return null;
+    final item = _currentVodMedia;
+    final own = item?.description?.trim();
+    if (own != null && own.isNotEmpty) return own;
+    if (item != null) {
+      if (_fetchedVodDescriptionId == item.id) {
+        final fetched = _fetchedVodDescription?.trim();
+        return (fetched == null || fetched.isEmpty) ? null : fetched;
+      }
+      return null;
+    }
+    final launch = widget.description?.trim();
+    return (launch == null || launch.isEmpty) ? null : launch;
+  }
+
+  /// The VOD item the chrome describes: the session's current row when a step
+  /// session exists (the launch row, or the stepped-to sibling), else the launch
+  /// [PlayerScreen.mediaItem]. The launch row is the richer one — the app wrote
+  /// the opened title's details back into the grid snapshot before playback, and
+  /// the session was built from that snapshot — so a launched title already has a
+  /// synopsis here; only a stepped-to sibling needs [_ensureVodDescription].
+  MediaItem? get _currentVodMedia =>
+      _isLive ? null : (_currentVodItem ?? widget.mediaItem);
+
+  /// A synopsis resolved on demand for an item the provider gave none for, keyed
+  /// by the item id it belongs to ([_fetchedVodDescriptionId]).
+  String? _fetchedVodDescription;
+  String? _fetchedVodDescriptionId;
+
+  /// Kicks off a one-shot synopsis lookup for the current VOD item when it has
+  /// none of its own — the stepped-to sibling of an unenriched listing. Idempotent
+  /// per item id, never blocks playback, and re-pushes the control state so the
+  /// block appears when the answer lands.
+  void _ensureVodDescription() {
+    if (_isLive) return;
+    final describe = widget.describe;
+    final item = _currentVodMedia;
+    if (describe == null || item == null) return;
+    final own = item.description?.trim();
+    if (own != null && own.isNotEmpty) return;
+    if (_fetchedVodDescriptionId == item.id) return;
+    _fetchedVodDescriptionId = item.id;
+    unawaited(
+      describe(item).then((text) {
+        if (!mounted) return;
+        if (_currentVodMedia?.id != item.id) return;
+        final trimmed = text?.trim();
+        if (trimmed == null || trimmed.isEmpty) return;
+        _fetchedVodDescription = trimmed;
+        unawaited(_syncNativeControlState());
+      }).catchError((_) {}),
+    );
+  }
+
   String? get _sourceName => _zap?.sourceName ?? widget.sourceName;
   Programme? get _epgNow => _zap != null ? _zap!.epg.now : widget.epgNow;
   Programme? get _epgNext => _zap != null ? _zap!.epg.next : widget.epgNext;
@@ -990,15 +1093,22 @@ class _PlayerScreenState extends State<PlayerScreen>
         // iOS's AVPlayer *is* a separate engine (a presented view controller,
         // like Android's Activity), so it suppresses like Android: this
         // `_player` is idle and its `completed` describes nothing.
-        if (!shouldReconnectOnCompleted(
+        final shouldReconnect = shouldReconnectOnCompleted(
           completed: completed,
           isLive: _isLive,
           nativeSessionActive: _separateEngineOwnsPlayback,
-        )) {
+        );
+        if (shouldReconnect) {
+          _logPlayback('live stream completed (clean EOF) — reconnecting');
+          _reconnectLive(force: true);
           return;
         }
-        _logPlayback('live stream completed (clean EOF) — reconnecting');
-        _reconnectLive(force: true);
+        if (_isLive) return;
+        // Only a genuine EOF advances — `completed` also drops back to false
+        // when a stream opens or resets, and treating that as an end would mark
+        // the item just opened as watched and advance off it.
+        if (!completed) return;
+        unawaited(_handleVodCompletion());
       }),
     );
     if (_isLive) {
@@ -1607,6 +1717,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// connection and leave the cursor describing a stream that lost.
   bool _steppingVod = false;
 
+  /// Guards the auto-advance path against a re-entrant completion — a resolve or
+  /// reopen that (however briefly) re-emits `completed` must not cascade into a
+  /// second advance from a cursor that already moved.
+  bool _advancingVod = false;
+
   /// Swaps the playing stream on whatever surface this route already holds.
   ///
   /// Shared with [_zapPlay] because a VOD step and a live zap end in the same
@@ -1618,10 +1733,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// and receive a `zapTo` carrying the channel, so dropping it would silently
   /// turn every live zap on those platforms into a log line. A VOD step has no
   /// such vocabulary yet, and passes none — which is why it can be absent.
+  ///
+  /// [resume] seeks the newly opened stream to a saved position once its
+  /// duration is known — the auto-advance "continue" behaviour. It reaches the
+  /// surfaces that share this `_player` (embedded and the Windows native HWND)
+  /// through [_pendingEmbeddedResume], exactly like the launch resume; a live
+  /// zap passes none.
   Future<void> _reopenOnCurrentSurface(
     StreamInfo stream,
     String title, {
     ZapEntry? entry,
+    Duration? resume,
   }) async {
     if (!mounted) return;
     _stream = stream;
@@ -1654,6 +1776,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
       );
       await session.command(['set_property', 'force-media-title', title]);
+      // A separate mpv process, so [_pendingEmbeddedResume] cannot reach it and
+      // a resumed sibling plays from the top here. That is the same limitation
+      // the manual previous/next pair has on this surface; HDR-on-Wayland VOD is
+      // the only way to reach it at all.
       await session.command(['loadfile', stream.url, 'replace']);
       await _pushLinuxOverlayState();
     } else {
@@ -1670,6 +1796,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           await _setNativeHeaderOptions(platform, stream.headers);
         }
       }
+      // Armed before the open, so the duration listener seeks the *new* stream
+      // once its length is known (a cold seek right after open can beat the
+      // demuxer). Cleared unconditionally: a step without a resume must not
+      // inherit the previous title's pending seek.
+      _pendingEmbeddedResume =
+          (resume != null && resume > Duration.zero) ? resume : null;
       await _player.open(
         Media(
           stream.url,
@@ -1680,6 +1812,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
     setState(() {});
     await _syncNativeControlState();
+    _ensureVodDescription();
   }
 
   /// A `zap:` command string from the overlay's quick-list pointer gestures —
@@ -1699,6 +1832,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
     _showNativeControls(scheduleHide: false);
+    _ensureVodDescription();
     _logPlayback(
       'open live=$_isLive url=${_redactPlayback(_stream.url)} '
       'surface=${_usesWindowsNativeSurface
@@ -1894,6 +2028,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             // the current value.
             'showClock': showPlayerClock.value,
             'showPlaybackTimes': showPlaybackTimes.value,
+            'seekStepSeconds': seekStepSeconds.value,
             if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
               'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),
@@ -2481,7 +2616,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // position before dropping the session reference or the embedded player
     // fallback will have no useful state to persist.
     try {
-      await _persistPlaybackPosition();
+      await _persistPlaybackPosition(completed: _player.state.completed);
     } catch (error) {
       _logPlayback('warn native Linux position save failed: $error');
     }
@@ -2965,10 +3100,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (wasPlaying) _showNativeControls(scheduleHide: false);
         break;
       case 'seekBack':
-        _seekBy(-10);
+        _seekBy(-seekStepSeconds.value);
         break;
       case 'seekForward':
-        _seekBy(10);
+        _seekBy(seekStepSeconds.value);
         break;
       case 'muteToggle':
         // Through the session, not `state.volume`: the native surfaces drive a
@@ -3187,6 +3322,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Map<String, Object?> _presentationControlState() => {
     'title': _title,
     if (_sourceName != null) 'sourceName': _sourceName,
+    if (_vodDescription != null) 'description': _vodDescription,
     ..._epgPayload(),
     'isLive': _isLive,
     'liveSynced': _liveSynced,
@@ -3201,6 +3337,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     // keeps the two paths in agreement about the same two names.
     'showClock': showPlayerClock.value,
     'showPlaybackTimes': showPlaybackTimes.value,
+    // Rides with them for the same reason: the Windows GDI overlay labels its
+    // `-N`/`+N` transport buttons (and steps them) from this, and it has no
+    // open-time payload to read. Sent on `open` too, so a surface seeded once
+    // there is never left on a stale step.
+    'seekStepSeconds': seekStepSeconds.value,
   };
 
   Future<void> _syncNativeControlState() async {
@@ -3985,7 +4126,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// position) actually runs on the next frame. A fire-and-forget save there
   /// raced the reload and reliably lost, which is why the rail looked stale
   /// until a manual refresh re-read the by-then-completed write.
-  Future<void> _persistPlaybackPosition() async {
+  Future<void> _persistPlaybackPosition({bool completed = false}) async {
     final playback = widget.playback;
     if (playback == null || _isLive) return;
     // Android's Activity and iOS's presented controller both own the position
@@ -3994,6 +4135,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if ((Platform.isAndroid || Platform.isIOS) && _nativePlaybackLaunched) {
       return;
     }
+    // A VOD step moves the route onto a sibling the launch context never named,
+    // so the write has to follow the cursor — otherwise the episode that just
+    // finished is saved under the title it replaced.
+    final itemId = _currentVodItem?.id ?? playback.itemId;
+    final kind = _currentVodItem?.kind ?? playback.kind;
     final linuxSession = _linuxNativeSession;
     if (linuxSession != null) {
       final linuxState = await linuxSession.playbackState();
@@ -4001,23 +4147,25 @@ class _PlayerScreenState extends State<PlayerScreen>
       _recordLearnedMediaDuration(linuxState.duration);
       await playback.db.savePlaybackPosition(
         playback.sourceId,
-        playback.kind,
-        playback.itemId,
-        position: linuxState.position,
+        kind,
+        itemId,
+        position: completed ? linuxState.duration : linuxState.position,
         duration: linuxState.duration,
+        completed: completed,
       );
       return;
     }
-    final position = _player.state.position;
+    final position = completed ? _player.state.duration : _player.state.position;
     final duration = _player.state.duration;
-    if (duration <= Duration.zero) return;
-    _recordLearnedMediaDuration(duration);
+    if (duration <= Duration.zero && !completed) return;
+    _recordLearnedMediaDuration(duration > Duration.zero ? duration : position);
     await playback.db.savePlaybackPosition(
       playback.sourceId,
-      playback.kind,
-      playback.itemId,
+      kind,
+      itemId,
       position: position,
-      duration: duration,
+      duration: duration > Duration.zero ? duration : position,
+      completed: completed,
     );
   }
 
@@ -4028,14 +4176,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// the native close relay both funnel here and must agree on one value.
   void _recordLearnedMediaDuration(Duration duration) {
     final playback = widget.playback;
-    if (playback == null || playback.kind != ContentKind.movie) return;
+    if (playback == null) return;
+    final current = _currentVodItem;
+    final kind = current?.kind ?? playback.kind;
+    if (kind != ContentKind.movie) return;
     if (_mediaDurationRecorded || duration <= Duration.zero) return;
     _mediaDurationRecorded = true;
     unawaited(
       playback.db.updateLearnedMediaDuration(
         playback.sourceId,
-        playback.kind,
-        playback.itemId,
+        kind,
+        current?.id ?? playback.itemId,
         duration,
       ),
     );
@@ -4086,7 +4237,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Last-resort safety net (e.g. dispose without an explicit exit path) —
     // the real save-before-pop is in _exitAndPop/nativeClosed, both of which
     // run and complete well before this.
-    unawaited(_persistPlaybackPosition());
+    unawaited(_persistPlaybackPosition(completed: _player.state.completed));
     final reconnectTimer = _reconnectTimer;
     if (reconnectTimer != null) {
       final wasActive = reconnectTimer.isActive;
@@ -4155,7 +4306,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     await _setEmbeddedWindowFullscreen(false);
     // Await the final position write before popping — see the doc comment on
     // _persistPlaybackPosition for why this can't be fire-and-forget here.
-    await _persistPlaybackPosition();
+    await _persistPlaybackPosition(completed: _player.state.completed);
     await _teardownLinuxNative();
     if (Platform.isWindows && _nativePlaybackLaunched) {
       await _prepareWindowsNativeExit();
@@ -4279,7 +4430,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               return;
             }
             _handlePlaybackInput();
-            _seekBy(-10);
+            _seekBy(-seekStepSeconds.value);
           },
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
             if (_zapArrowKeysActive &&
@@ -4293,7 +4444,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               return;
             }
             _handlePlaybackInput();
-            _seekBy(10);
+            _seekBy(seekStepSeconds.value);
           },
           const SingleActivator(LogicalKeyboardKey.keyF): () {
             _handlePlaybackInput();
@@ -4549,5 +4700,88 @@ class _PlayerScreenState extends State<PlayerScreen>
         : ' ${track.w}x${track.h}';
     return '${track.id}$codec$decoder$channels$rate$size';
   }
-}
 
+  /// Auto-advance at the end of a film or episode (VOD/series only).
+  ///
+  /// Triggered by a clean `completed` on the route's **own** engine, so it runs
+  /// on the surfaces where this `_player` really is the stream: embedded, the
+  /// Windows native HWND, and Linux's embedded fallback. A *separate* native
+  /// engine — Android's Activity, iOS's presented controller — reports its own
+  /// completion and never reaches here, exactly the way the transport's
+  /// Previous/Next pair is not wired there either.
+  ///
+  /// The finished title is persisted **first**, so its full bar and the Continue
+  /// watching rail are already correct even when nothing follows it or the next
+  /// resolve fails.
+  Future<void> _handleVodCompletion() async {
+    if (!mounted || _isLive || _advancingVod || _steppingVod) return;
+    // A separate native engine owns the stream and reports its completion by
+    // its own route; this `_player` is idle, so its `completed` describes
+    // nothing and there is nothing here to advance.
+    if (_separateEngineOwnsPlayback) return;
+    final playback = widget.playback;
+    if (playback == null) return;
+    await _persistPlaybackPosition(completed: true);
+    final session = _vodStep;
+    if (!playback.autoPlayNext || session == null) return;
+    // The route's cursor, not the session's launch index: a manual step has
+    // already moved it, and the item that just ended is the one it points at.
+    final start = _vodIndex ?? session.index;
+    _advancingVod = true;
+    // Also take the *step* guard, not just the advance one: the resolve below
+    // must not overlap a manual Previous/Next (two `resolveMedia` calls race on
+    // the single provider connection exactly as two steps would).
+    _steppingVod = true;
+    try {
+      final watched = await playback.db.readWatchedIds(
+        playback.sourceId,
+        playback.kind,
+      );
+      for (var index = start + 1; index < session.items.length; index++) {
+        final candidate = session.items[index];
+        final resume = await playback.db.readPlaybackPosition(
+          playback.sourceId,
+          playback.kind,
+          candidate.id,
+        );
+        final action = nextVideoActionFor(
+          behavior: playback.nextBehavior,
+          fullyWatched: watched.contains(candidate.id),
+          hasResume: resume != null,
+        );
+        // A skipped sibling is not the answer — keep looking. The end of the
+        // list is the only place this stops, and stopping is not an error: the
+        // last title simply played out.
+        if (action == NextVideoAction.skip) continue;
+        StreamInfo? stream;
+        try {
+          stream = await session.resolve(candidate);
+        } catch (error) {
+          _logPlayback(
+            'warn vod auto-advance resolve failed id=${candidate.id} '
+            'detail=${_redactPlayback(error.toString())}',
+          );
+        }
+        if (!mounted) return;
+        if (stream == null) {
+          // Resolve-first, commit-later, like the manual step: a failure here
+          // leaves the cursor on the title that just ended rather than
+          // announcing one that never opened.
+          return;
+        }
+        _vodIndex = index;
+        _vodTitle = candidate.title;
+        _logPlayback('vod auto-advance to id=${candidate.id} (${action.name})');
+        await _reopenOnCurrentSurface(
+          stream,
+          candidate.title,
+          resume: action == NextVideoAction.resume ? resume!.position : null,
+        );
+        return;
+      }
+    } finally {
+      _advancingVod = false;
+      _steppingVod = false;
+    }
+  }
+}

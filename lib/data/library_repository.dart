@@ -806,6 +806,51 @@ class LibraryRepository {
     return merged;
   }
 
+  /// Synopsis for [item] for the player's chrome: the item's **own** description
+  /// when the provider supplied one, otherwise the cached/enriched external
+  /// overview, otherwise the provider's own detail payload.
+  ///
+  /// This exists because a catalogue listing often carries no plot at all (an
+  /// Xtream `get_vod_streams` row has none, and a Stalker item's `descr` is
+  /// frequently blank), so a title the user launches — whose details the app
+  /// fetched when the card was opened — can show a synopsis while the sibling
+  /// the player steps to does not.
+  ///
+  /// Three sources, cheapest first: the item itself; the **cached** external
+  /// metadata ([_applyExternalMetadata] reads `external_metadata` before it ever
+  /// searches the network); and finally the provider's own `mediaDetails`
+  /// (`get_vod_info` / Stalker details), which is where a provider with no
+  /// metadata key configured keeps the only synopsis it has. The last one is a
+  /// provider call, so it only runs for the catalogue-row kinds whose plot lives
+  /// there — never when a cheaper source already answered. Never throws.
+  Future<String?> describeMedia(MediaItem item) async {
+    final own = item.description?.trim();
+    if (own != null && own.isNotEmpty) return item.description;
+    if (_supportsMetadata(item)) {
+      try {
+        final merged = await _applyExternalMetadata(item, action: 'describe');
+        final text = merged.description?.trim();
+        if (text != null && text.isNotEmpty) return merged.description;
+      } catch (error) {
+        _logMetadata(
+          'describe metadata error ${item.kind.name}:${item.id}: $error',
+        );
+      }
+    }
+    if (item.kind == ContentKind.movie || item.kind == ContentKind.series) {
+      try {
+        final details = await mediaDetails(item);
+        final text = details.description?.trim();
+        if (text != null && text.isNotEmpty) return details.description;
+      } catch (error) {
+        _logMetadata(
+          'describe details error ${item.kind.name}:${item.id}: $error',
+        );
+      }
+    }
+    return null;
+  }
+
   Future<List<MediaItem>> _readMergedMediaItems(
     ContentKind kind, {
     String? categoryId,

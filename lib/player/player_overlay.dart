@@ -1688,24 +1688,32 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                   ),
                 ],
                 if (!widget.isLive) ...[
-                  _button(Icons.replay_10, 'Back 10 seconds', () {
-                    final next =
-                        widget.controls.state.position -
-                        const Duration(seconds: 10);
-                    unawaited(
-                      widget.controls.seek(
-                        next < Duration.zero ? Duration.zero : next,
-                      ),
-                    );
-                  }),
-                  _button(Icons.forward_10, 'Forward 10 seconds', () {
-                    unawaited(
-                      widget.controls.seek(
-                        widget.controls.state.position +
-                            const Duration(seconds: 10),
-                      ),
-                    );
-                  }),
+                  _button(
+                    _seekIcon(forward: false),
+                    'Back ${seekStepSeconds.value} seconds',
+                    () {
+                      final next =
+                          widget.controls.state.position -
+                          Duration(seconds: seekStepSeconds.value);
+                      unawaited(
+                        widget.controls.seek(
+                          next < Duration.zero ? Duration.zero : next,
+                        ),
+                      );
+                    },
+                  ),
+                  _button(
+                    _seekIcon(forward: true),
+                    'Forward ${seekStepSeconds.value} seconds',
+                    () {
+                      unawaited(
+                        widget.controls.seek(
+                          widget.controls.state.position +
+                              Duration(seconds: seekStepSeconds.value),
+                        ),
+                      );
+                    },
+                  ),
                 ],
                 _volumeControls(context, showSlider: !compact),
                 if (!widget.isLive && showPlaybackTimes.value)
@@ -1951,6 +1959,26 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       );
     },
   );
+
+  /// The transport glyph for the current seek step.
+  ///
+  /// Material ships a numbered `replay_N`/`forward_N` icon for 5, 10 and 30
+  /// seconds only — there is no 15 or 60 — so those two steps fall back to the
+  /// plain arrow rather than drawing a label that disagrees with the step the
+  /// button actually applies. The tooltip and semantics still carry the exact
+  /// number, so nothing is hidden, only unlabelled in the glyph.
+  IconData _seekIcon({required bool forward}) {
+    switch (seekStepSeconds.value) {
+      case 5:
+        return forward ? Icons.forward_5 : Icons.replay_5;
+      case 10:
+        return forward ? Icons.forward_10 : Icons.replay_10;
+      case 30:
+        return forward ? Icons.forward_30 : Icons.replay_30;
+      default:
+        return forward ? Icons.forward : Icons.replay;
+    }
+  }
 
   Widget _seekBar() {
     final duration = widget.controls.state.duration;

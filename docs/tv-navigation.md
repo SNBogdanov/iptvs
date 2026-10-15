@@ -856,6 +856,16 @@ same kind of stand-in the page keys make for a remote's channel keys, which is a
 letters this screen already uses (F/M/I/S) and toggling, because a dedicated key that does
 nothing the second time reads as a dead remote.
 
+**The ring is a three-row model, and the VOD scrubber is its own row.** `FocusRowOf` puts Back on
+row 0, the scrubber on row 1 (present only when `has_scrubber`, i.e. VOD/catch-up), and everything
+else on row 2. Up/Down step one row at a time — transport → scrubber → Back, never skipping a row,
+and live has no scrubber so Up/Down go Back ↔ transport exactly as the old two-row form did.
+Left/Right **on the scrubber row seek** — the same `seekBack`/`seekForward` command the `-N`/`+N`
+buttons send, in the device-wide step (Settings → "VOD seek step"), so the arrow is the scrub
+gesture and never moves the ring; OK there is a deliberate no-op. Everywhere else Left/Right walk
+the row you are on (and off Back into the transport row), unchanged. Detail: docs/player.md "The
+VOD seek step and the selectable progress bar".
+
 **The control row's focus ring now includes the quick-list opener, leftmost in the right
 cluster**: quick list → "Go to live" → favourite star → speed/audio/CC → aspect → info →
 fullscreen (`FocusableItems`), matching the visual order. It is an ordinary focus stop, exactly

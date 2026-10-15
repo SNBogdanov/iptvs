@@ -83,6 +83,15 @@ class _FakeMetadataProvider implements MetadataProvider {
 MediaItem _movie(String id) =>
     MediaItem(id: id, title: 'title-$id', kind: ContentKind.movie);
 
+/// A source whose catalogue rows carry no plot but whose `mediaDetails` (the
+/// `get_vod_info`/details call) does — the shape that makes `describeMedia`'s
+/// provider-details fallback the only synopsis available with no metadata key.
+class _DetailsSource extends DemoSource {
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async =>
+      item.copyWith(description: 'provider plot for ${item.id}');
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   FlutterSecureStorage.setMockInitialValues({});
@@ -201,4 +210,56 @@ void main() {
       }
     },
   );
+
+  // describeMedia backs the player chrome's on-demand synopsis: the item's own
+  // description when the provider gave one, else the cached/enriched overview.
+  group('describeMedia', () {
+    test('returns the item\'s own description without a provider lookup', () async {
+      final provider = _FakeMetadataProvider();
+      final repo = LibraryRepository(
+        source: DemoSource(),
+        db: db,
+        metadataProvider: provider,
+      );
+      final item = MediaItem(
+        id: 'own',
+        title: 'title-own',
+        kind: ContentKind.movie,
+        description: 'own plot',
+      );
+
+      expect(await repo.describeMedia(item), 'own plot');
+      expect(provider.searched, isEmpty);
+    });
+
+    test('enriches a missing description from the provider, then the cache',
+        () async {
+      final provider = _FakeMetadataProvider();
+      final repo = LibraryRepository(
+        source: DemoSource(),
+        db: db,
+        metadataProvider: provider,
+      );
+      final item = _movie('m1');
+
+      expect(await repo.describeMedia(item), 'overview-m1');
+      expect(provider.searched, ['m1']);
+      // The lookup is cached, so a second read for the same item (a step back)
+      // does not hit the provider again.
+      expect(await repo.describeMedia(item), 'overview-m1');
+      expect(provider.searched, ['m1']);
+    });
+
+    test('returns null with no provider and no own description', () async {
+      final repo = LibraryRepository(source: DemoSource(), db: db);
+      expect(await repo.describeMedia(_movie('m2')), isNull);
+    });
+
+    test('falls back to the provider details when no metadata answers', () async {
+      // No metadata provider configured, and the catalogue row has no plot — so
+      // the only synopsis is the one `mediaDetails` (get_vod_info) returns.
+      final repo = LibraryRepository(source: _DetailsSource(), db: db);
+      expect(await repo.describeMedia(_movie('m9')), 'provider plot for m9');
+    });
+  });
 }

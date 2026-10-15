@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 
 import '../data/app_settings_store.dart';
 import '../data/vod_card_orientation.dart';
+import '../player/next_video_policy.dart';
 import '../player/player_chrome_prefs.dart';
+import '../player/seek_step.dart';
 import '../player/tray.dart';
 import '../player/window_placement.dart';
 import '../theme.dart';
@@ -34,6 +36,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool? _showPlaybackTimes;
   bool? _showChannelName;
   VodCardOrientation? _cards;
+  bool? _autoPlayNext;
+  NextVideoPlayedBehavior? _nextBehavior;
+  int? _seekStep;
 
   @override
   void initState() {
@@ -52,6 +57,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cards = VodCardOrientation.parse(
       await widget.store.rawVodCardOrientation(),
     );
+    final autoPlayNext = await widget.store.autoPlayNextVideo();
+    final nextBehavior = await widget.store.nextVideoPlayedBehavior();
+    final seekStep = await widget.store.seekStepSeconds();
     if (mounted) {
       setState(() {
         _closeToTray = closeToTray;
@@ -62,6 +70,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _showPlaybackTimes = showPlaybackTimes;
         _showChannelName = showChannelName;
         _cards = cards;
+        _autoPlayNext = autoPlayNext;
+        _nextBehavior = nextBehavior;
+        _seekStep = seekStep;
       });
     }
   }
@@ -142,6 +153,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await widget.store.setShowChannelName(next);
   }
 
+  Future<void> _toggleAutoPlayNext() async {
+    final next = !(_autoPlayNext ?? false);
+    setState(() => _autoPlayNext = next);
+    await widget.store.setAutoPlayNextVideo(next);
+  }
+
+  /// Two policies, so this cycles rather than opening a picker — the same
+  /// one-less-stop reasoning as the card-shape tile, and the trailing label
+  /// already prints which one is current. Its effect is a no-op until
+  /// auto-play is on; the subtitle says so.
+  Future<void> _cycleNextBehavior() async {
+    final next = (_nextBehavior ?? NextVideoPlayedBehavior.resumeOrSkip).other;
+    setState(() => _nextBehavior = next);
+    await widget.store.setNextVideoPlayedBehavior(next);
+  }
+
+  /// A fixed ladder (5/10/15/30/60 s), so this cycles rather than opening a
+  /// picker — one less stop for a remote, and the trailing label already prints
+  /// the current step. Publishes through the notifier the player chrome reads,
+  /// so the next player opened seeks by what the user just chose.
+  Future<void> _cycleSeekStep() async {
+    final next = nextSeekStep(_seekStep ?? kDefaultSeekStepSeconds);
+    setState(() => _seekStep = next);
+    seekStepSeconds.value = next;
+    await widget.store.setSeekStepSeconds(next);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -201,6 +239,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: _cycleCardOrientation,
             ),
             _SettingTile(
+              icon: Icons.skip_next_outlined,
+              title: 'Auto-play the next video',
+              subtitle:
+                  'When a film or episode finishes, move on to the next one in '
+                  'the same list automatically. Live channels never finish, so '
+                  'this changes nothing there.',
+              trailing: (_autoPlayNext ?? false) ? 'On' : 'Off',
+              onTap: _toggleAutoPlayNext,
+            ),
+            _SettingTile(
+              icon: Icons.replay_circle_filled_outlined,
+              title: 'Next video already watched',
+              subtitle:
+                  'What auto-play does with a title you have seen before: '
+                  'resume a partly-watched one and skip a finished one, or '
+                  'always start it over. Applies only while auto-play is on.',
+              trailing: (_nextBehavior ?? NextVideoPlayedBehavior.resumeOrSkip)
+                  .label,
+              onTap: _cycleNextBehavior,
+            ),
+            _SettingTile(
               icon: Icons.schedule_outlined,
               title: 'Clock in the player',
               subtitle:
@@ -219,6 +278,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'changes nothing there.',
               trailing: (_showPlaybackTimes ?? true) ? 'On' : 'Off',
               onTap: _toggleShowPlaybackTimes,
+            ),
+            _SettingTile(
+              icon: Icons.fast_forward_outlined,
+              title: 'VOD seek step',
+              subtitle:
+                  'How far Left/Right on the progress bar, and the -/+ buttons '
+                  'beside it, move a film or episode. Live channels have no '
+                  'progress bar, so this changes nothing there.',
+              trailing: '${_seekStep ?? kDefaultSeekStepSeconds} s',
+              onTap: _cycleSeekStep,
             ),
             _SettingTile(
               icon: Icons.label_outline,

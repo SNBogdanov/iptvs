@@ -23,6 +23,7 @@ import '../widgets/channel_number_chip.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
 import '../player/channel_number_entry.dart';
+import '../player/next_video_policy.dart';
 import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
 import '../player/aspect_mode.dart' show aspectModeIndexOf;
@@ -3070,6 +3071,15 @@ List<MediaItem>? _movieSiblings(MediaItem item) {
               item.kind,
               item.id,
             );
+      // Auto-advance is a device preference read here, at the single playback
+      // launch point, and carried on the context: the player has no settings
+      // store and must not grow one. The behaviour is only read when the
+      // feature is on, so an off toggle costs one keychain read, not two.
+      final settings = const AppSettingsStore();
+      final autoPlayNext = await settings.autoPlayNextVideo();
+      final nextBehavior = autoPlayNext
+          ? await settings.nextVideoPlayedBehavior()
+          : NextVideoPlayedBehavior.resumeOrSkip;
       final stream = await widget.repo.resolveMedia(item);
       if (!mounted) return;
       if (_tab == ContentKind.movie || _tab == ContentKind.series) {
@@ -3081,6 +3091,9 @@ List<MediaItem>? _movieSiblings(MediaItem item) {
             title: item.title,
             stream: stream,
             sourceName: widget.repo.source.name,
+            description: item.description,
+            mediaItem: item,
+            describe: widget.repo.describeMedia,
             vodStep: _vodStepFor(item, siblings),
             // Movies/series are always the active source — only live rows can
             // belong to another one.
@@ -3094,6 +3107,8 @@ List<MediaItem>? _movieSiblings(MediaItem item) {
               kind: item.kind,
               itemId: item.id,
               resumeFrom: resume?.position,
+              autoPlayNext: autoPlayNext,
+              nextBehavior: nextBehavior,
             ),
             iosEngineKey: item.id,
           ),
@@ -3870,7 +3885,8 @@ onPlay:
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
             resumeProgress: _media(_tab).resumeProgress,
             continueWatching: _media(_tab).continueWatching,
-            onResume: _playMedia,
+            onResume: (item) =>
+                _playMedia(item, siblings: _movieSiblings(item)),
             onRemoveContinueWatching: (entry) =>
                 _media(_tab).removeFromContinueWatching(entry),
             onRestoreContinueWatching: (entry) =>

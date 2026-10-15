@@ -1194,6 +1194,36 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   overlay cannot disagree, with the hand-rolled English `Sat 8 Aug · 16:02` as the fail-closed
   fallback everywhere else.
   See docs/player.md "Player chrome preferences" and "The clock badge's regional format".
+- **The VOD description block lives in the Windows GDI top bar, under the title** (docs/player.md
+  "The VOD description block"). Shown only for a non-live route with a synopsis, only while the
+  chrome is up. `NativeControlState.description` rides every `setControlState`; `ShowsDescription()`
+  is the one gate — `TopControlsHeight()` adds `kNativeDescriptionBlockHeight` and `TopControlsRect`,
+  the region, the info-panel top, paint and hit-test all read it through that, so a grown bar clips
+  and hit-tests right. **The title/back/badges stay anchored to the 64 px band** (`top_cy`, not the
+  grown centre) and the block uses `kTopScrimWithDescription` + `DrawWrappedTextEllipsized`
+  (`DT_END_ELLIPSIS` is single-line only). Dart's `_vodDescription` follows the **current** VOD item
+  (stepped-to sibling included), and `_ensureVodDescription()` fills a missing one on demand via
+  `LibraryRepository.describeMedia` — the item's own description, else cached/enriched metadata,
+  else the provider's own `mediaDetails` (`get_vod_info`), since a catalogue listing often has no
+  plot and a provider without a metadata key keeps the only synopsis in its details call. Called
+  from `_open` and `_reopenOnCurrentSurface`, idempotent per item id, never blocks playback.
+  **Windows-first: Android/iOS/Linux and the shared Flutter overlay do not draw it yet.** Pinned by
+  the `describeMedia` group in `test/library_repository_enrich_test.dart`.
+- **The VOD seek step is one device-wide preference, and the Windows GDI scrubber is a focus row.**
+  `lib/player/seek_step.dart` (`kSeekStepChoices` 5/10/15/30/60, `kDefaultSeekStepSeconds` 10,
+  `normalizeSeekStep`) is the ladder; the key is `app_seek_step_seconds` in `AppSettingsStore`,
+  surfaced by the `seekStepSeconds` notifier in `player_chrome_prefs.dart` and cycled by the
+  Settings "VOD seek step" tile. It is keychain-persisted, **never `SourceConfig.settings`** (a
+  habit, not a per-provider fact — the same reason the chrome toggles and the last channel are
+  device-local), only a non-default is written, and an out-of-ladder value reads as the default.
+  The `-N`/`+N` transport labels, their tooltips/semantics and the arrow seek all read it (Material
+  has `replay_N`/`forward_N` for 5/10/30 only; 15/60 fall back to the plain arrow with the exact
+  number in the tooltip). **Windows' GDI overlay made the scrubber reachable.** `FocusRowOf` puts
+  it on its own row (Back 0 / scrubber 1 / transport 2), so Up/Down step rows (Back ↔ scrubber ↔
+  transport), Left/Right **on the scrubber seek** through `seekBack`/`seekForward` instead of
+  moving the ring (OK there is a no-op), and Left/Right elsewhere still walk the row. Live has no
+  scrubber, so its two-row behaviour is unchanged. Android/iOS/Linux untouched. See docs/player.md
+  "The VOD seek step and the selectable progress bar".
 - **The live chrome is one layout on every surface that draws its own overlay.** Where the VOD
   scrubber sits, live gets a three-row EPG strip (programme title + `HH:mm – HH:mm`, progress bar,
   `Next · HH:mm – HH:mm · title`); LIVE is a **top-bar badge**, and the badges read source, LIVE,
@@ -1610,6 +1640,26 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   source minus hidden categories (a search result has no meaningful "next channel"); otherwise the
   visible category, in catalog order; the EPG grid hands over the list it is already showing.
   Detail: docs/player.md "Live zapping".
+- **Auto-advance after a film or episode completes is two device-wide settings and one pure
+  decision.** "Auto-play the next video" (off-absent) and, when it is on, what to do with an
+  already-played next title — "Continue / skip" (default: resume a partly-watched one, skip a
+  finished one) or "Start over". The trigger is a clean `completed` on the route's **own** engine,
+  so it fires on embedded, the Windows native HWND and Linux's embedded fallback and **not** on
+  Android/iOS, whose separate engines own the stream (bailing on `_separateEngineOwnsPlayback`) —
+  the same gap the manual Previous/Next pair already has there. The finished title is persisted
+  **first** (`savePlaybackPosition(completed: true)`, which marks watched regardless of the last
+  polled position and drops the resume row), so its bar and the rail are correct even when nothing
+  follows. The loop starts at `_vodIndex ?? session.index`, walks **forward only**, and
+  **resolve-first, commit-later** like the manual step; `_advancingVod` stops a re-emitted
+  `completed` cascading and `_steppingVod` stops it racing a manual step on the single provider
+  connection. The rule is pure (`lib/player/next_video_policy.dart`, `nextVideoActionFor`), with the
+  **finished check ordered before the resume check** — a finished title has no resume row by
+  construction, so the wrong order would replay it instead of stepping past. A resumed sibling seeks
+  through `_pendingEmbeddedResume` (so embedded + Windows native; the Linux-native mpv process can't
+  be reached, same as the manual step). The rail's `onResume` now passes `_movieSiblings` so a film
+  started from Continue watching carries a session and can advance too. Pinned by
+  `test/next_video_policy_test.dart` and the watched-marks group in `test/persistence_test.dart`;
+  detail: docs/player.md "Auto-advance (next film or episode)".
 
 ## In-app updates (essentials)
 

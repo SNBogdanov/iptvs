@@ -1576,6 +1576,98 @@ applying the same HUD to the native surfaces (Windows GDI/HDR, Android Compose, 
 OSD — which currently apply the preferences to their chrome badge/readout only) is outstanding.
 Pinned by `test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
 
+### The VOD seek step and the selectable progress bar
+
+A fourth device-wide preference (Settings → "VOD seek step"; key `app_seek_step_seconds` in
+`AppSettingsStore`, ladder in `lib/player/seek_step.dart`, `seekStepSeconds` notifier in
+`lib/player/player_chrome_prefs.dart`) is the distance one Left/Right press, and one tap of the
+`-N`/`+N` transport buttons, moves a VOD position. It is a habit, so it is global and keychain-persisted like
+the chrome toggles — never `SourceConfig.settings`, which would ride the source row into the cloud
+and hand a paired phone the television's step. The ladder is a fixed **5/10/15/30/60 s**
+(`kSeekStepChoices`), default **10** (`kDefaultSeekStepSeconds`, the hardcoded step this replaced);
+the Settings tile **cycles** it (one D-pad stop, no number entry), and the store writes only a
+non-default, so an install that never opens Settings seeks exactly as it did before. A stored value
+outside the ladder reads as the default (`normalizeSeekStep`) — a value this build does not know is
+one a *newer* build wrote, and guessing at it would seek somewhere the user never asked for.
+
+**The bar becomes a focus stop only where there is a focus ring.** On the shared Flutter overlay
+(Windows SDR, Linux) the arrows already seeked directly, so this change only makes that step
+configurable — the `-N`/`+N` buttons and their tooltips/semantics read `seekStepSeconds` (the
+Material `replay_N`/`forward_N` glyph exists for 5/10/30 only, so 15 and 60 fall back to the plain
+arrow while the tooltip still prints the exact number). On the **Windows GDI overlay** the arrows
+walked the control row and the scrubber was unreachable from the remote, so the seek step rides
+with a structural change (below). Android/iOS/Linux are untouched for now.
+
+**Windows' GDI overlay is now a three-row focus model** (`flutter_window.cpp`). `NativeFocusItem`
+gained `kScrubber`; `FocusRowOf` puts Back on row 0, the scrubber on row 1 (VOD only), and the
+transport/utility row on row 2. Up/Down step one row at a time (transport → scrubber → Back and
+back), and Left/Right **on the scrubber seek** — the seek gesture itself, not a focus move, routed
+through the ordinary `seekBack`/`seekForward` command path so the step is resolved Dart-side from
+the same setting that labels the buttons. Everywhere else Left/Right behave as before: they walk
+the row you are on, and from Back (a one-item row) they step off into the transport row. OK on the
+scrubber is a deliberate no-op (`CommandForFocusedItem` → `show`). A focused scrubber draws the
+ordinary focus fill (`RGB(38, 34, 78)`) as a rounded rect around the whole track, because the 6 px
+bar alone does not read as a focus stop. `seek_step_seconds` (default 10, clamped to ≥1) rides
+every `setControlState` and labels/steps the `-N`/`+N` buttons; the `-10`/`+10` string literals are
+gone. Live has no scrubber, so row 1 is simply absent there and Up/Down step Back ↔ transport
+exactly as the old two-row form did.
+
+**An arrow press reveals the chrome and acts on that same press — it does not reveal *instead of*
+acting.** So with the chrome hidden, Left/Right on VOD both brings the bars back and seeks by the
+step in one keystroke, exactly as they already moved focus in one keystroke before this feature
+(and as the shared Flutter overlay's `CallbackShortcuts` do — `_handlePlaybackInput()` reveals,
+then `_seekBy` runs). Only OK/Enter has the first-press-reveals-only rule (`is_activate &&
+!was_controls_visible`), because a bare confirm on a half-remembered screen should not also fire
+the focused control; a directional press has no such hazard and stopping the seek for one press
+would read as a dropped key. Decided deliberately, not an oversight.
+
+### The VOD description block (Windows GDI first)
+
+A VOD/catch-up title's synopsis is drawn in the **top bar of the chrome, under the title**, and only
+while the chrome is up (a mouse move / tap reveals it) — live never shows one, and a title with no
+synopsis keeps the bar it always had. **Windows only for now** (`windows/runner/flutter_window.cpp`),
+the surface VOD plays on there; the Android/iOS/Linux overlays and the shared Flutter
+`EmbeddedPlayerControls` do not draw it yet, so this is a known partial-parity gap rather than a
+missing path.
+
+Native side: `NativeControlState.description` rides every `setControlState` push (empty clears it,
+like the EPG fields). `ShowsDescription()` (`!is_live && !description.empty`) is the single gate the
+whole feature hangs off — `TopControlsHeight()` returns `kNativeTopControlsHeight + (ShowsDescription
+? kNativeDescriptionBlockHeight : 0)`, and `TopControlsRect`, the window region, the info-panel top
+offset, the paint and hit-test all read it through that one function, so a bar that grows for a
+synopsis is clipped and hit-tested correctly. **The title, back button and badges stay anchored to
+the ordinary 64 px band** (`top_cy` is `NativeScale(kNativeTopControlsHeight)/2`, not the grown
+rect's centre), so nothing above the block moves. Its scrim is `kTopScrimWithDescription`
+(`{0,0xB3},{0.72,0xB3},{1,0}` over the taller bar) — solid through the title and most of the block,
+fading over the last third so the bottom edge stays as soft as the ordinary bar's. The text is
+wrapped to `kNativeDescriptionMaxLines` (2) by `DrawWrappedTextEllipsized`: GDI's `DT_END_ELLIPSIS`
+only truncates one line, so the fit is a binary search for the longest prefix that still measures
+within two lines once an ellipsis is appended (`DT_CALCRECT | DT_WORDBREAK`). `UpdateNativeControlState`
+marks the region dirty when `TopControlsHeight()` changes, the same way it already did for the
+bottom bar's EPG height.
+
+Dart side: `PlayerScreen` carries `description` (launch item, for the oldest callers), `mediaItem`
+and `describe` (a `Future<String?> Function(MediaItem)`). `_vodDescription` prefers the **current**
+VOD item's own description (the stepped-to sibling once a previous/next or auto-advance moves
+`_vodIndex`), then the launch item's, then a result fetched on demand and cached by item id. The
+current item is the session's row — for a launched title that is the opened item itself, because the
+app writes the fetched details back into the grid snapshot before the session is built, so only a
+stepped-to sibling ever needs the on-demand lookup.
+**The on-demand lookup is the part that makes a step work.** A catalogue listing frequently carries
+no plot at all — an Xtream `get_vod_streams` row has none, and a Stalker item's `descr` is often
+blank — so a title the user launched (whose details the app fetched when the card was opened) can
+show a synopsis while the sibling the player steps to does not. `LibraryRepository.describeMedia`
+closes that gap with three sources, cheapest first: the item's own description; the **cached**
+external metadata (`_applyExternalMetadata` reads `external_metadata` before ever searching the
+network, so a repeat step is free and a genuine miss costs the one lookup auto-enrichment would
+have done); and finally the provider's own `mediaDetails` (`get_vod_info` / Stalker details) —
+which is where a provider with **no metadata key configured** keeps the only synopsis it has, and
+the case the first cut missed. The last source is a provider call, so it only runs for the
+catalogue-row kinds (`movie`/`series`) whose plot lives there, and never once a cheaper source has
+answered. `_ensureVodDescription()` runs once per item id from `_open` and
+`_reopenOnCurrentSurface`, never blocks playback, and re-pushes the control state when the answer
+lands. Pinned by the `describeMedia` group in `test/library_repository_enrich_test.dart`.
+
 ### The clock badge's regional format
 
 The dated clock badge follows the **user's Windows regional settings** rather than a hard-coded
@@ -2275,6 +2367,62 @@ stays null for VOD, catch-up, and every route that isn't channel-list-borne, so 
   after that removal: the pop path must hand over the controller's settled `ZapEntry` and its resolved
   stream. Until it does, the return leg re-seats nothing and the preview still describes the pre-zap
   channel — a stale label over a correct picture, not a wrong one.
+
+## Auto-advance (next film or episode)
+
+Two device-wide settings, both off-absent, and one decision function shared by all of it.
+
+**The trigger is a clean `completed` on the route's *own* engine** (`_player.stream.completed`,
+`_handleVodCompletion`), the same signal an EOF-based live drop comes from — so it fires on **embedded,
+the Windows native HWND and Linux's embedded fallback**, and nowhere else. On Android and iOS a
+*separate* native engine owns the stream and reports completion through its own route; this `_player`
+is idle, so `_separateEngineOwnsPlayback` bails at the top. That is the **same gap the manual
+Previous/Next pair has there** — a VOD step on a separate engine is deliberately not wired
+(`_reopenOnCurrentSurface` logs `warn vod step on a separate native engine is not wired` rather than
+opening a second engine onto one stream) — so auto-advance is neither better nor worse than the
+buttons beside it.
+
+- **The finished title is persisted *first*, before anything is resolved.**
+  `savePlaybackPosition(completed: true)` marks it watched regardless of the last polled position —
+  a clean EOF is the fact, so a native closed-relay or a final tick well under `kFinishedFraction`
+  still finishes the film — and drops its resume row, so the full bar and the Continue watching rail
+  are already correct even when nothing follows it or the next resolve fails. Pinned by the
+  "an explicit completion marks watched regardless of position" case in `test/persistence_test.dart`.
+- **The loop starts at the route's cursor, not the session's launch index.** `_vodIndex ?? session.index`
+  is where the item that just ended lives (a manual step has already moved it), and the search walks
+  *forward only* — the end of the list is an answer, not an error, and the last title simply played
+  out. **Resolve-first, commit-later**, exactly like the manual step: the cursor moves only after a
+  stream came back, so a failed resolve leaves the picture on the title that just ended rather than
+  announcing one that never opened.
+- **The policy decision is pure and lives in `lib/player/next_video_policy.dart`.** `resumeOrSkip`
+  (default) resumes a partly-watched sibling and **skips** a finished one; `startOver` always plays
+  from the top. In `nextVideoActionFor` the **finished check runs before the resume check** — under
+  `resumeOrSkip` a finished title has no resume row by construction (`savePlaybackPosition` drops it),
+  so a "skip only when there is no resume" ordering would play the finished title from the top instead
+  of stepping past it. The enum owns the opaque `storageValue` and the tile's `label`; the store
+  (`AppSettingsStore.autoPlayNextVideo` / `nextVideoPlayedBehavior`) carries them without interpreting
+  them, so this stays the same shape as `VodCardOrientation`.
+- **Both settings are device-wide and stored keychain-side, never on `SourceConfig.settings`** — the
+  source blob rides the cloud, and a per-source playback preference would push a rewrite and hand a
+  paired device the television's taste. `channel_list_screen._playMedia` reads them once at open and
+  carries them on `PlaybackContext`; the player reads the context, never the keychain, on the
+  completion path.
+- **`_advancingVod` and `_steppingVod` are both taken for the advance's resolve.** The first stops a
+  re-emitted `completed` from cascading into a second advance off a cursor that already moved; the
+  second exists because a manual Previous/Next pressed during the advance's `resolveMedia` would race
+  the single provider connection exactly as two manual steps would.
+- **A resumed sibling seeks through `_pendingEmbeddedResume`**, the launch-resume path, once its
+  duration is known — so `resume` reaches the two surfaces that share this `_player` (embedded and the
+  Windows native HWND). The **Linux-native mpv process cannot be reached** by that field, so a resumed
+  sibling plays from the top there — the same limitation the manual step has on that surface, and HDR
+  VOD on Wayland is the only way to reach it at all.
+- **The rail's resume opens with siblings.** The Continue watching rail's `onResume` passes
+  `_movieSiblings(item)` so a film started from the rail carries a VOD step session and can therefore
+  auto-advance like one started from the grid; a series-tab rail entry is an episode and finds no movie
+  siblings, so it is unchanged.
+
+Pinned by `test/next_video_policy_test.dart` (the enum, the decision ordering, and the store
+round-trip) and the watched-marks group in `test/persistence_test.dart`.
 
 ## Typed channel numbers (full screen)
 

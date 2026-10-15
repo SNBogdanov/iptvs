@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_settings_store.dart';
 import 'package:iptvs/player/linux_native_session.dart';
 import 'package:iptvs/player/player_chrome_prefs.dart';
+import 'package:iptvs/player/seek_step.dart';
 
 /// The three player-chrome preferences are one default-on boolean behind three
 /// layers — the keychain, the notifier every surface reads, and each native
@@ -23,6 +24,7 @@ void main() {
     showPlayerClock.value = true;
     showPlaybackTimes.value = true;
     showChannelName.value = true;
+    seekStepSeconds.value = kDefaultSeekStepSeconds;
   });
 
   group('the keychain contract', () {
@@ -112,6 +114,59 @@ void main() {
 
       expect(showPlayerClock.value, isFalse);
       expect(showPlaybackTimes.value, isTrue);
+    });
+  });
+
+  group('the VOD seek step', () {
+    test('an untouched install reads the default', () async {
+      expect(await store.seekStepSeconds(), kDefaultSeekStepSeconds);
+    });
+
+    test('round-trips a chosen step', () async {
+      await store.setSeekStepSeconds(30);
+
+      expect(await store.seekStepSeconds(), 30);
+      expect(
+        await const FlutterSecureStorage().read(key: 'app_seek_step_seconds'),
+        '30',
+      );
+    });
+
+    test('writing the default deletes the key, not stores it', () async {
+      await store.setSeekStepSeconds(30);
+      await store.setSeekStepSeconds(kDefaultSeekStepSeconds);
+
+      expect(await store.seekStepSeconds(), kDefaultSeekStepSeconds);
+      expect(
+        await const FlutterSecureStorage().read(key: 'app_seek_step_seconds'),
+        isNull,
+      );
+    });
+
+    test('an unlisted stored value reads the default, never a nonsense step',
+        () async {
+      // A value written by a newer build (or a hand-edited keychain) must not
+      // put a 7-second step on screen.
+      await const FlutterSecureStorage().write(
+        key: 'app_seek_step_seconds',
+        value: '7',
+      );
+
+      expect(await store.seekStepSeconds(), kDefaultSeekStepSeconds);
+    });
+
+    test('the notifier loads the stored step', () async {
+      await store.setSeekStepSeconds(60);
+
+      await loadPlayerChromePrefs(store: store);
+
+      expect(seekStepSeconds.value, 60);
+    });
+
+    test('an untouched install loads the default into the notifier', () async {
+      await loadPlayerChromePrefs(store: store);
+
+      expect(seekStepSeconds.value, kDefaultSeekStepSeconds);
     });
   });
 

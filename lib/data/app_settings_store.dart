@@ -1,5 +1,8 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../player/next_video_policy.dart';
+import '../player/seek_step.dart';
+
 /// Global (profile-independent) app preferences, persisted in the OS keychain.
 ///
 /// Deliberately separate from [SourceStore] (per-source) and the per-profile
@@ -16,6 +19,9 @@ class AppSettingsStore {
   static const _kShowPlayerClock = 'app_show_player_clock';
   static const _kShowPlaybackTimes = 'app_show_playback_times';
   static const _kShowChannelName = 'app_show_channel_name';
+  static const _kAutoPlayNext = 'app_auto_play_next';
+  static const _kNextVideoBehavior = 'app_next_video_behavior';
+  static const _kSeekStepSeconds = 'app_seek_step_seconds';
 
   final FlutterSecureStorage _storage;
 
@@ -173,6 +179,66 @@ class AppSettingsStore {
       await _storage.delete(key: _kShowChannelName);
     } else {
       await _storage.write(key: _kShowChannelName, value: 'false');
+    }
+  }
+
+  /// Whether a film or episode moves on to its sibling when it plays to the
+  /// end (VOD/series only; live never completes). Defaults to false, so only an
+  /// explicit `true` is written and an untouched install stops at the credits
+  /// as it always has.
+  ///
+  /// Read by `channel_list_screen._playMedia` and carried on
+  /// [PlaybackContext]; the player resolves the next title off the session it
+  /// was launched with, never the catalogue.
+  Future<bool> autoPlayNextVideo() async =>
+      (await _storage.read(key: _kAutoPlayNext)) == 'true';
+
+  Future<void> setAutoPlayNextVideo(bool value) async {
+    if (value) {
+      await _storage.write(key: _kAutoPlayNext, value: 'true');
+    } else {
+      await _storage.delete(key: _kAutoPlayNext);
+    }
+  }
+
+  /// How auto-advance treats a next title that was already played. A no-op
+  /// until [autoPlayNextVideo] is on; absent reads as
+  /// [NextVideoPlayedBehavior.resumeOrSkip]. The enum owns the encoding, so
+  /// this store carries an opaque string (same contract as
+  /// [rawVodCardOrientation]).
+  Future<NextVideoPlayedBehavior> nextVideoPlayedBehavior() async =>
+      NextVideoPlayedBehavior.parse(await _storage.read(key: _kNextVideoBehavior));
+
+  Future<void> setNextVideoPlayedBehavior(NextVideoPlayedBehavior value) async {
+    // The default is absence, so writing it back would make the keychain look
+    // like a choice the user made.
+    if (value == NextVideoPlayedBehavior.resumeOrSkip) {
+      await _storage.delete(key: _kNextVideoBehavior);
+    } else {
+      await _storage.write(key: _kNextVideoBehavior, value: value.storageValue);
+    }
+  }
+
+  /// How far one Left/Right press, or one `-N`/`+N` tap, moves a VOD position
+  /// (VOD/series only — live has no scrubber on any surface).
+  ///
+  /// Absent, or a value this build does not recognise, reads as
+  /// [kDefaultSeekStepSeconds] (10 s — the step this preference replaced), so an
+  /// install that never opens Settings seeks exactly as it always has. The
+  /// allowed ladder lives in `player/seek_step.dart`; this store keeps only the
+  /// number, and normalising on read means a hand-edited keychain cannot put a
+  /// nonsense step on screen.
+  Future<int> seekStepSeconds() async =>
+      normalizeSeekStep(int.tryParse(await _storage.read(key: _kSeekStepSeconds) ?? ''));
+
+  Future<void> setSeekStepSeconds(int value) async {
+    final step = normalizeSeekStep(value);
+    // Store the default as absence, the same contract as every other toggle
+    // here: a written key should mean a choice the user actually made.
+    if (step == kDefaultSeekStepSeconds) {
+      await _storage.delete(key: _kSeekStepSeconds);
+    } else {
+      await _storage.write(key: _kSeekStepSeconds, value: '$step');
     }
   }
 }

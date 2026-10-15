@@ -1343,6 +1343,43 @@ void main() {
         expect(await db.readWatchedIds('src', ContentKind.movie), {'m1'});
         await db.close();
       });
+
+      test('an explicit completion marks watched regardless of position',
+          () async {
+        final db = await AppDatabase.openAt(dbPath());
+        // A clean server-side EOF (`completed: true`) is the ground truth that
+        // the title played out, even when the last polled position never
+        // reached the 95% threshold — a native closed-relay or a final tick
+        // well under it must still finish the film.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'eof',
+          position: const Duration(minutes: 10),
+          duration: const Duration(minutes: 90),
+          completed: true,
+        );
+        expect(await db.readWatchedIds('src', ContentKind.movie), {'eof'});
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'eof'),
+          isNull,
+        );
+        // It reaches past an unknown duration too: EOF is the fact, so a
+        // zero-length report can't block the mark the way the fraction can.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'eof-nolen',
+          position: Duration.zero,
+          duration: Duration.zero,
+          completed: true,
+        );
+        expect(
+          await db.readWatchedIds('src', ContentKind.movie),
+          {'eof', 'eof-nolen'},
+        );
+        await db.close();
+      });
     });
 
     test('v10 database gains the playback_positions table on upgrade', () async {

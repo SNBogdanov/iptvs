@@ -990,10 +990,12 @@ await _createFavoritesOutbox(db);
     String itemId, {
     required Duration position,
     required Duration duration,
+    bool completed = false,
   }) async {
-    if (duration > Duration.zero &&
-        position.inMilliseconds >=
-            duration.inMilliseconds * kFinishedFraction) {
+    if (completed ||
+        (duration > Duration.zero &&
+            position.inMilliseconds >=
+                duration.inMilliseconds * kFinishedFraction)) {
       await markWatched(sourceId, kind, itemId);
       await clearPlaybackPosition(sourceId, kind, itemId);
       return;
