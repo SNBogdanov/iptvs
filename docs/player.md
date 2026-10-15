@@ -1550,9 +1550,10 @@ synchronously from a notifier (`showPlayerClock` / `showPlaybackTimes` / `showCh
 than through a listener: the only writer is Settings, and a player route cannot reach Settings, so
 a listener could never fire. The clock and times arrive on the `open`/`setControlState` payload
 natively (`showClock` / `showPlaybackTimes`) or from the notifier in the shared Flutter overlay,
-and are constant for the life of the session. The channel name is a shared-overlay element for now
-(no native HUD exists on Windows GDI/HDR, Android Compose, iOS or the Linux Lua OSD for it to
-persist on), so it is not carried on the native payloads.
+and are constant for the life of the session. The channel name rides the same `setControlState`
+push to the **Windows GDI overlay** (`showChannelName`), which draws it as the top-left HUD pill;
+Android Compose, iOS and the Linux Lua OSD still have no persistent-HUD name element to put it on,
+so there it remains a shared-overlay-only (and top-bar) affair.
 
 **They gate two separable things.** The clock is one badge in the top bar; the playback readout is
 the two texts either side of the VOD scrubber; the channel name is the top-bar title. `showPlaybackTimes`
@@ -1571,9 +1572,13 @@ corner still reaches the tap-to-reveal layer. The name pill leads with the live 
 channel row prints — `PlayerScreen` feeds it as `PlayerVideoSurface.channelNumber` from the zap
 session's settled entry, so a zap re-renders the running number too; VOD/catch-up carries no number
 and stays name-only). That is what keeps them readable *during playback*
-instead of only while the mouse is moving. It is scoped to the embedded/shared surface today;
-applying the same HUD to the native surfaces (Windows GDI/HDR, Android Compose, iOS, the Linux Lua
-OSD — which currently apply the preferences to their chrome badge/readout only) is outstanding.
+instead of only while the mouse is moving. **Windows' GDI overlay now draws the same three-element
+HUD** (`NativeHudShown` / `NativeHudClockRect` / `NativeHudTimeRect` / `NativeHudNameRect`): the
+clock and VOD readout as before, plus the top-left name pill from `showChannelName` +
+`NativeControlState.title` (the channel name on live, the title on VOD/catch-up), left-aligned with
+the name's band capped at 60% of the width so it can never reach the clock. Android Compose, iOS and
+the Linux Lua OSD still apply the preferences to their chrome badge/readout only, so their
+persistent HUDs (and the name element in particular) remain outstanding.
 Pinned by `test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
 
 ### The VOD seek step and the selectable progress bar

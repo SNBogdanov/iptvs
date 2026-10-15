@@ -3337,6 +3337,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     // keeps the two paths in agreement about the same two names.
     'showClock': showPlayerClock.value,
     'showPlaybackTimes': showPlaybackTimes.value,
+    // The Windows GDI overlay's persistent HUD draws the top-left name/title
+    // pill from this, exactly as the shared Flutter overlay's `_persistentHud`
+    // gates it. Android/iOS ignore it (they have no such HUD element).
+    'showChannelName': showChannelName.value,
     // Rides with them for the same reason: the Windows GDI overlay labels its
     // `-N`/`+N` transport buttons (and steps them) from this, and it has no
     // open-time payload to read. Sent on `open` too, so a surface seeded once

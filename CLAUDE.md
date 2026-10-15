@@ -349,7 +349,12 @@ dragging a name sort or reading as ancient is worse than admitting the provider 
     unparseable string, or any platform without a resolved picture keeps the raw value.
     Day-first vs month-first slash dates is genuinely ambiguous, and `releaseSortKey` picks **day-first
     for every row**, never per row — a convention misread uniformly still leaves relative order intact,
-   while guessing per row does not. A row with only a year takes part in both directions. **Ties keep
+   while guessing per row does not. A row with only a year takes part in both directions. **Opening a
+   card must not move it**: `_openMedia` keeps the catalogue row's `year` on the in-grid copy
+   (`_sameSortPosition`, `channel_list_screen.dart`) because a provider's `get_vod_info` can report a
+   different `releasedate` than the `get_vod_streams` row — replacing the row would re-sort the
+   newest-first grid and the card would vanish from under the user (it returns on restart, the cache
+   still holding the catalogue row). **Ties keep
    their incoming order** (`favorites_order.dart`'s explicit-last rule, same reason: `List.sort` is not
    stable), which is why Favorites is `orderedByCatalog`-grouped *first* and sorted after — and the
    visible-list memo keys on `sort`, since the snapshot itself is never reloaded. Pinned by
@@ -1185,9 +1190,11 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   are readable *during playback* rather than only while the mouse moves. The name pill leads with the
   live channel's **number** when the provider supplied one (`5 · Channel One`), fed from the zap
   session's settled entry so a zap re-renders the running number too. The clock/times preference reaches every
-  surface (`showClock`/`showPlaybackTimes` on the native payloads); the channel name is a shared-overlay element for now
-  (no native HUD exists for it to persist on); the always-on HUD is implemented
-  on the embedded/shared overlay, with the native surfaces applying the chromium preferences to their chrome only so far.
+  surface (`showClock`/`showPlaybackTimes` on the native payloads); the channel name now reaches the **Windows
+  GDI overlay** too (`showChannelName`, drawn as the top-left HUD pill — the channel name on live, the title on
+  VOD/catch-up), while Android Compose, iOS and the Linux Lua OSD still have no persistent-HUD name element.
+  The always-on HUD is implemented on the embedded/shared overlay and (now including the name) the Windows GDI
+  overlay; the other native surfaces apply the chromium preferences to their chrome only so far.
   **The dated clock badge is the machine's own regional format on Windows** — the OS long date
   (formatted by NLS from `LOCALE_SLONGDATE`, so the inflected month is right) + short time, sourced
   once over `iptvs/clock` (`clock_format.dart`) so the native GDI overlay and the shared Flutter

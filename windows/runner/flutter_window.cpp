@@ -332,6 +332,13 @@ struct NativeControlState {
   // VOD only: hides the position/duration text either side of the scrubber and
   // leaves the scrubber itself alone, so seeking still works without it.
   bool show_playback_times = true;
+  // Device-wide "Channel name in the player" (Settings): the top-left HUD pill
+  // that stays on screen while the chrome is hidden — the channel name on live,
+  // the title on VOD/catch-up. Mirrors `showChannelName` in
+  // lib/player/player_chrome_prefs.dart, and matches the shared Flutter
+  // overlay's `_persistentHud` name element. Default true so an older Dart build
+  // that predates the key keeps the pill the shared overlay already drew.
+  bool show_channel_name = true;
   // Device-wide VOD seek step (Settings → "VOD seek step"), in seconds. Labels
   // and steps the `-N`/`+N` transport buttons; the Left/Right-on-scrubber seek
   // is resolved Dart-side from the same value. Defaults to 10 (the hardcoded
@@ -2979,7 +2986,9 @@ bool NativeHudShown() {
   if (g_native_controls_chrome_visible) return false;
   return g_native_control_state.show_clock ||
          (!g_native_control_state.is_live &&
-          g_native_control_state.show_playback_times);
+          g_native_control_state.show_playback_times) ||
+         (g_native_control_state.show_channel_name &&
+          !TrimmedText(g_native_control_state.title).empty());
 }
 
 // The click-through bands the HUD is clipped to (see UpdateNativeControlsRegion).
@@ -2996,6 +3005,18 @@ RECT NativeHudClockRect(const RECT &rect) {
 RECT NativeHudTimeRect(const RECT &rect) {
   return RectFrom(rect.right - NativeScale(360), rect.bottom - NativeScale(56),
                   rect.right, rect.bottom);
+}
+
+// The top-left name/title pill band (see the HUD paint): the channel name on
+// live, the title on VOD/catch-up — the mirror of the clock's corner, exactly
+// where the shared Flutter overlay's `_persistentHud` puts it. Capped at 60% of
+// the width (the same cap `_persistentHud` uses) so a long title can never reach
+// the clock on the other end of the same edge; the pill inside is left-aligned
+// and ellipsizes within the band.
+RECT NativeHudNameRect(const RECT &rect) {
+  const int cap = RectWidth(rect) * 6 / 10;
+  return RectFrom(rect.left, rect.top, rect.left + cap,
+                  rect.top + NativeScale(56));
 }
 
 void PaintNativeControlBar(HWND hwnd, int control_kind) {
@@ -3048,11 +3069,23 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
          g_native_control_state.show_playback_times)
             ? NativeHudTimeRect(rect)
             : RectFrom(0, 0, 0, 0);
+    // The top-left name/title pill: live's channel name or VOD's title, the
+    // counterpart of the clock (see NativeHudNameRect).
+    const std::wstring hud_name_text =
+        TrimmedText(g_native_control_state.title);
+    const RECT hud_name =
+        (hud && g_native_control_state.show_channel_name &&
+         !hud_name_text.empty())
+            ? NativeHudNameRect(rect)
+            : RectFrom(0, 0, 0, 0);
     if (RectWidth(hud_clock) > 0 && RectHeight(hud_clock) > 0) {
       current_rects.push_back(hud_clock);
     }
     if (RectWidth(hud_time) > 0 && RectHeight(hud_time) > 0) {
       current_rects.push_back(hud_time);
+    }
+    if (RectWidth(hud_name) > 0 && RectHeight(hud_name) > 0) {
+      current_rects.push_back(hud_name);
     }
     std::vector<RECT> dirty_rects = current_rects;
     dirty_rects.insert(dirty_rects.end(), buffer.prev_rects.begin(),
@@ -3080,6 +3113,30 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
       DrawBadge(paint_hdc, hud_time.right - NativeScale(12),
                 hud_time.bottom - NativeScale(23), label, hud_bg, hud_fg);
     }
+    if (RectWidth(hud_name) > 0 && RectHeight(hud_name) > 0) {
+      // Left-aligned, unlike DrawBadge (which is right-anchored): the pill's
+      // left edge is a fixed inset and its width follows the text, capped at the
+      // band so a long title ellipsizes instead of running under the clock.
+      HFONT name_font = UiFont(11, FW_BOLD);
+      HFONT old_font = static_cast<HFONT>(SelectObject(paint_hdc, name_font));
+      SIZE text_size{};
+      GetTextExtentPoint32(paint_hdc, hud_name_text.c_str(),
+                           static_cast<int>(hud_name_text.size()), &text_size);
+      SelectObject(paint_hdc, old_font);
+      int pill_width = text_size.cx + NativeScale(18);
+      const int band_width = RectWidth(hud_name);
+      if (pill_width > band_width) pill_width = band_width;
+      const int pill_left = hud_name.left + NativeScale(12);
+      const int pill_center_y = hud_name.top + NativeScale(23);
+      const RECT pill =
+          RectFrom(pill_left, pill_center_y - NativeScale(11),
+                   pill_left + pill_width, pill_center_y + NativeScale(11));
+      FillRoundRectAA(paint_hdc, pill, NativeScale(7), hud_bg);
+      DrawTextWithFont(paint_hdc, hud_name_text, pill,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                       name_font, hud_fg);
+      DeleteObject(name_font);
+    }
     // GDI leaves the alpha byte 0 on everything it draws, and the compositor
     // treats alpha 0 as transparent — so the badge text needs the same
     // normalization the chrome bars get, or only the rounded background shows
@@ -3091,6 +3148,10 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     }
     if (RectWidth(hud_time) > 0 && RectHeight(hud_time) > 0) {
       NormalizeNativeControlBitmapAlpha(pixels, width, height, hud_time,
+                                        RGB(0, 0, 0), 0);
+    }
+    if (RectWidth(hud_name) > 0 && RectHeight(hud_name) > 0) {
+      NormalizeNativeControlBitmapAlpha(pixels, width, height, hud_name,
                                         RGB(0, 0, 0), 0);
     }
     CompositeOverlayBands(hwnd, hdc, paint_hdc, width, height, dirty_rects);
@@ -5120,6 +5181,14 @@ void FlutterWindow::UpdateNativeControlsRegion() {
         CombineRgn(banner_region, banner_region, time_region, RGN_OR);
         DeleteObject(time_region);
       }
+      if (g_native_control_state.show_channel_name &&
+          !TrimmedText(g_native_control_state.title).empty()) {
+        const RECT name = NativeHudNameRect(rect);
+        HRGN name_region =
+            CreateRectRgn(name.left, name.top, name.right, name.bottom);
+        CombineRgn(banner_region, banner_region, name_region, RGN_OR);
+        DeleteObject(name_region);
+      }
     }
     SetWindowRgn(native_controls_overlay_, banner_region, FALSE);
     native_controls_region_dirty_ = false;
@@ -5409,6 +5478,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableBoolArg(args, "showClock", g_native_control_state.show_clock);
   g_native_control_state.show_playback_times = EncodableBoolArg(
       args, "showPlaybackTimes", g_native_control_state.show_playback_times);
+  g_native_control_state.show_channel_name = EncodableBoolArg(
+      args, "showChannelName", g_native_control_state.show_channel_name);
   // Absent key keeps the previous value, so the default-10 init is what an
   // older Dart build renders. The step is only ever read as a label/seek amount,
   // so clamping to a sane floor guards a zero/negative a hand-edited payload

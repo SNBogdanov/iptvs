@@ -2984,13 +2984,44 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       );
       final detailed = await widget.repo.mediaDetails(item);
       if (!mounted) return;
-      _replaceMediaItem(detailed);
+      _replaceMediaItem(_sameSortPosition(detailed, item));
       _showMediaDetails(detailed);
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(content: Text('Could not open: ${redactText('$e')}')),
       );
     }
+  }
+
+  /// The details payload, with the **catalogue row's** release year kept.
+  ///
+  /// The movie/series grid sorts newest-first by release year, and a provider's
+  /// `get_vod_info` can report a different `releasedate` than the
+  /// `get_vod_streams` row the card came from. Replacing the grid row with the
+  /// details payload therefore re-sorts the card to another page and it vanishes
+  /// from under the user — while the change is in-memory only (the cache still
+  /// holds the catalogue row), so a restart puts the card back. Opening a card
+  /// must not move it: keep the catalogue's year in the grid and let the details
+  /// sheet show the detailed one.
+  MediaItem _sameSortPosition(MediaItem detailed, MediaItem catalogue) {
+    if (detailed.year == catalogue.year) return detailed;
+    return MediaItem(
+      id: detailed.id,
+      title: detailed.title,
+      kind: detailed.kind,
+      parentId: detailed.parentId,
+      categoryId: detailed.categoryId,
+      poster: detailed.poster,
+      backdrop: detailed.backdrop,
+      description: detailed.description,
+      year: catalogue.year,
+      rating: detailed.rating,
+      durationSeconds: detailed.durationSeconds,
+      seasonNumber: detailed.seasonNumber,
+      episodeNumber: detailed.episodeNumber,
+      providerId: detailed.providerId,
+      extra: detailed.extra,
+    );
   }
 
   /// The sibling list a movie steps through, or null when there is none.
