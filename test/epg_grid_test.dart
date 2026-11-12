@@ -29,6 +29,8 @@ import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
 import 'package:iptvs/widgets/focusable_card.dart';
 
+import 'support/temp_dir.dart';
+
 void main() {
   late Directory tempDir;
   late AppDatabase db;
@@ -40,7 +42,7 @@ void main() {
 
   tearDown(() async {
     await db.close();
-    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    await deleteTestTempDir(tempDir);
   });
 
   // Anchor everything to a single "now" so the seeded programmes are placed

@@ -7,6 +7,7 @@ import 'package:iptvs/sources/source.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'support/historical_database_fixtures.dart';
+import 'support/temp_dir.dart';
 
 /// A schema signature covering table columns, indexes (name-keyed, ignoring
 /// creation order), and foreign keys — used to compare a migrated database
@@ -51,8 +52,8 @@ void main() {
     tempDir = Directory.systemTemp.createTempSync('iptvs_released_schema');
   });
 
-  tearDown(() {
-    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+  tearDown(() async {
+    await deleteTestTempDir(tempDir);
   });
 
   for (final version in releasedSchemaVersions) {

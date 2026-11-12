@@ -1,4 +1,4 @@
-# Implementation Plan
+﻿# Implementation Plan
 
 > Temporary execution ledger for the technical-audit remediation programme.
 >
@@ -1162,3 +1162,5 @@ This document can be deleted when all of the following are true:
 - [ ] Device-test evidence is retained outside this temporary ledger.
 - [ ] No active PR depends on context that exists only in this file.
 - [ ] The temporary implementation-plan link is removed from `CLAUDE.md`.
+| 2026-10-14 | VOD details sheet: runtime + trimmed description; source runtime mapping (Xtream/Stalker) | Implemented, rebuild verified | Runtime beside date in MediaDetailsSheet; description trimmed and only shown when non-empty. Xtream/Stalker mediaDetails copy runtime from detail payload. Tests: Xtream movie runtime + Stalker runtime + new sheet test. analyze unchanged. Rebuild FRESH OK, � and 1:45:30 in app.so. |
+| 2026-10-14 | VOD details sheet: runtime + trimmed description; source runtime mapping (Xtream/Stalker) | Implemented, rebuild verified | Runtime beside date in MediaDetailsSheet (OS short-date preserved). Description trimmed and only shown when non-empty. Xtream/Stalker mediaDetails copy runtime from detail payload. Tests extended (Xtream movie runtime, Stalker runtime, sheet widget test). analyze = 4 pre-existing issues unchanged. Rebuild FRESH OK (content-cached AOT); '�' present at byte 52499 and 'Runtime' token at 2743204 in app.so. |

@@ -8,22 +8,35 @@ import 'package:media_kit/media_kit.dart';
 /// the fullscreen player and the live preview player so both get the same
 /// resilience.
 ///
-/// `reconnect_at_eof` must stay out of `stream-lavf-o`: an HLS live stream's
-/// manifest is a *finite* HTTP resource, and with that flag ffmpeg (verified on
-/// FFmpeg 8 / mpv 0.41) treats its EOF as an error and reconnects forever, so
-/// the demuxer probe never completes and the stream never opens at all. A clean
-/// server-side end-of-stream on an infinite TS instead surfaces as mpv
-/// `eof-reached`, which media_kit maps to `completed=true` *and*
-/// `buffering=false` — so the buffering-gated stall watchdog can't see it. The
-/// embedded/Windows path therefore treats a *live* `completed` as a drop and
+/// This base map deliberately has **no** `reconnect_at_eof`, because one value
+/// cannot serve both live shapes:
+///
+/// - An HLS live stream's manifest is a *finite* HTTP resource, and with
+///   `reconnect_at_eof` ffmpeg (verified on FFmpeg 8 / mpv 0.41) treats its EOF
+///   as an error and reconnects forever, so the demuxer probe never completes
+///   and the stream never opens at all.
+/// - A raw MPEG-TS provider that closes the response at a chunk boundary looks
+///   like a clean server-side end-of-stream. That surfaces as mpv `eof-reached`
+///   (media_kit `completed=true` *and* `buffering=false`), which the
+///   buffering-gated stall watchdog can't see. Without the flag every such chunk
+///   costs a full re-open of the demuxer/decoder; with it ffmpeg reconnects
+///   inside the same demuxer and playback is seamless.
+///
+/// Use [liveMpvOptionsForUrl] (or [liveStreamLavfOForUrl] for surfaces that set
+/// options at open time, notably Android's `MpvController`) so the flag is added
+/// for non-HLS URLs only. Every reopen path re-applies the URL-derived value:
+/// a zap can move between an HLS channel and a TS one on the same player.
+///
+/// If the flag is absent the clean-EOF drop is still handled above the engine:
+/// the embedded/Windows path treats a *live* `completed` as a drop and
 /// reconnects (the `stream.completed` listener in `player_screen.dart`,
-/// `shouldReconnectOnCompleted`); the Linux-native path gets the equivalent
+/// `shouldReconnectOnCompleted`), and the Linux-native path gets the equivalent
 /// `end-file` eof/error drop over IPC (`LinuxNativePlaybackSignal.dropped`).
 const Map<String, String> kLiveMpvOptions = {
   'cache-on-disk': 'no',
   'demuxer-max-back-bytes': '0',
   'network-timeout': '15',
-  'stream-lavf-o': 'reconnect=1,reconnect_streamed=1,reconnect_delay_max=5',
+  'stream-lavf-o': kLiveStreamLavfO,
   'demuxer-lavf-analyzeduration': '3',
   'demuxer-lavf-probesize': '10000000',
   'demuxer-lavf-o':
@@ -31,6 +44,36 @@ const Map<String, String> kLiveMpvOptions = {
       'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto],'
       'analyzeduration=3000000,probesize=10000000',
 };
+
+/// The `stream-lavf-o` value shared by every live shape: ffmpeg reconnects a
+/// dropped connection instead of surfacing it as a playback error.
+const String kLiveStreamLavfO =
+    'reconnect=1,reconnect_streamed=1,reconnect_delay_max=5';
+
+/// [kLiveStreamLavfO] plus `reconnect_at_eof=1`, for live streams that are not
+/// HLS (raw MPEG-TS and friends), whose provider closes and reopens the
+/// response. Never use this for an HLS URL — see [kLiveMpvOptions].
+const String kLiveStreamLavfOAtEof = '$kLiveStreamLavfO,reconnect_at_eof=1';
+
+/// True when [url] names an HLS playlist rather than a continuous stream.
+///
+/// Mirrors `looksLikeHlsManifest` in `player_screen.dart`; the extension is the
+/// only signal available before ffmpeg probes the body, and probing it first
+/// would itself be the stall this distinction exists to avoid.
+bool looksLikeHlsPlaylistUrl(String url) => url.toLowerCase().contains('m3u8');
+
+/// The `stream-lavf-o` value for a live [url]: reconnects at EOF only for the
+/// continuous (non-HLS) shape, where an EOF is a chunk boundary rather than the
+/// manifest ending.
+String liveStreamLavfOForUrl(String url) =>
+    looksLikeHlsPlaylistUrl(url) ? kLiveStreamLavfO : kLiveStreamLavfOAtEof;
+
+/// [kLiveMpvOptions] with `stream-lavf-o` resolved for [url]. HLS keeps the
+/// base map; a continuous live stream gets [kLiveStreamLavfOAtEof].
+Map<String, String> liveMpvOptionsForUrl(String url) {
+  if (looksLikeHlsPlaylistUrl(url)) return kLiveMpvOptions;
+  return {...kLiveMpvOptions, 'stream-lavf-o': liveStreamLavfOForUrl(url)};
+}
 
 /// mpv log filtering: keep mpv's own messages at their configured level, and
 /// drop FFmpeg's to `error`.

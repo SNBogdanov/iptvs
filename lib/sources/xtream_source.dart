@@ -608,6 +608,13 @@ class XtreamSource
       year:
           _firstString(info, ['releasedate', 'release_date', 'year']) ??
           item.year,
+      // `get_vod_info`'s `info` carries the runtime (`duration`/`duration_secs`)
+      // while the catalogue row usually does not — so without this the opened
+      // item was *poorer* than the card beside it whenever the panel had a
+      // duration at all. Same keys as the list mapper, through the same helper.
+      durationSeconds: _durationFrom(
+        info is Map<String, dynamic> ? info : Map<String, dynamic>.from(info),
+      ) ?? item.durationSeconds,
       extra: {...item.extra, 'details': details},
     );
   }

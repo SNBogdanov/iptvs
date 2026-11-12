@@ -181,12 +181,15 @@ class LivePreviewController extends ChangeNotifier {
   // setProperty). On a weak TV box the default `auto-safe` silently drops to
   // software decode, playing 4K HEVC in slow-motion at ~100% CPU. Android-only;
   // every other platform follows `hwdec_policy.dart` (desktop `auto-safe`).
-  VideoController get controller => _controller ??= VideoController(
-    player,
-    configuration: Platform.isAndroid
-        ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
-        : VideoControllerConfiguration(hwdec: embeddedHwdec()),
-  );
+  VideoController get controller => _ensureEmbeddedController();
+
+  VideoController _ensureEmbeddedController() =>
+      _controller ??= VideoController(
+        player,
+        configuration: Platform.isAndroid
+            ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
+            : VideoControllerConfiguration(hwdec: embeddedHwdec()),
+      );
 
   StreamSubscription<VideoParams>? _hwdecProbe;
   bool _loggedHwdec = false;
@@ -508,7 +511,6 @@ class LivePreviewController extends ChangeNotifier {
   Future<void> get pendingStart => _pendingStart ?? Future<void>.value();
   Future<void>? _pendingStart;
 
-
   /// Buffering preset of the source that owns the previewing channel.
   ///
   /// Set per [start] rather than at construction because a cross-source
@@ -612,6 +614,13 @@ class LivePreviewController extends ChangeNotifier {
         nativeActive = false;
         unawaited(_stopNative());
       }
+      // Build the embedded VideoController before the first open. Its
+      // constructor is what sets mpv's `vo`/`hwdec`; the panel only builds
+      // [PreviewVideo] after `stream` is set (i.e. after this open), so a cold
+      // first preview used to open on a player with no video output and stay
+      // blank until the next channel switch created the controller. This is
+      // the same ordering PlayerScreen uses via `_ensureEmbeddedController`.
+      _ensureEmbeddedController();
       // iOS: claim the audio session before libmpv brings its output up, or the
       // preview plays silently (`iosManageAudioSession: false` — mpv no longer
       // activates the session itself). Only the embedded path needs it; the
@@ -623,6 +632,26 @@ class LivePreviewController extends ChangeNotifier {
       final embeddedPlayer = player;
       final optionsApplied = _mpvOptionsApplied;
       if (optionsApplied != null) await optionsApplied;
+      if (_disposed || requestId != _requestId) return;
+      // `stream-lavf-o` depends on the URL, not the surface: a raw TS channel
+      // needs `reconnect_at_eof` so a provider-closed chunk doesn't surface as
+      // a completed stream, while an HLS manifest must not get it (it would
+      // never finish probing). Re-applied per open because a preview can move
+      // between the two shapes on the same player.
+      final platform = embeddedPlayer.platform;
+      if (platform is NativePlayer) {
+        try {
+          await platform.setProperty(
+            'stream-lavf-o',
+            liveStreamLavfOForUrl(resolved.url),
+          );
+        } catch (error) {
+          DiagnosticsLog.instance.add(
+            'player',
+            'preview mpv stream-lavf-o failed: ${redactText('$error')}',
+          );
+        }
+      }
       if (_disposed || requestId != _requestId) return;
       await embeddedPlayer.open(
         Media(resolved.url, httpHeaders: resolved.headers),
@@ -960,12 +989,12 @@ class _NativePreviewView extends StatelessWidget {
     ),
     onCreatePlatformView: (params) =>
         PlatformViewsService.initExpensiveAndroidView(
-          id: params.id,
-          viewType: _viewType,
-          layoutDirection: TextDirection.ltr,
-          creationParamsCodec: const StandardMessageCodec(),
-          onFocus: () => params.onFocusChanged(true),
-        )
+            id: params.id,
+            viewType: _viewType,
+            layoutDirection: TextDirection.ltr,
+            creationParamsCodec: const StandardMessageCodec(),
+            onFocus: () => params.onFocusChanged(true),
+          )
           ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
           ..create(),
   );

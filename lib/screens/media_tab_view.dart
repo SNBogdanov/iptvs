@@ -213,9 +213,17 @@ class MediaTabView extends StatelessWidget {
   /// wire this through from the caller alongside the category selector.
   final bool categoryFilterActive;
 
+  final bool hideWatched;
+  final VoidCallback? onShowWatched;
+
   /// Id of the last-played item in this kind, autofocused on return when still
   /// visible (else the first item is).
   final String? lastPlayedId;
+
+  final String? jumpTargetId;
+  final int? jumpTargetIndex;
+  final FocusNode? jumpFocusNode;
+  final ValueChanged<int>? onJumpRevealed;
 
   final ScrollController scrollController;
   final FocusNode? firstFocusNode;
@@ -279,7 +287,13 @@ class MediaTabView extends StatelessWidget {
     required this.error,
     required this.showingSearch,
     this.categoryFilterActive = false,
+    this.hideWatched = false,
+    this.onShowWatched,
     required this.lastPlayedId,
+    this.jumpTargetId,
+    this.jumpTargetIndex,
+    this.jumpFocusNode,
+    this.onJumpRevealed,
     required this.scrollController,
     required this.firstFocusNode,
     this.loadMoreFocusNode,
@@ -366,7 +380,7 @@ class MediaTabView extends StatelessWidget {
       DiagnosticsLog.instance.add(
         'paging',
         'list available=${box.toStringAsFixed(1)} rowExtent=$rowExtent rows=$rows '
-        'cells=$cells',
+            'cells=$cells',
       );
       return cells;
     }
@@ -380,7 +394,7 @@ class MediaTabView extends StatelessWidget {
       DiagnosticsLog.instance.add(
         'paging',
         'grid degenerate available=${box.toStringAsFixed(1)} '
-        'tileWidth=${tileWidth.toStringAsFixed(1)} aspect=${aspect.toStringAsFixed(3)}',
+            'tileWidth=${tileWidth.toStringAsFixed(1)} aspect=${aspect.toStringAsFixed(3)}',
       );
       return 1;
     }
@@ -388,18 +402,18 @@ class MediaTabView extends StatelessWidget {
     final usable = box - grid.padding.top;
     final rows =
         ((usable - cellHeight / 2) / (cellHeight + grid.mainAxisSpacing))
-                .floor() +
-            1;
+            .floor() +
+        1;
     final perScreen = grid.columns * (rows < 1 ? 1 : rows);
     final cells = perScreen < 1 ? 1 : perScreen;
     DiagnosticsLog.instance.add(
       'paging',
       'grid available=${box.toStringAsFixed(1)} '
-      'bodyW=${constraints.maxWidth.toStringAsFixed(1)} cols=${grid.columns} '
-      'tileW=${tileWidth.toStringAsFixed(1)} aspect=${aspect.toStringAsFixed(3)} '
-      'cellH=${cellHeight.toStringAsFixed(1)} gap=${grid.mainAxisSpacing} '
-      'padTop=${grid.padding.top} usable=${usable.toStringAsFixed(1)} '
-      'rows=$rows cells=$cells',
+          'bodyW=${constraints.maxWidth.toStringAsFixed(1)} cols=${grid.columns} '
+          'tileW=${tileWidth.toStringAsFixed(1)} aspect=${aspect.toStringAsFixed(3)} '
+          'cellH=${cellHeight.toStringAsFixed(1)} gap=${grid.mainAxisSpacing} '
+          'padTop=${grid.padding.top} usable=${usable.toStringAsFixed(1)} '
+          'rows=$rows cells=$cells',
     );
     return cells;
   }
@@ -423,7 +437,7 @@ class MediaTabView extends StatelessWidget {
               onChange: (size) => DiagnosticsLog.instance.add(
                 'paging',
                 'rail actual=${size.height.toStringAsFixed(1)} '
-                'estimated=${_ContinueWatchingRail.height(context).toStringAsFixed(1)}',
+                    'estimated=${_ContinueWatchingRail.height(context).toStringAsFixed(1)}',
               ),
               child: _ContinueWatchingRail(
                 entries: continueWatching,
@@ -488,9 +502,16 @@ class MediaTabView extends StatelessWidget {
         // `p` shows `p * screen - 1` items and the card is cell `p * screen` —
         // the bottom-right corner.
         final pageLimit = displayPages * screen - 1;
+        final targetIndex = jumpTargetIndex ?? -1;
+        final hasJumpTarget =
+            targetIndex >= 0 &&
+            targetIndex < visible.length &&
+            jumpTargetId != null &&
+            visible[targetIndex].id == jumpTargetId;
+        final jumpLimit = hasJumpTarget ? targetIndex + 1 : 0;
         // Never shrink below the floor within this dataset (a resize cannot
         // unmount an already-shown card; see minShown).
-        final shownLimit = pageLimit > minShown ? pageLimit : minShown;
+        final shownLimit = math.max(math.max(pageLimit, minShown), jumpLimit);
         final shown = visible.length <= shownLimit
             ? visible
             : visible.sublist(0, shownLimit < 0 ? 0 : shownLimit);
@@ -514,8 +535,7 @@ class MediaTabView extends StatelessWidget {
         );
         final hasMoreToShow =
             shown.length < visible.length || (snapshot?.hasMore == true);
-        final showLoadMore =
-            !showingSearch && (loadingMore || hasMoreToShow);
+        final showLoadMore = !showingSearch && (loadingMore || hasMoreToShow);
         final hasLastVisible =
             lastPlayedId != null &&
             shown.any((media) => media.id == lastPlayedId);
@@ -533,46 +553,63 @@ class MediaTabView extends StatelessWidget {
         final railTakesFocus = showRail && !hasLastVisible;
         // Exactly one autofocus candidate per tab, or the two widgets race on
         // first frame and the winner depends on tree order.
-        FocusNode? focusNodeFor(int i) => hasLastVisible
-            ? (shown[i].id == lastPlayedId ? firstFocusNode : null)
-            : (i == 0 && !railTakesFocus ? firstFocusNode : null);
+        FocusNode? focusNodeFor(int i) {
+          if (hasJumpTarget && i == targetIndex && jumpFocusNode != null) {
+            return jumpFocusNode;
+          }
+          return hasLastVisible
+              ? (shown[i].id == lastPlayedId ? firstFocusNode : null)
+              : (i == 0 && !railTakesFocus ? firstFocusNode : null);
+        }
+
         bool autofocusFor(int i) => hasLastVisible
             ? shown[i].id == lastPlayedId
             : (i == 0 && !railTakesFocus);
         final railSliver = railSliverFor(autofocusFirst: railTakesFocus);
         if (!useGrid) {
-          return CustomScrollView(
+          return _MediaJumpTargetScroll(
+            targetId: hasJumpTarget ? jumpTargetId : null,
+            focusNode: hasJumpTarget ? jumpFocusNode : null,
+            targetOffset: hasJumpTarget
+                ? railHeight + 4 + targetIndex * 108
+                : null,
+            onRevealed: onJumpRevealed == null
+                ? null
+                : () => onJumpRevealed!(screen),
             controller: scrollController,
-            scrollCacheExtent: const ScrollCacheExtent.pixels(800),
-            slivers: [
-              ?railSliver,
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-                sliver: SliverList.builder(
-                  itemCount: shown.length + (showLoadMore ? 1 : 0),
-                  itemBuilder: (context, i) {
-                    if (i == shown.length) {
-                      return _MediaLoadMoreTile(
-                        canLoad: hasMoreToShow,
-                        loading: loadingMore,
-                        focusNode: loadMoreFocusNode,
-                        onPressed: onLoadMore,
+            child: CustomScrollView(
+              controller: scrollController,
+              scrollCacheExtent: const ScrollCacheExtent.pixels(800),
+              slivers: [
+                ?railSliver,
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+                  sliver: SliverList.builder(
+                    itemCount: shown.length + (showLoadMore ? 1 : 0),
+                    itemBuilder: (context, i) {
+                      if (i == shown.length) {
+                        return _MediaLoadMoreTile(
+                          canLoad: hasMoreToShow,
+                          loading: loadingMore,
+                          focusNode: loadMoreFocusNode,
+                          onPressed: onLoadMore,
+                        );
+                      }
+                      return _MediaListTile(
+                        item: shown[i],
+                        favorite: isFavorite(shown[i].id),
+                        progress: resumeProgress[shown[i].id],
+                        position: i + 1,
+                        total: visible.length,
+                        autofocus: autofocusFor(i),
+                        focusNode: focusNodeFor(i),
+                        onTap: () => onOpenMedia(shown[i]),
                       );
-                    }
-                    return _MediaListTile(
-                      item: shown[i],
-                      favorite: isFavorite(shown[i].id),
-                      progress: resumeProgress[shown[i].id],
-                      position: i + 1,
-                      total: visible.length,
-                      autofocus: autofocusFor(i),
-                      focusNode: focusNodeFor(i),
-                      onTap: () => onOpenMedia(shown[i]),
-                    );
-                  },
+                    },
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           );
         }
         final grid = MediaGridMetrics.forSize(windowSize);
@@ -586,62 +623,86 @@ class MediaTabView extends StatelessWidget {
         // same numbers in both shapes and the tile width below is safe to
         // compute once, outside the listener.
         final tileWidth = grid.tileWidth(constraints.maxWidth);
-        return CustomScrollView(
+        final jumpLayout = MediaGridMetrics.forSize(
+          windowSize,
+          orientation: vodCardOrientation.value,
+        );
+        final jumpRowExtent =
+            tileWidth /
+                jumpLayout.childAspectRatio(
+                  tileWidth: tileWidth,
+                  textBudget: textBudget,
+                ) +
+            jumpLayout.mainAxisSpacing;
+        return _MediaJumpTargetScroll(
+          targetId: hasJumpTarget ? jumpTargetId : null,
+          focusNode: hasJumpTarget ? jumpFocusNode : null,
+          targetOffset: hasJumpTarget
+              ? railHeight +
+                    jumpLayout.padding.top +
+                    (targetIndex ~/ jumpLayout.columns) * jumpRowExtent
+              : null,
+          onRevealed: onJumpRevealed == null
+              ? null
+              : () => onJumpRevealed!(screen),
           controller: scrollController,
-          scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
-          slivers: [
-            ?railSliver,
-            SliverPadding(
-              padding: grid.padding,
-              // Listens rather than reading the notifier's value once: the tile
-              // is toggled from the Settings route pushed *over* this one, so
-              // nothing here rebuilds on its own and the cards would keep the
-              // old shape until some unrelated rebuild came along. Scoped to the
-              // grid alone — the rail's thumbnails and the list layout below are
-              // not cards, and stay as they are (see docs/player.md).
-              sliver: ListenableBuilder(
-                listenable: vodCardOrientation,
-                builder: (context, _) {
-                  final shaped = MediaGridMetrics.forSize(
-                    windowSize,
-                    orientation: vodCardOrientation.value,
-                  );
-                  return SliverGrid(
-                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: shaped.columns,
-                      crossAxisSpacing: shaped.crossAxisSpacing,
-                      mainAxisSpacing: shaped.mainAxisSpacing,
-                      childAspectRatio: shaped.childAspectRatio(
-                        tileWidth: tileWidth,
-                        textBudget: textBudget,
+          child: CustomScrollView(
+            controller: scrollController,
+            scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
+            slivers: [
+              ?railSliver,
+              SliverPadding(
+                padding: grid.padding,
+                // Listens rather than reading the notifier's value once: the tile
+                // is toggled from the Settings route pushed *over* this one, so
+                // nothing here rebuilds on its own and the cards would keep the
+                // old shape until some unrelated rebuild came along. Scoped to the
+                // grid alone — the rail's thumbnails and the list layout below are
+                // not cards, and stay as they are (see docs/player.md).
+                sliver: ListenableBuilder(
+                  listenable: vodCardOrientation,
+                  builder: (context, _) {
+                    final shaped = MediaGridMetrics.forSize(
+                      windowSize,
+                      orientation: vodCardOrientation.value,
+                    );
+                    return SliverGrid(
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: shaped.columns,
+                        crossAxisSpacing: shaped.crossAxisSpacing,
+                        mainAxisSpacing: shaped.mainAxisSpacing,
+                        childAspectRatio: shaped.childAspectRatio(
+                          tileWidth: tileWidth,
+                          textBudget: textBudget,
+                        ),
                       ),
-                    ),
-                    delegate: SliverChildBuilderDelegate((context, i) {
-                      if (i == shown.length) {
-                        return _MediaLoadMoreCard(
-                          canLoad: hasMoreToShow,
-                          loading: loadingMore,
-                          focusNode: loadMoreFocusNode,
-                          onPressed: onLoadMore,
+                      delegate: SliverChildBuilderDelegate((context, i) {
+                        if (i == shown.length) {
+                          return _MediaLoadMoreCard(
+                            canLoad: hasMoreToShow,
+                            loading: loadingMore,
+                            focusNode: loadMoreFocusNode,
+                            onPressed: onLoadMore,
+                          );
+                        }
+                        return _MediaGridTile(
+                          item: shown[i],
+                          favorite: isFavorite(shown[i].id),
+                          progress: resumeProgress[shown[i].id],
+                          position: i + 1,
+                          total: visible.length,
+                          autofocus: autofocusFor(i),
+                          focusNode: focusNodeFor(i),
+                          textBudget: textBudget,
+                          onTap: () => onOpenMedia(shown[i]),
                         );
-                      }
-                      return _MediaGridTile(
-                        item: shown[i],
-                        favorite: isFavorite(shown[i].id),
-                        progress: resumeProgress[shown[i].id],
-                        position: i + 1,
-                        total: visible.length,
-                        autofocus: autofocusFor(i),
-                        focusNode: focusNodeFor(i),
-                        textBudget: textBudget,
-                        onTap: () => onOpenMedia(shown[i]),
-                      );
-                    }, childCount: shown.length + (showLoadMore ? 1 : 0)),
-                  );
-                },
+                      }, childCount: shown.length + (showLoadMore ? 1 : 0)),
+                    );
+                  },
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         );
       },
     );
@@ -658,13 +719,38 @@ class MediaTabView extends StatelessWidget {
     }
     final label = kind == ContentKind.movie ? 'movies' : 'series';
     final filtered = showingSearch || categoryFilterActive;
+    if (hideWatched) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                filtered ? 'No unwatched $label match' : 'No unwatched $label',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textLo),
+              ),
+              if (onShowWatched != null) ...[
+                const SizedBox(height: 16),
+                FilledButton(
+                  autofocus: true,
+                  onPressed: onShowWatched,
+                  child: const Text('Show watched'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Text(
           filtered
               ? 'No $label match'
-              : 'This source has no $label — try Reload from the toolbar '
+              : 'This source has no $label �?" try Reload from the toolbar '
                     'or check the source.',
           textAlign: TextAlign.center,
           style: const TextStyle(color: AppColors.textLo),
@@ -1369,44 +1455,44 @@ class _MediaListTile extends StatelessWidget {
                     const SizedBox(height: 4),
                     Row(
                       children: [
-if (date.isNotEmpty)
-                              Expanded(
-                                child: Text(
-                                  date,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: AppColors.textLo,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              )
-                            // Keeps the runtime right-aligned in the year row
-                            // even for a title the panel dated nothing. A
-                            // `Spacer` alongside an `Expanded` date would split
-                            // the row 1:1 on flex - the date then had half the
-                            // width and ellipsised the moment a runtime
-                            // appeared, which is exactly the squeeze this
-                            // layout is supposed to put on the date alone.
-                            else if (duration != null)
-                              const Spacer(),
-                            if (date.isNotEmpty && _hasRating(item))
-                              const SizedBox(width: 10),
-                            _RatingBadge(rating: item.rating),
-                            // The runtime is rigid and laid out after the
-                            // flexible date, so a long date ellipsises rather
-                            // than pushing the runtime out of the tile.
-                            if (duration != null)
-                              Text(
-                                duration,
-                                maxLines: 1,
-                                style: const TextStyle(
-                                  color: AppColors.textLo,
-                                  fontSize: 12,
-                                ),
+                        if (date.isNotEmpty)
+                          Expanded(
+                            child: Text(
+                              date,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.textLo,
+                                fontSize: 12,
                               ),
-                          ],
-                        ),
+                            ),
+                          )
+                        // Keeps the runtime right-aligned in the year row
+                        // even for a title the panel dated nothing. A
+                        // `Spacer` alongside an `Expanded` date would split
+                        // the row 1:1 on flex - the date then had half the
+                        // width and ellipsised the moment a runtime
+                        // appeared, which is exactly the squeeze this
+                        // layout is supposed to put on the date alone.
+                        else if (duration != null)
+                          const Spacer(),
+                        if (date.isNotEmpty && _hasRating(item))
+                          const SizedBox(width: 10),
+                        _RatingBadge(rating: item.rating),
+                        // The runtime is rigid and laid out after the
+                        // flexible date, so a long date ellipsises rather
+                        // than pushing the runtime out of the tile.
+                        if (duration != null)
+                          Text(
+                            duration,
+                            maxLines: 1,
+                            style: const TextStyle(
+                              color: AppColors.textLo,
+                              fontSize: 12,
+                            ),
+                          ),
+                      ],
+                    ),
                   ],
                   // Parsed once per tile build: the pattern binds the list so
                   // the emptiness test and the widget share one parse.
@@ -1488,9 +1574,8 @@ class _MediaGridTile extends StatelessWidget {
   /// otherwise have to guess. Rounded *up*, so 0.4% still reads "1%" rather than
   /// claiming nothing is watched. A full bar means the title was played to the
   /// end, which reads as "Watched", not "100%" — the two states are different.
-  String get _progressSemantics => progress == 1.0
-      ? 'Watched'
-      : '${(progress! * 100).ceil()}% watched';
+  String get _progressSemantics =>
+      progress == 1.0 ? 'Watched' : '${(progress! * 100).ceil()}% watched';
 
   @override
   Widget build(BuildContext context) {
@@ -1609,23 +1694,23 @@ class _MediaGridTile extends StatelessWidget {
                       if (date.isNotEmpty || duration != null)
                         Row(
                           children: [
-if (date.isNotEmpty)
-                                Expanded(
-                                  child: Text(
-                                    date,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: AppColors.textLo,
-                                      fontSize: 12,
-                                    ),
+                            if (date.isNotEmpty)
+                              Expanded(
+                                child: Text(
+                                  date,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 12,
                                   ),
-                                )
-                              // See the list row: a `Spacer` here would take half
-                              // the row's flex and ellipsise the date the moment
-                              // a runtime appeared.
-                              else if (duration != null)
-                                const Spacer(),
+                                ),
+                              )
+                            // See the list row: a `Spacer` here would take half
+                            // the row's flex and ellipsise the date the moment
+                            // a runtime appeared.
+                            else if (duration != null)
+                              const Spacer(),
                             if (duration != null)
                               Text(
                                 duration,
@@ -1921,7 +2006,8 @@ class _Poster extends StatelessWidget {
 /// something the route has to invent, and the only invented answer (a second
 /// query, or the whole series) steps across a season boundary the user never
 /// crossed on screen.
-typedef PlayEpisode = void Function(MediaItem episode, List<MediaItem> siblings);
+typedef PlayEpisode =
+    void Function(MediaItem episode, List<MediaItem> siblings);
 
 class MediaDetailsSheet extends StatefulWidget {
   final LibraryRepository repo;
@@ -2079,6 +2165,11 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
             // See [_MediaListTile.build]: the provider's date string reprinted
             // in the OS's short-date format.
             final date = formatReleaseDate(_item.year);
+            // The catalogue's runtime, printed beside the date exactly as the
+            // grid tile and list row print it (the shared formatter), so "when"
+            // and "how long" read as one summary line.
+            final duration = formatMediaDuration(_item.durationSeconds);
+            final description = _item.description?.trim();
             final details = Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -2103,16 +2194,30 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                     ),
                   ],
                 ),
-                if (date.isNotEmpty || _hasRating(_item)) ...[
+                if (date.isNotEmpty ||
+                    duration != null ||
+                    _hasRating(_item)) ...[
                   const SizedBox(height: 6),
                   Row(
                     children: [
                       if (date.isNotEmpty)
+                        Flexible(
+                          child: Text(
+                            date,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: AppColors.textLo),
+                          ),
+                        ),
+                      if (date.isNotEmpty && duration != null)
+                        const SizedBox(width: 12),
+                      if (duration != null)
                         Text(
-                          date,
+                          duration,
                           style: const TextStyle(color: AppColors.textLo),
                         ),
-                      if (date.isNotEmpty && _hasRating(_item))
+                      if ((date.isNotEmpty || duration != null) &&
+                          _hasRating(_item))
                         const SizedBox(width: 12),
                       _RatingBadge(rating: _item.rating),
                     ],
@@ -2135,10 +2240,10 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                     ),
                   ),
                 ],
-                if (_item.description != null) ...[
+                if (description != null && description.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Text(
-                    _item.description!,
+                    description,
                     maxLines: 8,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: AppColors.textLo),
@@ -2489,4 +2594,110 @@ class _SeriesBrowser extends StatelessWidget {
       },
     );
   }
+}
+
+class _MediaJumpTargetScroll extends StatefulWidget {
+  const _MediaJumpTargetScroll({
+    required this.targetId,
+    required this.focusNode,
+    required this.targetOffset,
+    required this.controller,
+    required this.child,
+    this.onRevealed,
+  });
+
+  final String? targetId;
+  final FocusNode? focusNode;
+  final double? targetOffset;
+  final ScrollController controller;
+  final Widget child;
+  final VoidCallback? onRevealed;
+
+  @override
+  State<_MediaJumpTargetScroll> createState() => _MediaJumpTargetScrollState();
+}
+
+class _MediaJumpTargetScrollState extends State<_MediaJumpTargetScroll> {
+  int _generation = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _schedule();
+  }
+
+  @override
+  void didUpdateWidget(_MediaJumpTargetScroll oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.targetId != oldWidget.targetId) _schedule();
+  }
+
+  @override
+  void dispose() {
+    _generation++;
+    super.dispose();
+  }
+
+  void _schedule() {
+    final target = widget.targetId;
+    if (target == null ||
+        widget.focusNode == null ||
+        widget.targetOffset == null) {
+      _generation++;
+      return;
+    }
+    final generation = ++_generation;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _generation) return;
+      unawaited(_reveal(generation));
+    });
+  }
+
+  Future<void> _reveal(int generation) async {
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || generation != _generation) return;
+    if (!widget.controller.hasClients) return;
+    final position = widget.controller.position;
+    if (!position.hasContentDimensions) return;
+
+    final viewport = position.viewportDimension;
+    var offset = (widget.targetOffset! - viewport * 0.6)
+        .clamp(0.0, position.maxScrollExtent)
+        .toDouble();
+    position.jumpTo(offset);
+
+    while (widget.focusNode?.context == null) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || generation != _generation) return;
+      final next = (offset + viewport * 0.6)
+          .clamp(0.0, position.maxScrollExtent)
+          .toDouble();
+      if ((next - offset).abs() < 1) return;
+      offset = next;
+      position.jumpTo(offset);
+    }
+
+    final context = widget.focusNode?.context;
+    if (context == null ||
+        !mounted ||
+        !context.mounted ||
+        generation != _generation) {
+      return;
+    }
+    try {
+      await Scrollable.ensureVisible(
+        context,
+        alignment: 0.35,
+        duration: appMotion(context, const Duration(milliseconds: 180)),
+      );
+    } catch (_) {
+      return;
+    }
+    if (!mounted || !context.mounted || generation != _generation) return;
+    widget.focusNode?.requestFocus();
+    widget.onRevealed?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

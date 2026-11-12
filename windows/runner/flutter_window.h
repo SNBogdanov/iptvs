@@ -134,6 +134,14 @@ private:
   bool force_quit_ = false;
   bool tray_icon_created_ = false;
   HWND tray_owner_hwnd_ = nullptr;
+
+  // The top-level frame when HideToTray last ran. A display sleep/wake can move
+  // a hidden window to the primary monitor, so RestoreFromTray re-applies this
+  // rectangle before showing it. This is runtime state, not the across-run
+  // keychain record (Dart still owns that preference).
+  RECT tray_hidden_frame_ = {};
+  bool tray_hidden_maximized_ = false;
+  bool has_tray_hidden_placement_ = false;
 };
 
 #endif // RUNNER_FLUTTER_WINDOW_H_

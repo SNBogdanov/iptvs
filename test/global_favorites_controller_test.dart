@@ -16,6 +16,8 @@ import 'package:iptvs/screens/media_tab_controller.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 
+import 'support/temp_dir.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   FlutterSecureStorage.setMockInitialValues({});
@@ -29,7 +31,7 @@ void main() {
   });
 
   tearDown(() async {
-    await tempDir.delete(recursive: true);
+    await deleteTestTempDir(tempDir);
   });
 
   Future<AppDatabase> openDb() => AppDatabase.openAt('${tempDir.path}/iptv.db');

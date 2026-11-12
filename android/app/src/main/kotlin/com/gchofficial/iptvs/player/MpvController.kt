@@ -22,6 +22,8 @@ class MpvController(
     private val post: (() -> Unit) -> Unit,
     /** `cache-secs` for this session, or null for mpv's own default. */
     private val cacheSecs: Int? = null,
+    /** Whether the session is live; gates `reconnect_at_eof` in [load]. */
+    private val isLive: Boolean = false,
     private val onHdrChanged: (Boolean) -> Unit = {},
 ) : MPVLib.EventObserver, SurfaceHolder.Callback {
 
@@ -69,8 +71,9 @@ class MpvController(
             setOptionString("sub-auto", "no")
             // Network resiliency for live streams: bound stalls and let ffmpeg
             // transparently reconnect transient HTTP drops (the host watchdog
-            // reloads if a stall outlasts this). See [MpvLiveOptions] for why
-            // `reconnect_at_eof` must stay out of `stream-lavf-o`.
+            // reloads if a stall outlasts this). This is the base value; [load]
+            // adds `reconnect_at_eof` per URL for non-HLS live streams — see
+            // [MpvLiveOptions].
             setOptionString("network-timeout", MpvLiveOptions.NETWORK_TIMEOUT)
             setOptionString("stream-lavf-o", MpvLiveOptions.STREAM_LAVF_O)
             applyHeaders(this, headers)
@@ -116,6 +119,17 @@ class MpvController(
 
     fun load(url: String, subtitles: List<SubtitleSpec>) {
         pendingSubtitles = subtitles
+        // `reconnect_at_eof` depends on the URL *and* only applies to live:
+        // `create` runs before the first load, so this is set per file. It must
+        // be in effect before loadfile: the flag decides whether ffmpeg's first
+        // EOF is a chunk boundary or an end-file. VOD keeps the base value (an
+        // EOF there is a legitimate end; replaying it would loop the title).
+        if (isLive) {
+            mpv?.setPropertyString(
+                "stream-lavf-o",
+                MpvLiveOptions.streamLavfO(url),
+            )
+        }
         mpv?.command(arrayOf("loadfile", url))
         // A reload while paused (go-to-live) must resume; loadfile keeps the
         // current pause state otherwise.

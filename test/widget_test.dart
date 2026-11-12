@@ -711,6 +711,35 @@ void main() {
       expect(stream.headers['user-agent'], contains('VLC'));
     });
 
+    test('mediaDetails fills the runtime the catalogue omitted', () async {
+      // Most panels send no runtime in `get_vod_streams`; it only arrives in
+      // `get_vod_info`. The details mapper must copy it through the same
+      // helper the list mapper uses, or the opened item is poorer than the
+      // card it was opened from (and the details sheet has nothing to print).
+      XtreamSource sourceWith(Map<String, dynamic> info) => XtreamSource(
+        sourceId: 'xtream-test',
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        debugApi: (params) async =>
+            params['action'] == 'get_vod_info' ? {'info': info} : const {},
+      );
+      const listed = MediaItem(id: '42', title: 'Movie', kind: ContentKind.movie);
+
+      final opened = await sourceWith({
+        'description': 'The plot',
+        'duration': '01:45:30',
+      }).mediaDetails(listed);
+      expect(opened.durationSeconds, 6330);
+      expect(opened.description, 'The plot');
+
+      // No runtime in the detail payload: a catalogue value survives.
+      final kept = await sourceWith(const {}).mediaDetails(
+        listed.copyWith(durationSeconds: 596),
+      );
+      expect(kept.durationSeconds, 596);
+    });
+
     test('returns bounded category pages for large VOD lists', () async {
       final source = XtreamSource(
         sourceId: 'xtream-test',

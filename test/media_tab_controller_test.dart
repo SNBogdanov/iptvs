@@ -173,9 +173,13 @@ void main() {
       unawaited(controller.setCategory('B'));
 
       // B is now current; complete it first, then let the stale A land late.
-      repo.loadGate('ContentKind.movie:B:null:false:true').complete(_snapshot([_item('b1')], categoryId: 'B'));
+      repo
+          .loadGate('ContentKind.movie:B:null:false:true')
+          .complete(_snapshot([_item('b1')], categoryId: 'B'));
       await _flush();
-      repo.loadGate('ContentKind.movie:A:null:false:true').complete(_snapshot([_item('a1')], categoryId: 'A'));
+      repo
+          .loadGate('ContentKind.movie:A:null:false:true')
+          .complete(_snapshot([_item('a1')], categoryId: 'A'));
       await _flush();
 
       expect(controller.categoryId, 'B');
@@ -187,7 +191,9 @@ void main() {
     // Prime a snapshot.
     unawaited(controller.load());
     await _flush();
-    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('p1')]));
+    repo
+        .loadGate('ContentKind.movie:null:null:false:true')
+        .complete(_snapshot([_item('p1')]));
     await _flush();
 
     unawaited(controller.loadMore());
@@ -196,7 +202,9 @@ void main() {
     await _flush();
 
     // Complete the refresh first, then let the superseded pagination land.
-    repo.loadGate('ContentKind.movie:null:null:true:true').complete(_snapshot([_item('r1')]));
+    repo
+        .loadGate('ContentKind.movie:null:null:true:true')
+        .complete(_snapshot([_item('r1')]));
     await _flush();
     repo.loadMoreGate('<all>').complete(_snapshot([_item('p1'), _item('lm1')]));
     await _flush();
@@ -214,7 +222,9 @@ void main() {
     expect(repo.loadMoreCallCount, callsBefore);
 
     // Drain the outstanding gate so nothing dangles past the test.
-    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot(const []));
+    repo
+        .loadGate('ContentKind.movie:null:null:false:true')
+        .complete(_snapshot(const []));
     await _flush();
   });
 
@@ -230,7 +240,9 @@ void main() {
 
       controller.dispose();
 
-      repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('x1')]));
+      repo
+          .loadGate('ContentKind.movie:null:null:false:true')
+          .complete(_snapshot([_item('x1')]));
       await _flush();
 
       expect(notifications, countBeforeDispose);
@@ -248,12 +260,16 @@ void main() {
 
     unawaited(controller.setCategory('A'));
     await _flush();
-    repo.loadGate('ContentKind.movie:A:null:false:true').complete(_snapshot([_item('a1', categoryId: 'A')]));
+    repo
+        .loadGate('ContentKind.movie:A:null:false:true')
+        .complete(_snapshot([_item('a1', categoryId: 'A')]));
     await _flush(); // let the auto-enrich for A start (and block on its gate)
 
     unawaited(controller.setCategory('B'));
     await _flush();
-    repo.loadGate('ContentKind.movie:B:null:false:true').complete(_snapshot([_item('b1', categoryId: 'B')]));
+    repo
+        .loadGate('ContentKind.movie:B:null:false:true')
+        .complete(_snapshot([_item('b1', categoryId: 'B')]));
     await _flush();
 
     // Late-arriving enrichment for the abandoned A load must not land.
@@ -273,7 +289,9 @@ void main() {
 
     unawaited(controller.setCategory('B'));
     await _flush();
-    repo.loadGate('ContentKind.movie:B:null:false:true').complete(_snapshot([_item('b1')], categoryId: 'B'));
+    repo
+        .loadGate('ContentKind.movie:B:null:false:true')
+        .complete(_snapshot([_item('b1')], categoryId: 'B'));
     await _flush();
 
     // The search resolves after the category switch superseded it.
@@ -294,7 +312,9 @@ void main() {
 
     // The in-flight load's terminal update must land even though a search
     // started after it — search no longer bumps the load generation.
-    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('l1')]));
+    repo
+        .loadGate('ContentKind.movie:null:null:false:true')
+        .complete(_snapshot([_item('l1')]));
     await _flush();
 
     expect(controller.loading, isFalse);
@@ -316,7 +336,9 @@ void main() {
     unawaited(controller.search('ab'));
     await _flush();
 
-    repo.loadGate('ContentKind.movie:null:null:false:true').complete(_snapshot([_item('l1')]));
+    repo
+        .loadGate('ContentKind.movie:null:null:false:true')
+        .complete(_snapshot([_item('l1')]));
     await _flush();
 
     expect(controller.snapshot!.items.map((i) => i.id), ['l1']);
@@ -334,62 +356,95 @@ void main() {
     // from the player), so it also publishes the fraction per item — a bar that
     // lagged the rail by a reload would show a title the rail had just dropped.
 
-    test('loadContinueWatching publishes a fraction per in-progress title',
-        () async {
-      // The rail resolves ids against *cached* media items, so the titles have
-      // to be in the cache for the entry to exist at all.
-      await db.replaceMediaLibrary(
-        'demo',
-        ContentKind.movie,
-        const [],
-        [_item('m1'), _item('m2'), _item('m3')],
-      );
+    test(
+      'loadContinueWatching publishes a fraction per in-progress title',
+      () async {
+        // The rail resolves ids against *cached* media items, so the titles have
+        // to be in the cache for the entry to exist at all.
+        await db.replaceMediaLibrary('demo', ContentKind.movie, const [], [
+          _item('m1'),
+          _item('m2'),
+          _item('m3'),
+        ]);
+        await db.savePlaybackPosition(
+          'demo',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 30),
+          duration: const Duration(minutes: 120),
+        );
+        await db.savePlaybackPosition(
+          'demo',
+          ContentKind.movie,
+          'm2',
+          position: const Duration(minutes: 10),
+          duration: const Duration(minutes: 100),
+        );
+        // Finished -> its position row is cleared (it leaves the rail) but the
+        // card must *not* lose its indication: the watched mark lands in
+        // resumeProgress as a full bar.
+        await db.savePlaybackPosition(
+          'demo',
+          ContentKind.movie,
+          'm3',
+          position: const Duration(minutes: 119),
+          duration: const Duration(minutes: 120),
+        );
+
+        await controller.loadContinueWatching();
+
+        expect(
+          controller.continueWatching.map((e) => e.item.id),
+          unorderedEquals(['m1', 'm2']),
+        );
+        expect(
+          controller.resumeProgress.keys,
+          unorderedEquals(['m1', 'm2', 'm3']),
+        );
+        expect(controller.resumeProgress['m1'], closeTo(0.25, 0.001));
+        expect(controller.resumeProgress['m2'], closeTo(0.1, 0.001));
+        expect(
+          controller.resumeProgress['m3'],
+          1.0,
+          reason: 'a finished title draws a full bar from its watched mark',
+        );
+      },
+    );
+
+    test('a finished title keeps its bar when nothing is in progress', () async {
+      await db.replaceMediaLibrary('demo', ContentKind.movie, const [], [
+        _item('m1'),
+      ]);
+      // The reported sequence: a title finishes — its position row is deleted and
+      // a `watched_media` mark is written — and nothing new starts (e.g. an
+      // auto-advance whose next-title fetch failed). An empty
+      // `playback_positions` must not clear the watched bars: they come from
+      // `watched_media`, not from the resume rows.
       await db.savePlaybackPosition(
         'demo',
         ContentKind.movie,
         'm1',
-        position: const Duration(minutes: 30),
-        duration: const Duration(minutes: 120),
-      );
-      await db.savePlaybackPosition(
-        'demo',
-        ContentKind.movie,
-        'm2',
-        position: const Duration(minutes: 10),
-        duration: const Duration(minutes: 100),
-      );
-      // Finished -> its position row is cleared (it leaves the rail) but the
-      // card must *not* lose its indication: the watched mark lands in
-      // resumeProgress as a full bar.
-      await db.savePlaybackPosition(
-        'demo',
-        ContentKind.movie,
-        'm3',
         position: const Duration(minutes: 119),
         duration: const Duration(minutes: 120),
+      );
+      expect(
+        await db.readPlaybackPosition('demo', ContentKind.movie, 'm1'),
+        isNull,
+        reason: 'completion deletes the resume row',
       );
 
       await controller.loadContinueWatching();
 
-      expect(controller.continueWatching.map((e) => e.item.id),
-          unorderedEquals(['m1', 'm2']));
-      expect(controller.resumeProgress.keys,
-          unorderedEquals(['m1', 'm2', 'm3']));
-      expect(controller.resumeProgress['m1'], closeTo(0.25, 0.001));
-      expect(controller.resumeProgress['m2'], closeTo(0.1, 0.001));
-      expect(controller.resumeProgress['m3'], 1.0,
-          reason: 'a finished title draws a full bar from its watched mark');
+      expect(controller.continueWatching, isEmpty);
+      expect(controller.resumeProgress, {'m1': 1.0});
     });
 
     test('an empty table clears the map as well as the rail', () async {
       // The early-return path. Leaving a stale map here is the bug: the grid
       // would keep drawing bars for titles the rail has stopped offering.
-      await db.replaceMediaLibrary(
-'demo',
-        ContentKind.movie,
-        const [],
-        [_item('m1')],
-      );
+      await db.replaceMediaLibrary('demo', ContentKind.movie, const [], [
+        _item('m1'),
+      ]);
       await db.savePlaybackPosition(
         'demo',
         ContentKind.movie,
@@ -400,11 +455,7 @@ void main() {
       await controller.loadContinueWatching();
       expect(controller.resumeProgress, isNotEmpty);
 
-      await db.clearPlaybackPosition(
-        'demo',
-        ContentKind.movie,
-        'm1',
-      );
+      await db.clearPlaybackPosition('demo', ContentKind.movie, 'm1');
       await controller.loadContinueWatching();
 
       expect(controller.continueWatching, isEmpty);
@@ -415,12 +466,9 @@ void main() {
       // Before the write, in memory: a bar outliving the rail entry it belongs
       // to would offer to resume a title the rail just dropped, and the rail's
       // Remove is undoable — so the two must move together in both directions.
-      await db.replaceMediaLibrary(
-'demo',
-        ContentKind.movie,
-        const [],
-        [_item('m1')],
-      );
+      await db.replaceMediaLibrary('demo', ContentKind.movie, const [], [
+        _item('m1'),
+      ]);
       await db.savePlaybackPosition(
         'demo',
         ContentKind.movie,
@@ -443,14 +491,16 @@ void main() {
       );
     });
 
-    test('a series tab publishes nothing, because its rows are episodes',
-        () async {
+    test('a series tab publishes nothing, because its rows are episodes', () async {
       // The movie grid lists movies and the movie rows are movie ids — 1:1. A
       // series card has no position of its own, and the episode rows this query
       // *can* answer are keyed by episode id, so not one of them matches a
       // card. Asserted empty rather than left to a reader of the comment: a
       // map that is populated but unmatchable looks like the feature working.
-      final seriesTab = MediaTabController(kind: ContentKind.series, repo: repo);
+      final seriesTab = MediaTabController(
+        kind: ContentKind.series,
+        repo: repo,
+      );
       addTearDown(seriesTab.dispose);
       await db.savePlaybackPosition(
         'demo',
@@ -470,6 +520,23 @@ void main() {
         await db.readPlaybackProgress('demo', ContentKind.episode),
         contains('e1'),
       );
+    });
+  });
+
+  group('hide watched', () {
+    test('toggling resets the retained window and notifies once', () {
+      controller.noteShownCount(50);
+      var notified = 0;
+      controller.addListener(() => notified++);
+
+      controller.setHideWatched(true);
+
+      expect(controller.hideWatched, isTrue);
+      expect(controller.shownCountFloor, 0);
+      expect(notified, 1);
+
+      controller.setHideWatched(true);
+      expect(notified, 1, reason: 'an unchanged toggle must not rebuild');
     });
   });
 

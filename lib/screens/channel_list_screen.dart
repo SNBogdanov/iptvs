@@ -53,6 +53,7 @@ import 'live_tab_view.dart';
 import 'media_sort.dart';
 import 'media_tab_controller.dart';
 import 'media_tab_view.dart';
+import 'media_watch_filter.dart';
 
 /// The ways [_ChannelListScreenState._openLivePlayer] can reconcile a running
 /// live preview with a fullscreen open, decided purely from state so the
@@ -1251,6 +1252,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // A dataset-replacing load starts at the top: revealing a window from the
     // previous arrangement makes no sense against the new one.
     _mediaDisplayPages.remove(kind);
+    _clearMediaJumpTarget(kind);
     if (switchCategory) {
       unawaited(controller.setCategory(category));
     } else {
@@ -1298,7 +1300,48 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void _setMediaSort(ContentKind kind, MediaSort sort) {
     if (_media(kind).sort == sort) return;
     _mediaDisplayPages.remove(kind);
+    _clearMediaJumpTarget(kind);
     _media(kind).setSort(sort);
+  }
+
+  void _toggleHideWatched(ContentKind kind) {
+    if (kind != ContentKind.movie) return;
+    final controller = _media(kind);
+    _mediaDisplayPages.remove(kind);
+    _clearMediaJumpTarget(kind);
+    controller.setHideWatched(!controller.hideWatched);
+  }
+
+  void _showWatchedMedia(ContentKind kind) {
+    final controller = _media(kind);
+    if (!controller.hideWatched) return;
+    _mediaDisplayPages.remove(kind);
+    _clearMediaJumpTarget(kind);
+    controller.setHideWatched(false);
+  }
+
+  void _jumpToFirstUnwatched(ContentKind kind) {
+    final controller = _media(kind);
+    final visible = _visibleMedia(kind);
+    final target = firstUnwatchedMedia(visible, controller.resumeProgress);
+    if (target == null) {
+      _showSnack('No unwatched movies');
+      return;
+    }
+    final index = visible.indexWhere((item) => item.id == target.id);
+    if (index < 0) return;
+    setState(() {
+      _mediaJumpTargets[kind] = target.id;
+      _mediaJumpTargetIndexes[kind] = index;
+    });
+  }
+
+  void _mediaJumpRevealed(ContentKind kind, int screen) {
+    final index = _mediaJumpTargetIndexes[kind];
+    if (index == null || screen <= 0) return;
+    final pages = ((index + 1) / screen).ceil();
+    if (pages <= (_mediaDisplayPages[kind] ?? 1)) return;
+    setState(() => _mediaDisplayPages[kind] = pages);
   }
 
   @override
@@ -1315,6 +1358,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       node.dispose();
     }
     for (final node in _mediaLoadMoreFocus.values) {
+      node.dispose();
+    }
+    for (final node in _mediaJumpFocus.values) {
       node.dispose();
     }
     _searchController.dispose();
@@ -1424,7 +1470,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   void _setQuery(String value) {
-    setState(() => _query = value);
+    setState(() {
+      _query = value;
+      if (_tab != ContentKind.live) _clearMediaJumpTarget(_tab);
+    });
     _searchTimer?.cancel();
     if (_tab == ContentKind.live) {
       // A new result set starts at the top — otherwise the cursor would keep an
@@ -1791,6 +1840,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   FocusNode _mediaLoadMoreFocusFor(ContentKind kind) => _mediaLoadMoreFocus
       .putIfAbsent(kind, () => RoutedFocusNode('media.loadMore'));
 
+  final Map<ContentKind, FocusNode> _mediaJumpFocus = {};
+  final Map<ContentKind, String> _mediaJumpTargets = {};
+  final Map<ContentKind, int> _mediaJumpTargetIndexes = {};
+
+  FocusNode _mediaJumpFocusFor(ContentKind kind) => _mediaJumpFocus.putIfAbsent(
+    kind,
+    () => RoutedFocusNode('media.${kind.name}.jump'),
+  );
+
+  void _clearMediaJumpTarget(ContentKind kind) {
+    _mediaJumpTargets.remove(kind);
+    _mediaJumpTargetIndexes.remove(kind);
+  }
+
   List<MediaItem>? _visibleMediaCache;
   (
     ContentKind,
@@ -1803,6 +1866,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     List<MediaItem>, // controller.searchResults
     Set<String>, // favorites for this kind
     SourceConfig, // hidden categories
+    bool, // controller.hideWatched
+    Map<String, double>, // controller.resumeProgress
   )?
   _visibleMediaKey;
 
@@ -1819,6 +1884,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       controller.searchResults,
       _favoriteIds(kind),
       widget.config,
+      controller.hideWatched,
+      controller.resumeProgress,
     );
     if (_visibleMediaKey == key) return _visibleMediaCache!;
     _visibleMediaKey = key;
@@ -1831,16 +1898,22 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final favoritesView = controller.categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(kind) : null;
     final hidden = _hiddenCategories(kind);
+    List<MediaItem> withoutWatched(List<MediaItem> items) =>
+        controller.hideWatched
+        ? mediaWithoutWatched(items, controller.resumeProgress)
+        : items;
     if (q.length >= 2 && controller.searchQuery == _query.trim()) {
       final results = controller.searchResults;
       // Sorted like the catalogue: a search is the same grid with a filter on
       // it, and a relevance-ordered result set that reshuffles when the user
       // picks a sort would be answering two questions at once.
       return sortedMedia(
-        results.where((item) {
-          if (favoritesView) return favs!.contains(item.id);
-          return !hidden.contains(item.categoryId);
-        }).toList(),
+        withoutWatched(
+          results.where((item) {
+            if (favoritesView) return favs!.contains(item.id);
+            return !hidden.contains(item.categoryId);
+          }).toList(),
+        ),
         controller.sort,
       );
     }
@@ -1854,7 +1927,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
-    if (!favoritesView) return sortedMedia(matched, controller.sort);
+    if (!favoritesView) {
+      return sortedMedia(withoutWatched(matched), controller.sort);
+    }
     // Same rule as the live Favorites view — see `_computeVisible`.
     final categoryRanks = catalogRanks(
       (controller.snapshot?.categories ?? const <MediaCategory>[]).map(
@@ -1865,9 +1940,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // Favorites row whose title ties, or that has no release date, keeps the
     // reading order the user already agreed to.
     return sortedMedia(
-      orderedByCatalog(
-        matched,
-        categoryRank: (item) => rankOf(categoryRanks, item.categoryId),
+      withoutWatched(
+        orderedByCatalog(
+          matched,
+          categoryRank: (item) => rankOf(categoryRanks, item.categoryId),
+        ),
       ),
       controller.sort,
     );
@@ -3025,13 +3102,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   /// The sibling list a movie steps through, or null when there is none.
-///
-/// **Movies only.** A series card steps through nothing here — the meaningful
-/// siblings of a series are its *episodes*, and those come from the season list
-/// in the series browser, already wired. Handing a series card the other series
-/// in the grid would invent a "next" the user never saw as a sequence.
-///
-/// The loaded snapshot is passed by reference and is not copied or indexed:
+  ///
+  /// **Movies only.** A series card steps through nothing here — the meaningful
+  /// siblings of a series are its *episodes*, and those come from the season list
+  /// in the series browser, already wired. Handing a series card the other series
+  /// in the grid would invent a "next" the user never saw as a sequence.
+  ///
+  /// The loaded snapshot is passed by reference and is not copied or indexed:
   /// `vodStepIndex` is an index computation, so a 29k-item catalogue costs
   /// nothing to carry and there is no second list to keep in step with the grid.
   ///
@@ -3043,7 +3120,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// neighbour from the wrong provider. Resolution already goes through the
   /// active repository ([_playMedia]), so the two agree about what "sibling"
   /// can mean.
-List<MediaItem>? _movieSiblings(MediaItem item) {
+  List<MediaItem>? _movieSiblings(MediaItem item) {
     if (item.kind != ContentKind.movie) return null;
     final items = _media(item.kind).snapshot?.items;
     if (items == null || items.length < 2) return null;
@@ -3198,13 +3275,13 @@ List<MediaItem>? _movieSiblings(MediaItem item) {
         // went stale until a manual refresh).
         onPlayEpisode: (episode, siblings) =>
             _playMedia(episode, siblings: siblings),
-onPlay:
+        onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
-                ? () {
-                    Navigator.of(context).pop();
-                    _playMedia(item, siblings: _movieSiblings(item));
-                  }
-                : null,
+            ? () {
+                Navigator.of(context).pop();
+                _playMedia(item, siblings: _movieSiblings(item));
+              }
+            : null,
         onPlayFromStart: resume != null
             ? () {
                 Navigator.of(context).pop();
@@ -3278,6 +3355,7 @@ onPlay:
       }
       if (category != null) b.write(' in ${category.title}');
     }
+    if (_media(kind).hideWatched) b.write(' · watched hidden');
     if (snap != null && snap.totalPages > 1) {
       b.write(' · pages ${snap.loadedPages}/${snap.totalPages}');
     }
@@ -3311,6 +3389,8 @@ onPlay:
     }
     if (previous != ContentKind.live) {
       _media(previous).clearSearch();
+      _clearMediaJumpTarget(previous);
+      _clearMediaJumpTarget(kind);
     }
     setState(() {
       _tab = kind;
@@ -3702,8 +3782,7 @@ onPlay:
                               builder: (_) => DiagnosticsScreen(
                                 database: widget.repo.db,
                                 sourceId: widget.repo.source.id,
-                                onReingest: () =>
-                                    _loadLive(forceRefresh: true),
+                                onReingest: () => _loadLive(forceRefresh: true),
                               ),
                             ),
                           );
@@ -3794,6 +3873,47 @@ onPlay:
     );
   }
 
+  Widget? _mediaActionControl(ContentKind kind) {
+    final enrich = !widget.repo.canEnrichMetadata
+        ? null
+        : ChannelToolbarIconButton(
+            tooltip: _media(kind).enriching
+                ? 'Cancel metadata refresh'
+                : 'Refresh displayed metadata',
+            busy: _media(kind).enriching,
+            icon: _media(kind).enriching
+                ? Icons.stop_rounded
+                : Icons.auto_awesome_outlined,
+            onPressed: _media(kind).loading || _media(kind).searching
+                ? null
+                : _media(kind).enriching
+                ? _media(kind).cancelEnrich
+                : () => _media(kind).enrichVisible(_visibleMedia(kind)),
+          );
+    if (kind != ContentKind.movie) return enrich;
+    final controller = _media(kind);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ChannelToolbarIconButton(
+          tooltip: 'Jump to first unwatched',
+          icon: Icons.my_location_rounded,
+          onPressed: () => _jumpToFirstUnwatched(kind),
+        ),
+        const SizedBox(width: 8),
+        ChannelToolbarIconButton(
+          tooltip: controller.hideWatched
+              ? 'Show watched movies'
+              : 'Hide watched movies',
+          icon: Icons.visibility_off_outlined,
+          selected: controller.hideWatched,
+          onPressed: () => _toggleHideWatched(kind),
+        ),
+        if (enrich != null) ...[const SizedBox(width: 8), enrich],
+      ],
+    );
+  }
+
   Widget _buildToolbarAndStatus(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -3852,22 +3972,7 @@ onPlay:
                   icon: Icons.calendar_view_day_rounded,
                   onPressed: _openEpgGrid,
                 )
-              : !widget.repo.canEnrichMetadata
-              ? null
-              : ChannelToolbarIconButton(
-                  tooltip: _media(_tab).enriching
-                      ? 'Cancel metadata refresh'
-                      : 'Refresh displayed metadata',
-                  busy: _media(_tab).enriching,
-                  icon: _media(_tab).enriching
-                      ? Icons.stop_rounded
-                      : Icons.auto_awesome_outlined,
-                  onPressed: _media(_tab).loading || _media(_tab).searching
-                      ? null
-                      : _media(_tab).enriching
-                      ? _media(_tab).cancelEnrich
-                      : () => _media(_tab).enrichVisible(_visibleMedia(_tab)),
-                ),
+              : _mediaActionControl(_tab),
           // Live rows have no release date to sort by, so this is VOD-only.
           sortControl: _tab == ContentKind.live
               ? null
@@ -3903,7 +4008,17 @@ onPlay:
             error: _media(_tab).error,
             showingSearch: _query.trim().length >= 2,
             categoryFilterActive: _media(_tab).categoryId != null,
+            hideWatched: _media(_tab).hideWatched,
+            onShowWatched: _tab == ContentKind.movie
+                ? () => _showWatchedMedia(_tab)
+                : null,
             lastPlayedId: _media(_tab).lastPlayedId,
+            jumpTargetId: _mediaJumpTargets[_tab],
+            jumpTargetIndex: _mediaJumpTargetIndexes[_tab],
+            jumpFocusNode: _mediaJumpTargets[_tab] == null
+                ? null
+                : _mediaJumpFocusFor(_tab),
+            onJumpRevealed: (screen) => _mediaJumpRevealed(_tab, screen),
             scrollController: _media(_tab).scrollController,
             firstFocusNode: _media(_tab).firstFocusNode,
             loadMoreFocusNode: _mediaLoadMoreFocusFor(_tab),

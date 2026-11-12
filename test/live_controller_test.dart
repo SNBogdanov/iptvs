@@ -14,6 +14,8 @@ import 'package:iptvs/screens/live_controller.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source.dart';
 
+import 'support/temp_dir.dart';
+
 /// A repository whose `load`/`nowNext` are driven by test-controlled
 /// completers, so interleaving between two overlapping calls is
 /// deterministic instead of racing on real I/O.
@@ -121,7 +123,7 @@ void main() {
   tearDown(() async {
     if (!controllerDisposed) controller.dispose();
     await db.close();
-    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    await deleteTestTempDir(tempDir);
   });
 
   test('newer load wins over a late-completing stale load', () async {

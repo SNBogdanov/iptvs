@@ -571,6 +571,7 @@ class HdrPlayerActivity : ComponentActivity() {
             headers = headers,
             post = { action -> if (!isFinishing) runOnUiThread(action) },
             bufferPreset = this.bufferPreset,
+            isLive = uiState.isLive,
         )
         setEngine(mpv)
         mpv.load(url, subtitles)

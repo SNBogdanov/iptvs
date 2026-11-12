@@ -289,7 +289,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `kFinishedFraction` (95%, sub-10 s ignored) — the rail for that reason, and the card's
   *finished* fact in its own `watched_media` table (v15) that `_loadResumeProgress` merges
   in as `1.0`, with a new in-progress session clearing the mark so the bar always shows the
-  title's current state. **Movie tab only** — a movie row's `itemId` *is* the card's id, while a
+  title's current state. **The bars are read even when no title is in progress**:
+  `loadContinueWatching`'s empty-`playback_positions` branch clears the *rail* but still calls
+  `_loadResumeProgress` — a finished title has no position row, so clearing the map there erased
+  every watched bar the moment the last in-progress title ended (an auto-advance finishing a film
+  whose next-title fetch then failed), until some other title was played. **Movie tab only** — a movie row's `itemId` *is* the card's id, while a
   series tab's rows are episodes and its grid lists series, so `_loadResumeProgress` publishes an
   empty map there rather than an episode-keyed one that can never match a card (which would read as
   the feature working and invite an invented "average of your started episodes" aggregate).
@@ -300,6 +304,14 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   not compare, so that guard is load-bearing. It fails soft. Pinned by the `card progress` group in
   `test/media_tab_controller_test.dart`, `test/media_progress_bar_test.dart`, and the DB group in
   `test/persistence_test.dart`; detail: docs/player.md "The card's watched-progress bar".
+  **The movie grid can hide finished titles and jump to the first unfinished one.** Both are
+  session-scoped and movie-only (`MediaTabController.hideWatched`): a title is hidden only when its
+  `resumeProgress` is `1.0`, so started-but-unfinished films stay visible; the jump filters through
+  the same path, then `_MediaJumpTargetScroll` widens the display window and reveals/focuses the
+  target, extending `_mediaDisplayPages` so paging stays consistent. An all-watched filter shows
+  an autofocusing "Show watched" action rather than leaving a D-pad with no rows. Pinned by
+  `test/media_watch_filter_test.dart`, `test/media_jump_focus_test.dart` and the watched-filter
+  group in `test/media_tab_controller_test.dart`.
   **The movie and series grids are
    reorderable; live, the Continue Watching rail and the season/episode lists
    deliberately are not** (`media_sort.dart`, `MediaTabController.sort`). The five modes are
@@ -1086,7 +1098,17 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `tray_owner_hwnd_` because the base class has already nulled its own handle by then. Hiding sends a
   native `trayHidden` event on `iptvs/tray` (the Windows `hidden` lifecycle does **not** fire for a
   `SW_HIDE`), and Dart pauses the preview/player on it via `silenceRequest`; restoring sends
-  `trayShown` and resumes via `resumeRequest`. The runner also mirrors the window's **actual**
+  `trayShown` and resumes via `resumeRequest`. **For live, hide must STOP, not pause**: a paused live
+  keeps its stale buffer and resumes seconds behind the edge (a visible break at the segment
+  boundary), and its recovery paths reopen the source. `PlayerScreen` keeps `_silenced`: on hide it
+  stops the live player (VOD still pauses), the error/EOF/watchdog reconnects stand down while set, and
+  the restore leg calls `_goToLive()` — re-resolve and reopen at the live edge — not `play()`; the
+  preview's EOF restart is already suppressed while the app paused it. **Hide/restore preserves the
+  monitor**: `HideToTray` captures the frame and `IsZoomed` before `SW_HIDE` (a display sleep/wake can
+  move a hidden HWND to the primary), `RestoreFromTray` re-applies it with the same
+  `MonitorFromRect` guard, and `CurrentWindowPlacement` reports the captured frame while hidden so a
+  tray quit still records the right monitor. The runner also
+  mirrors the window's **actual**
   `WM_SHOWWINDOW` transition (guarded by `!IsIconic`) as those same events, because the explicit
   sends are the tray's call sites only — a restore by any other route left the silence in force, with
   playback paused and the auto-switch countdown frozen on `silenced` and no event to release it. The
@@ -1107,7 +1129,10 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   runner's own startup placement stands. **A malformed record is discarded whole, never half-applied**,
   and `maximized` must be a real `bool` — it picks `SW_MAXIMIZE` vs an explicit rect, so coercing a
   corrupted value to `false` would open a maximized window as a resizable one at the maximized rect.
-  Turning the setting off deletes the record; a surviving record is still not applied. Pinned by
+  **A maximized placement moves first**: `SW_MAXIMIZE` targets the window's current monitor, so the
+  runner applies the saved rect before maximizing, and the first-frame `Show()` uses `SW_SHOW` (not
+  `SW_SHOWNORMAL`, which would restore and move the window back). Turning the setting off deletes the
+  record; a surviving record is still not applied. Pinned by
   `test/window_placement_test.dart`; detail: docs/player.md "System tray icon".
 - **Windows: the runner sizes mpv's VO window itself** (`ResyncNativeVideoRenderer`) — never rely on
   mpv's `--wid` parent hook. mpv reaches `ResizeBuffers` only via a real `WM_SIZE` on its child HWND
@@ -1153,6 +1178,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `LivePreviewController.pendingStart`) - it must never fall through to "start a preview", which
   superseded the in-flight `create_link` with a second one and reloaded the running shared engine:
   the visible stream reload behind the Android TV "it reconnects when I go fullscreen" reports.
+- **The preview's embedded `VideoController` is forced before its first `open`.** Its constructor
+  sets mpv's `vo`/`hwdec`; the panel only builds `PreviewVideo` after `stream` is set, i.e. after
+  the open. A cold first preview otherwise opened with no video output and stayed blank until a
+  channel switch created the controller - the Windows "first click shows nothing, second channel
+  fixes it" report. `LivePreviewController._start` now calls `_ensureEmbeddedController()` first,
+  matching `PlayerScreen`'s ordering.
 - **The start-up resume selects the last live channel once per screen, and starts its preview only
   on the wide layout.** `ChannelListScreen._maybeResumeLastChannel` runs at the end of the *first*
   `_loadLive` (guarded by `_resumeAttempted`, so a Reload or a source change inside the same screen
@@ -1216,6 +1247,22 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   from `_open` and `_reopenOnCurrentSurface`, idempotent per item id, never blocks playback.
   **Windows-first: Android/iOS/Linux and the shared Flutter overlay do not draw it yet.** Pinned by
   the `describeMedia` group in `test/library_repository_enrich_test.dart`.
+- **The Windows native surface shows a centred "Loading…" pill while the stream has no picture**
+  (`NativeLoadingRect`/`PaintNativeLoading`, `flutter_window.cpp`). It must be native: the video is
+  a child HWND **above** the Flutter view, so a Flutter spinner (and the Flutter VOD error overlay)
+  is invisible there — a slow/failed provider looked like a plain black screen with no progress.
+  `PlayerScreen` pushes `loading` on every `setControlState` as
+  `_buffering && !_reconnecting && _error == null` (a reconnect owns its badge; an error is not
+  "loading"), and the buffering listener pushes on change because position ticks don't run while
+  buffering. It is its own region band (the overlay's region is otherwise the bars), the region is
+  marked dirty when the flag flips, and the overlay stays up while loading even with the chrome
+  hidden. **The error panel is the same surface's job** (`NativeErrorRect`/`PaintNativeError`):
+  `_error` is mirrored as `error` on `setControlState` (redacted at the source — media_kit's text
+  embeds the credential-bearing stream URL) and drawn as a centred "Playback error" panel with up to
+  three lines and a **Retry** button. Retry is a hit target (`NativeControlCommandFromPoint` →
+  `retry` → Dart `_open()`) and OK/Enter/Space do the same, so a remote recovers; it drops
+  `WS_EX_TRANSPARENT` while shown (the loading pill stays pass-through). See docs/player.md
+  "The Windows native loading indicator".
 - **The VOD seek step is one device-wide preference, and the Windows GDI scrubber is a focus row.**
   `lib/player/seek_step.dart` (`kSeekStepChoices` 5/10/15/30/60, `kDefaultSeekStepSeconds` 10,
   `normalizeSeekStep`) is the ladder; the key is `app_seek_step_seconds` in `AppSettingsStore`,
@@ -1440,7 +1487,16 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   flag (it relies on the volume stream), so unmute clears it with its own `record()` first.
   docs/player.md "Playback audio is a device-wide session".
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
-  keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
+  keeps the manual error/Retry overlay. **In a zapping mode, a channel whose HLS manifest carries
+  `serve_not_available` is skipped instead of retried**: the panel answers a dead channel with a 200
+  playlist that mpv accepts as live, so no error event ever fires and the watchdog would reload the
+  dead URL forever. `_reconnectLive` probes the manifest (`_liveManifestUnavailable`, HLS only,
+  bounded, fails soft to "available") and calls `channelUp()` when the marker is present and
+  `autoSwitch.enabled || random`; outside a zapping mode the ordinary reconnect stands. **The
+  Windows native Back ladder skips its hide-controls rung while reconnecting** - the pinned chrome
+  is re-shown by the paused-media rule, so Escape would hide it forever and never exit; menu/info
+  still close first and then Back exits.
+  **A stall is three shapes on Android, not two:** buffering,
   ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,
   and a decoder re-instantiated across the preview→fullscreen surface swap sits in `STATE_READY`
   reporting `isPlaying` with nothing on screen, so every flag read healthy and the freeze was
@@ -1513,11 +1569,17 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   live", so a reconnect and a manual go-live can't both fire overlapping `create_link` calls.
   iOS's live watchdog is additionally inert before the stream's first frame: a stream that never
   starts hands off to the mpv fallback at 10s (`PlaybackStartBackstop`) rather than reconnecting on
-  the usual 8/16/24/30s cadence. A **clean server-side EOF** maps
-  to media_kit `completed=true`/`buffering=false` — invisible to the buffering-gated stall poll —
-  so live treats `completed` as a drop (`shouldReconnectOnCompleted`; VOD completing stays a
-  legitimate end), and the preview auto-restarts its own channel on EOF, capped by the same
-  policy (`reconnect_at_eof` must stay out of `kLiveMpvOptions` — it hangs HLS on FFmpeg 8).
+  the usual 8/16/24/30s cadence. A **clean server-side EOF** on a continuous live stream is now
+  absorbed inside ffmpeg: `reconnect_at_eof=1` is added per URL (`liveMpvOptionsForUrl` /
+  `liveStreamLavfOForUrl`, Android `MpvLiveOptions.streamLavfO`) to every mpv surface, because a
+  raw TS provider that closes each chunk otherwise forces a full reopen. It **must stay out of the
+  HLS value** — on FFmpeg 8 it makes the finite manifest reconnect forever and the demuxer never
+  probes. The flag is re-applied on every reopen (zap, go-to-live, reconnect, preview start), since
+  one player can cross both shapes. When it is absent (HLS, and ExoPlayer's `ProgressiveMediaSource`,
+  which has no equivalent) the old path still applies: media_kit `completed=true`/`buffering=false`
+  is invisible to the buffering-gated stall poll, so live treats `completed` as a drop
+  (`shouldReconnectOnCompleted`; VOD completing stays a legitimate end), and the preview
+  auto-restarts its own channel on EOF, capped by the same policy.
   **One engine must never carry two live watchdogs.** The embedded seamless handoff
   (`decision.adoptsEmbeddedPreview`) builds the route with `existingPlayer: _preview.player`, so
   `LivePreviewController.adoptedByFullscreen` is set around the push and makes the preview's EOF
@@ -1626,7 +1688,11 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   accounts refuse the new stream while the old one holds the slot; a failed zap reverts the cursor
   and re-plays the channel that was on screen. **The surface never changes on a zap** — no
   embedded↔native de-escalation path exists — but the one-shot HDR/PQ escalation is re-armed per
-  zap, since a zapped-to channel deserves its own chance at a real HDR surface.
+  zap, since a zapped-to channel deserves its own chance at a real HDR surface. **The embedded
+  surface masks the reopen**: media_kit's texture keeps the old stream's last frame across
+  `stop → resolve → open`, so `PlayerScreen` covers the video with black (`_zapBlackout`) until the
+  *new* stream's `videoParams` reports a pixel format (`_endZapBlackout`, +150 ms grace) — not on the
+  earlier "null format / w,h known" event.
   `PlayerScreen.resolveAgain` now re-resolves the channel **on screen** (`zap.resolveCurrent()`,
   not the route's launch channel), and the reconnect watchdog stands down while `zap.settling` — a
   settling zap deliberately stopped the stream it would otherwise reconnect. Favourite and aspect

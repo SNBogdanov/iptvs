@@ -347,6 +347,7 @@ class LinuxNativeSession {
     required String aspectLabel,
     Duration? resumeFrom,
     BufferPreset bufferPreset = BufferPreset.normal,
+
     /// Session-wide audio level 0–100 (the Dart [PlaybackAudioSession]). The
     /// native mpv process owns its own audio state, so it must be told what
     /// the shared volume/mute is rather than opening at its default 100.
@@ -489,14 +490,16 @@ class LinuxNativeSession {
     // Same network/demuxer resilience tuning the embedded/Windows path applies
     // via _configureNativePlayer for live streams (see kLiveMpvOptions) — set
     // before loadfile so it's in effect for the upcoming open, same ordering
-    // as the embedded path's setProperty-before-Media.open.
+    // as the embedded path's setProperty-before-Media.open. The URL-derived
+    // part (`reconnect_at_eof` for non-HLS live) matters here: a raw TS
+    // provider that closes at a chunk boundary must not cost a `loadfile`.
     if (stream.isLive) {
       // Layered the same way the embedded/Windows path layers them, so the two
       // mpv surfaces on one machine buffer identically — the native window is
       // chosen only by whether the stream is HDR on Wayland, which is not
       // something the user's buffering choice should follow.
       for (final entry in {
-        ...kLiveMpvOptions,
+        ...liveMpvOptionsForUrl(stream.url),
         ...mpvBufferOptions(bufferPreset),
       }.entries) {
         await command(['set_property', entry.key, entry.value]);

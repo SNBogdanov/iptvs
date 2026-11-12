@@ -99,4 +99,21 @@ void main() {
     expect(opened.year, '2026-09-29');
     expect(opened.year, listed.single.year);
   });
+
+  test('the opened item also carries a runtime the card omitted', () async {
+    // Same principle as the date: the details mapper reads the payload's own
+    // runtime (`duration`/`time`/`length`, the list mapper's keys and parser),
+    // so a portal that only tells the runtime on `get_movie_details` still
+    // yields an opened item at least as rich as its card.
+    final source = portal(
+      [portalMovieRow('73661')],
+      details: {'duration': '1:44:00'},
+    );
+
+    final listed = await source.mediaItems(ContentKind.movie);
+    expect(listed.single.durationSeconds, isNull);
+
+    final opened = await source.mediaDetails(listed.single);
+    expect(opened.durationSeconds, 6240);
+  });
 }

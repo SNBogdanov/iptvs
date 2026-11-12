@@ -45,6 +45,8 @@ import 'package:iptvs/theme.dart';
 import 'package:iptvs/widgets/routed_focus_node.dart';
 import 'package:iptvs/widgets/tv_text_field.dart';
 
+import 'support/temp_dir.dart';
+
 // Set to true in setUpAll when libmpv is available; tests skip otherwise.
 bool _mediaKitAvailable = false;
 
@@ -83,7 +85,7 @@ void main() {
 
   tearDown(() async {
     await db.close();
-    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    await deleteTestTempDir(tempDir);
   });
 
   const config = SourceConfig(

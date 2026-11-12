@@ -68,6 +68,9 @@ constexpr const char kTrayChannel[] = "iptvs/tray";
 // (`clock_format.dart`) so its clock badge reads the same as the GDI one this
 // file draws. One source - the machine's own settings - for two surfaces.
 constexpr const char kClockChannel[] = "iptvs/clock";
+// Defined next to ApplyWindowPlacement below; declared here because
+// RestoreFromTray uses the same monitor-clamped placement path.
+bool ApplyFramePlacement(HWND hwnd, const RECT& wanted, bool maximized);
 constexpr UINT kNativeVideoSurfaceInputMessage = WM_APP + 0x4D;
 constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
@@ -279,6 +282,15 @@ struct NativeControlState {
   bool can_favorite = false; // live channel with a favorites store (show the star)
   bool is_favorite = false;  // current favorite state (Dart owns the store)
   bool reconnecting = false; // live reconnect watchdog re-establishing the stream
+  // A terminal VOD error, mirrored from Dart so the overlay can draw it: the
+  // Flutter PlayerErrorOverlay sits behind the native video HWND on this
+  // surface, so a failed open there was invisible (a plain black screen).
+  std::wstring error;
+  // The stream is opening/buffering and has produced no picture yet. The video
+  // is this window's child HWND, so a Flutter loading spinner would sit *behind*
+  // it — the overlay draws its own centred indicator instead (see
+  // NativeLoadingRect).
+  bool loading = false;
   bool playing = false;
   bool fullscreen = false;
   NativeMenuKind open_menu = NativeMenuKind::kNone;
@@ -3019,6 +3031,81 @@ RECT NativeHudNameRect(const RECT &rect) {
                   rect.top + NativeScale(56));
 }
 
+// The centred "Loading…" pill drawn while the stream is opening/buffering and
+// has produced no picture. The overlay is the *only* thing that can show it on
+// this surface: the video is a child HWND covering the Flutter view, so a
+// Flutter spinner would sit behind it (the reported symptom was a plain black
+// screen with no progress at all).
+RECT NativeLoadingRect(const RECT &rect) {
+  const int width = NativeScale(200);
+  const int height = NativeScale(52);
+  const int cx = (rect.left + rect.right) / 2;
+  const int cy = (rect.top + rect.bottom) / 2;
+  return RectFrom(cx - width / 2, cy - height / 2, cx + width / 2,
+                  cy + height / 2);
+}
+
+// Paints the centred "Loading…" pill. Unlike the bars/HUD it sits in the middle
+// of the picture, so it normalizes its own alpha and gets its own region band
+// (both callers add [NativeLoadingRect] to their rect/region lists).
+void PaintNativeLoading(HDC hdc, uint32_t *pixels, int width, int height,
+                        const RECT &rect) {
+  FillRoundRectAA(hdc, rect, NativeScale(12), RGB(22, 24, 31));
+  HFONT font = UiFont(13, FW_SEMIBOLD);
+  DrawTextWithFont(hdc, L"Loading\x2026", rect,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE, font,
+                   RGB(214, 218, 230));
+  DeleteObject(font);
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, rect, RGB(0, 0, 0),
+                                    0);
+}
+
+// The centred VOD error panel: title, message and a Retry button (a hit target
+// that posts `retry` back to Dart). Native for the same reason as the loading
+// pill — the Flutter PlayerErrorOverlay is behind the video HWND here.
+RECT NativeErrorRect(const RECT &rect) {
+  const int width = std::min(
+      NativeScale(520),
+      std::max(NativeScale(280), RectWidth(rect) - NativeScale(64)));
+  const int height = NativeScale(176);
+  const int cx = (rect.left + rect.right) / 2;
+  const int cy = (rect.top + rect.bottom) / 2;
+  return RectFrom(cx - width / 2, cy - height / 2, cx + width / 2,
+                  cy + height / 2);
+}
+
+RECT NativeErrorRetryRect(const RECT &panel) {
+  const int w = NativeScale(132);
+  const int h = NativeScale(38);
+  const int cx = (panel.left + panel.right) / 2;
+  return RectFrom(cx - w / 2, panel.bottom - NativeScale(16) - h, cx + w / 2,
+                  panel.bottom - NativeScale(16));
+}
+
+void PaintNativeError(HDC hdc, uint32_t *pixels, int width, int height,
+                      const RECT &panel, const RECT &retry,
+                      const std::wstring &message) {
+  FillRoundRectAA(hdc, panel, NativeScale(12), RGB(18, 20, 27));
+  HFONT title_font = UiFont(17, FW_BOLD);
+  const RECT title =
+      RectFrom(panel.left + NativeScale(20), panel.top + NativeScale(16),
+               panel.right - NativeScale(20), panel.top + NativeScale(46));
+  DrawTextWithFont(hdc, L"Playback error", title,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE, title_font,
+                   RGB(246, 247, 251));
+  DeleteObject(title_font);
+  HFONT body_font = UiFont(13, FW_NORMAL);
+  const RECT body =
+      RectFrom(panel.left + NativeScale(20), title.bottom + NativeScale(2),
+               panel.right - NativeScale(20), retry.top - NativeScale(10));
+  DrawWrappedTextEllipsized(hdc, message, body, body_font, RGB(184, 190, 204),
+                            3);
+  DeleteObject(body_font);
+  DrawTextButton(hdc, retry, L"Retry", false);
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, panel, RGB(0, 0, 0),
+                                    0);
+}
+
 void PaintNativeControlBar(HWND hwnd, int control_kind) {
   PAINTSTRUCT paint;
   HDC hdc = BeginPaint(hwnd, &paint);
@@ -3078,6 +3165,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
          !hud_name_text.empty())
             ? NativeHudNameRect(rect)
             : RectFrom(0, 0, 0, 0);
+    const RECT loading =
+        g_native_control_state.loading ? NativeLoadingRect(rect)
+                                       : RectFrom(0, 0, 0, 0);
+    const RECT error = !g_native_control_state.error.empty()
+                           ? NativeErrorRect(rect)
+                           : RectFrom(0, 0, 0, 0);
     if (RectWidth(hud_clock) > 0 && RectHeight(hud_clock) > 0) {
       current_rects.push_back(hud_clock);
     }
@@ -3086,6 +3179,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     }
     if (RectWidth(hud_name) > 0 && RectHeight(hud_name) > 0) {
       current_rects.push_back(hud_name);
+    }
+    if (RectWidth(loading) > 0 && RectHeight(loading) > 0) {
+      current_rects.push_back(loading);
+    }
+    if (RectWidth(error) > 0 && RectHeight(error) > 0) {
+      current_rects.push_back(error);
     }
     std::vector<RECT> dirty_rects = current_rects;
     dirty_rects.insert(dirty_rects.end(), buffer.prev_rects.begin(),
@@ -3154,6 +3253,14 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
       NormalizeNativeControlBitmapAlpha(pixels, width, height, hud_name,
                                         RGB(0, 0, 0), 0);
     }
+    if (RectWidth(loading) > 0 && RectHeight(loading) > 0) {
+      PaintNativeLoading(paint_hdc, pixels, width, height, loading);
+    }
+    if (RectWidth(error) > 0 && RectHeight(error) > 0) {
+      PaintNativeError(paint_hdc, pixels, width, height, error,
+                       NativeErrorRetryRect(error),
+                       g_native_control_state.error);
+    }
     CompositeOverlayBands(hwnd, hdc, paint_hdc, width, height, dirty_rects);
     buffer.prev_rects = std::move(current_rects);
     EndPaint(hwnd, &paint);
@@ -3180,6 +3287,18 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
       RectWidth(quick_list_rect) > 0 && RectHeight(quick_list_rect) > 0;
   if (draws_quick_list) {
     current_rects.push_back(quick_list_rect);
+  }
+  const RECT loading =
+      g_native_control_state.loading ? NativeLoadingRect(rect)
+                                     : RectFrom(0, 0, 0, 0);
+  if (RectWidth(loading) > 0 && RectHeight(loading) > 0) {
+    current_rects.push_back(loading);
+  }
+  const RECT error =
+      !g_native_control_state.error.empty() ? NativeErrorRect(rect)
+                                            : RectFrom(0, 0, 0, 0);
+  if (RectWidth(error) > 0 && RectHeight(error) > 0) {
+    current_rects.push_back(error);
   }
   // Clear the current rects plus anything the previous paint touched, so a
   // closed menu / shrunk bar is erased from the reused buffer rather than left
@@ -3507,6 +3626,14 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   if (draws_quick_list) {
     PaintQuickList(paint_hdc, pixels, width, height, quick_list_rect);
   }
+  if (RectWidth(loading) > 0 && RectHeight(loading) > 0) {
+    PaintNativeLoading(paint_hdc, pixels, width, height, loading);
+  }
+  if (RectWidth(error) > 0 && RectHeight(error) > 0) {
+    PaintNativeError(paint_hdc, pixels, width, height, error,
+                     NativeErrorRetryRect(error),
+                     g_native_control_state.error);
+  }
 
   // Composite only the dirty bands (current + previously-touched control rects,
   // merged), each as a prcDirty sub-update of the layered surface, instead of
@@ -3522,6 +3649,14 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
                                           int y) {
   RECT rect;
   GetClientRect(hwnd, &rect);
+  // The error panel owns its band: Retry inside the button, a no-op elsewhere so
+  // a press on the message does not fall through to the chrome behind it.
+  if (!g_native_control_state.error.empty()) {
+    const RECT panel = NativeErrorRect(rect);
+    if (PointInRect(x, y, panel)) {
+      return PointInRect(x, y, NativeErrorRetryRect(panel)) ? "retry" : "show";
+    }
+  }
   const RECT top = TopControlsRect(rect);
   if (PointInRect(x, y, top)) {
     if (PointInRect(x, y,
@@ -4223,6 +4358,14 @@ void FlutterWindow::DestroyTrayIcon() {
 
 void FlutterWindow::HideToTray() {
   HWND hwnd = GetHandle();
+  if (hwnd && GetWindowRect(hwnd, &tray_hidden_frame_)) {
+    // A monitor can sleep or be re-docked while the window is hidden, and
+    // Windows may then park the hidden HWND on the primary monitor. Capture the
+    // frame before hiding so RestoreFromTray can put it back on the monitor the
+    // user actually hid it on (if that monitor is still present).
+    tray_hidden_maximized_ = IsZoomed(hwnd) != FALSE;
+    has_tray_hidden_placement_ = true;
+  }
   if (hwnd) {
     ShowWindow(hwnd, SW_HIDE);
   }
@@ -4248,6 +4391,16 @@ void FlutterWindow::RestoreFromTray() {
   HWND hwnd = GetHandle();
   if (!hwnd) {
     return;
+  }
+  // Undo any move Windows made while the window was hidden (a display
+  // sleep/wake can collapse it onto the primary). ApplyFramePlacement refuses
+  // the saved rect if that monitor is gone, leaving the window where Windows
+  // put it instead of restoring it off-screen.
+  if (has_tray_hidden_placement_) {
+    const RECT frame = tray_hidden_frame_;
+    const bool maximized = tray_hidden_maximized_;
+    has_tray_hidden_placement_ = false;
+    ApplyFramePlacement(hwnd, frame, maximized);
   }
   ShowWindow(hwnd, SW_SHOW);
   // Mirror of HideToTray's explicit overlay hide: reshow it if the tracked
@@ -4284,8 +4437,19 @@ flutter::EncodableMap FlutterWindow::CurrentWindowPlacement() {
   // restoring client coordinates would shave the border off the window on every
   // run and ratchet it smaller. Physical pixels, matching SetWindowPos below.
   RECT frame;
-  if (!GetWindowRect(hwnd, &frame)) {
-    return out;
+  bool maximized;
+  if (has_tray_hidden_placement_ && !IsWindowVisible(hwnd)) {
+    // A display sleep/wake can move a hidden HWND to the primary monitor. What
+    // the user considers "the window's position" is the frame it had when it
+    // was hidden, not where Windows parked it meanwhile, so record that frame
+    // if the app quits while still hidden. (The same frame drives restore.)
+    frame = tray_hidden_frame_;
+    maximized = tray_hidden_maximized_;
+  } else {
+    if (!GetWindowRect(hwnd, &frame)) {
+      return out;
+    }
+    maximized = IsZoomed(hwnd) != FALSE;
   }
   out[flutter::EncodableValue("x")] =
       flutter::EncodableValue(static_cast<int64_t>(frame.left));
@@ -4296,9 +4460,64 @@ flutter::EncodableMap FlutterWindow::CurrentWindowPlacement() {
   out[flutter::EncodableValue("height")] = flutter::EncodableValue(
       static_cast<int64_t>(frame.bottom - frame.top));
   out[flutter::EncodableValue("maximized")] =
-      flutter::EncodableValue(IsZoomed(hwnd) != FALSE);
+      flutter::EncodableValue(maximized);
   return out;
 }
+
+namespace {
+
+// Applies a frame rectangle and, when asked, maximizes on the monitor that
+// rectangle belongs to. Returns false when no monitor still contains it (an
+// undocked display): the caller then keeps the window's current place.
+//
+// A monitor can be gone by the time the app is reopened: an undocked dock, a
+// projector left behind, a docking station on the other side of the building.
+// Restoring the rectangle anyway parks the window where the user cannot reach
+// it. `MONITOR_DEFAULTTONULL` means "no", where `NEAREST` would silently accept
+// one. A partially offscreen rect passes on purpose: the user can drag it back.
+// Sizes are clamped to the work area so a window remembered on a 4K panel does
+// not open larger than the monitor actually in use.
+//
+// `SW_MAXIMIZE` maximizes on whichever monitor *currently* contains the window,
+// so the move has to happen first; otherwise a window closed maximized on a
+// secondary monitor restores on the primary.
+bool ApplyFramePlacement(HWND hwnd, const RECT& wanted, bool maximized) {
+  HMONITOR monitor = MonitorFromRect(&wanted, MONITOR_DEFAULTTONULL);
+  if (monitor == nullptr) {
+    return false;
+  }
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(monitor, &info)) {
+    return false;
+  }
+
+  const RECT& work = info.rcWork;
+  LONG x = wanted.left;
+  LONG y = wanted.top;
+  LONG w = wanted.right - wanted.left;
+  LONG h = wanted.bottom - wanted.top;
+  if (w > work.right - work.left) {
+    w = work.right - work.left;
+  }
+  if (h > work.bottom - work.top) {
+    h = work.bottom - work.top;
+  }
+  if (x + w < work.left) {
+    x = work.left;
+  }
+  if (y + h < work.top) {
+    y = work.top;
+  }
+
+  SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+  if (maximized) {
+    ShowWindow(hwnd, SW_MAXIMIZE);
+  }
+  return true;
+}
+
+}  // namespace
 
 bool FlutterWindow::ApplyWindowPlacement(const flutter::EncodableMap& args) {
   HWND hwnd = GetHandle();
@@ -4336,59 +4555,13 @@ bool FlutterWindow::ApplyWindowPlacement(const flutter::EncodableMap& args) {
                     static_cast<LONG>(number("x", 0) + width),
                     static_cast<LONG>(number("y", 0) + height)};
 
-  // A monitor can be gone by the time the app is reopened: an undocked dock, a
-  // projector left behind, a docking station on the other side of the building.
-  // Restoring the rectangle anyway parks the window where the user cannot reach
-  // it, and an unreachable window is the one failure that needs no bug report to
-  // explain - the app looks like it simply did not start. So require the saved
-  // rect to still land on a monitor; MONITOR_DEFAULTTONULL means "no", where
-  // NEAREST would silently accept one. A partially offscreen rect passes on
-  // purpose: the user can drag it back, a fully detached one cannot.
-  HMONITOR monitor = MonitorFromRect(&wanted, MONITOR_DEFAULTTONULL);
-  if (monitor == nullptr) {
-    return false;
-  }
-  MONITORINFO info{};
-  info.cbSize = sizeof(info);
-  if (!GetMonitorInfoW(monitor, &info)) {
-    return false;
-  }
-
-  // Clamp to the work area, so a size remembered on a 4K panel does not open
-  // larger than the monitor actually in use.
-  const RECT& work = info.rcWork;
-  LONG x = wanted.left;
-  LONG y = wanted.top;
-  LONG w = static_cast<LONG>(width);
-  LONG h = static_cast<LONG>(height);
-  if (w > work.right - work.left) {
-    w = work.right - work.left;
-  }
-  if (h > work.bottom - work.top) {
-    h = work.bottom - work.top;
-  }
-  if (x + w < work.left) {
-    x = work.left;
-  }
-  if (y + h < work.top) {
-    y = work.top;
-  }
-
   bool maximized = false;
   auto it = args.find(flutter::EncodableValue("maximized"));
   if (it != args.end()) {
     const auto* value = std::get_if<bool>(&it->second);
     maximized = value != nullptr && *value;
   }
-  if (maximized) {
-    // Let the window manager place it: SW_MAXIMIZE ignores the rectangle anyway,
-    // and forcing the style with the wrong metrics is how a maximized window ends
-    // up restored to a size it never had.
-    ShowWindow(hwnd, SW_MAXIMIZE);
-    return true;
-  }
-  SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-  return true;
+  return ApplyFramePlacement(hwnd, wanted, maximized);
 }
 
 void FlutterWindow::ShowTrayMenu() {
@@ -4467,6 +4640,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   // is TRUE when the window is becoming visible. `IsIconic` keeps ordinary
   // minimize/restore out of this: a minimize is not a hide. Deliberately not
   // consumed — the base handler still runs.
+  if (message == WM_SHOWWINDOW && wparam && has_tray_hidden_placement_ &&
+      !IsIconic(hwnd)) {
+    // Any show route gets the same monitor fix as RestoreFromTray. Clear the
+    // flag first so the SW_MAXIMIZE inside ApplyFramePlacement cannot recurse
+    // back into this branch.
+    const RECT frame = tray_hidden_frame_;
+    const bool maximized = tray_hidden_maximized_;
+    has_tray_hidden_placement_ = false;
+    ApplyFramePlacement(hwnd, frame, maximized);
+  }
   if (message == WM_SHOWWINDOW && tray_channel_ && !IsIconic(hwnd)) {
     tray_channel_->InvokeMethod(
         wparam ? "trayShown" : "trayHidden",
@@ -4539,9 +4722,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       if (IsKeyRepeat(lparam)) {
         return 0;
       }
+      // A live reconnect pins the chrome, and while the stream is not playing
+      // the paused-media rule re-shows it after every hide. Treating that
+      // pinned chrome as "visible" made Escape hide it forever and never reach
+      // the exit rung - the reported "no way to close while Reconnecting".
+      // Menus/info still peel first; with neither open, Back exits.
+      const bool controls_block_exit =
+          native_controls_visible_ && !g_native_control_state.reconnecting;
       switch (iptvs::NextPlayerBackAction(
           g_native_control_state.open_menu != NativeMenuKind::kNone,
-          g_native_control_state.info_open, native_controls_visible_)) {
+          g_native_control_state.info_open, controls_block_exit)) {
       case iptvs::PlayerBackAction::kCloseMenu:
         g_native_control_state.open_menu = NativeMenuKind::kNone;
         // The same repaint/region/hide-timer path a click on the menu's own
@@ -4560,6 +4750,17 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       case iptvs::PlayerBackAction::kExit:
         NotifyNativeControlCommand("back");
         break;
+      }
+      return 0;
+    }
+
+    // A visible error panel owns OK/Enter: retry, the same command its button
+    // posts — a remote with no pointer must be able to recover. (Back above
+    // already exits; the loading pill owns no key.)
+    if (!g_native_control_state.error.empty() &&
+        (wparam == VK_RETURN || wparam == VK_SPACE || wparam == VK_SELECT)) {
+      if (!IsKeyRepeat(lparam)) {
+        NotifyNativeControlCommand("retry");
       }
       return 0;
     }
@@ -5109,10 +5310,12 @@ void FlutterWindow::ResizeNativeControls() {
 // Whether the overlay *window* should be on screen. Wider than
 // native_controls_visible_, which is the chrome: with the chrome hidden the
 // window is still up while the zap banner has something to say, while the quick
-// list is open, or while the persistent HUD is showing.
+// list is open, while the persistent HUD is showing, or while the stream is
+// still loading (the spinner must not vanish with the chrome).
 bool FlutterWindow::NativeOverlayTargetVisible() const {
   return native_controls_visible_ || ZapBannerShown() || QuickListShown() ||
-         NativeHudShown();
+         NativeHudShown() || g_native_control_state.loading ||
+         !g_native_control_state.error.empty();
 }
 
 void FlutterWindow::BringNativeControlsToFront() {
@@ -5190,6 +5393,20 @@ void FlutterWindow::UpdateNativeControlsRegion() {
         DeleteObject(name_region);
       }
     }
+    if (g_native_control_state.loading) {
+      const RECT loading = NativeLoadingRect(rect);
+      HRGN loading_region = CreateRectRgn(loading.left, loading.top,
+                                          loading.right, loading.bottom);
+      CombineRgn(banner_region, banner_region, loading_region, RGN_OR);
+      DeleteObject(loading_region);
+    }
+    if (!g_native_control_state.error.empty()) {
+      const RECT error = NativeErrorRect(rect);
+      HRGN error_region =
+          CreateRectRgn(error.left, error.top, error.right, error.bottom);
+      CombineRgn(banner_region, banner_region, error_region, RGN_OR);
+      DeleteObject(error_region);
+    }
     SetWindowRgn(native_controls_overlay_, banner_region, FALSE);
     native_controls_region_dirty_ = false;
     return;
@@ -5228,6 +5445,20 @@ void FlutterWindow::UpdateNativeControlsRegion() {
       CombineRgn(region, region, list_region, RGN_OR);
       DeleteObject(list_region);
     }
+  }
+  if (g_native_control_state.loading) {
+    const RECT loading = NativeLoadingRect(rect);
+    HRGN loading_region =
+        CreateRectRgn(loading.left, loading.top, loading.right, loading.bottom);
+    CombineRgn(region, region, loading_region, RGN_OR);
+    DeleteObject(loading_region);
+  }
+  if (!g_native_control_state.error.empty()) {
+    const RECT error = NativeErrorRect(rect);
+    HRGN error_region =
+        CreateRectRgn(error.left, error.top, error.right, error.bottom);
+    CombineRgn(region, region, error_region, RGN_OR);
+    DeleteObject(error_region);
   }
   SetWindowRgn(native_controls_overlay_, region, FALSE);
   native_controls_region_dirty_ = false;
@@ -5346,9 +5577,12 @@ void FlutterWindow::ApplyNativeControlsVisibility() {
   // WS_EX_TRANSPARENT for as long as it is up. Its rect is already in the window
   // region (`UpdateNativeControlsRegion` ORs it in with the chrome down, or the
   // panel would be clipped away entirely), so the rows stay reachable without it
-  // and nothing changes about the banner's pass-through.
-  const bool wants_transparent =
-      !native_controls_visible_ && !QuickListShown();
+  // and nothing changes about the banner's pass-through. **The error panel is the
+  // other exception**: its Retry button must take clicks even with the chrome
+  // down (the loading pill, by contrast, is decoration and stays pass-through).
+  const bool wants_transparent = !native_controls_visible_ &&
+                                 !QuickListShown() &&
+                                 g_native_control_state.error.empty();
   const LONG_PTR ex_style =
       GetWindowLongPtr(native_controls_overlay_, GWL_EXSTYLE);
   const LONG_PTR wanted_ex_style =
@@ -5421,6 +5655,20 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableBoolArg(args, "isFavorite", g_native_control_state.is_favorite);
   g_native_control_state.reconnecting =
       EncodableBoolArg(args, "reconnecting", g_native_control_state.reconnecting);
+  const bool was_loading = g_native_control_state.loading;
+  g_native_control_state.loading =
+      EncodableBoolArg(args, "loading", g_native_control_state.loading);
+  // The loading pill is a region band of its own (the middle of the picture), so
+  // a change needs the region rebuilt or it is clipped away.
+  if (g_native_control_state.loading != was_loading) {
+    native_controls_region_dirty_ = true;
+  }
+  const std::wstring was_error = g_native_control_state.error;
+  g_native_control_state.error =
+      EncodableStringArg(args, "error", g_native_control_state.error);
+  if (g_native_control_state.error != was_error) {
+    native_controls_region_dirty_ = true;
+  }
   g_native_control_state.playing =
       EncodableBoolArg(args, "playing", g_native_control_state.playing);
   g_native_control_state.fullscreen =

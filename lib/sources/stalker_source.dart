@@ -809,6 +809,12 @@ class StalkerSource
           _firstString(details, ['description', 'descr', 'plot']) ??
           item.description,
       year: _releaseDate(details, fallback: item.year),
+      // The detail payload's own runtime, when the list omitted it — same keys
+      // and parser as the list mapper, so the opened item is never poorer than
+      // the card it was opened from.
+      durationSeconds: _parseDurationSeconds(
+        _firstString(details, ['duration', 'time', 'length']),
+      ) ?? item.durationSeconds,
       extra: {...item.extra, 'details': details},
     );
   }

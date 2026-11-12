@@ -14,6 +14,8 @@ import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/widgets/focusable_card.dart';
 import 'package:iptvs/widgets/tv_text_field.dart';
 
+import 'support/temp_dir.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   FlutterSecureStorage.setMockInitialValues({});
@@ -97,7 +99,7 @@ void main() {
     tearDown(() async {
       await db?.close();
       db = null;
-      await tempDir.delete(recursive: true);
+      await deleteTestTempDir(tempDir);
     });
 
     testWidgets('a category far down the list is not built', (tester) async {
@@ -195,7 +197,7 @@ void main() {
     tearDown(() async {
       await db?.close();
       db = null;
-      await tempDir.delete(recursive: true);
+      await deleteTestTempDir(tempDir);
     });
 
     /// Mounts the screen with [initial] as the stored config and returns the
@@ -401,7 +403,7 @@ void main() {
     tearDown(() async {
       await db?.close();
       db = null;
-      await tempDir.delete(recursive: true);
+      await deleteTestTempDir(tempDir);
     });
 
     Future<SourceStore> mount(WidgetTester tester, SourceConfig initial) async {
@@ -506,7 +508,7 @@ void main() {
     tearDown(() async {
       await db?.close();
       db = null;
-      await tempDir.delete(recursive: true);
+      await deleteTestTempDir(tempDir);
     });
 
     Future<SourceStore> mount(WidgetTester tester, SourceConfig initial) async {

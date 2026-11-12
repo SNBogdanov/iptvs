@@ -166,28 +166,47 @@ class MediaTabController extends ChangeNotifier {
   /// arrangement legitimately starts at one screen.
   int shownCountFloor = 0;
 
+  bool hideWatched = false;
+
+  void setHideWatched(bool value) {
+    if (hideWatched == value) return;
+    _set(() {
+      hideWatched = value;
+      shownCountFloor = 0;
+    });
+  }
+
   /// Raises [shownCountFloor] to [count]. Called by the view after each build;
   /// never notifies (it changes no rendered state).
   void noteShownCount(int count) {
     if (count > shownCountFloor) shownCountFloor = count;
   }
+
   /// Rebuild [continueWatching] from the saved positions, resolving ids
   /// against the cached media items (unknown ids — e.g. items whose category
   /// was never cached — are skipped rather than shown title-less).
   ///
-  /// Publishes [resumeProgress] immediately afterwards, off the same read: both
-  /// come from `playback_positions`, and a card bar that lagged the rail by a
-  /// reload would show a title the rail had already dropped.
+  /// Publishes [resumeProgress] immediately afterwards: the rail comes from
+  /// `playback_positions`, while the bars merge `watched_media` too (a finished
+  /// title has no position row), and a card bar that lagged the rail by a reload
+  /// would show a title the rail had already dropped.
   Future<void> loadContinueWatching() async {
     final positions = await repo.db.readRecentPositions(repo.source.id);
     final wanted = positions.where((p) => p.kind == _resumeKind).toList();
     if (wanted.isEmpty) {
-      if (continueWatching.isNotEmpty || resumeProgress.isNotEmpty) {
-        _set(() {
-          continueWatching = const [];
-          resumeProgress = const {};
-        });
+      // The rail is empty, but [resumeProgress] is **not** necessarily: a
+      // finished title has no `playback_positions` row (it is deleted at
+      // completion) and lives only in `watched_media`, which
+      // [_loadResumeProgress] merges in as a full bar. Clearing the map here
+      // erased every watched bar the moment the last in-progress title ended —
+      // e.g. an auto-advance that finished the film (and whose next-title fetch
+      // then failed, so nothing new started) — and the bars only came back once
+      // some other title was played. Clear the rail only; let the progress read
+      // decide the bars.
+      if (continueWatching.isNotEmpty) {
+        _set(() => continueWatching = const []);
       }
+      await _loadResumeProgress();
       return;
     }
     final ids = [for (final p in wanted) p.itemId];
@@ -247,10 +266,14 @@ class MediaTabController extends ChangeNotifier {
       if (_resumeKind != ContentKind.movie) {
         progress = const <String, double>{};
       } else {
-        progress =
-            await repo.db.readPlaybackProgress(repo.source.id, _resumeKind);
-        for (final id
-            in await repo.db.readWatchedIds(repo.source.id, _resumeKind)) {
+        progress = await repo.db.readPlaybackProgress(
+          repo.source.id,
+          _resumeKind,
+        );
+        for (final id in await repo.db.readWatchedIds(
+          repo.source.id,
+          _resumeKind,
+        )) {
           progress[id] = 1.0;
         }
       }

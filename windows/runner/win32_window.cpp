@@ -150,7 +150,12 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
-  return ShowWindow(window_handle_, SW_SHOWNORMAL);
+  // SW_SHOWNORMAL restores a maximized window to its normal rectangle. The
+  // saved placement can be applied before the engine's first-frame callback
+  // reaches here, and that restore would silently undo an applied
+  // maximized state (and move it back to the monitor it was maximized on).
+  // SW_SHOW displays the window in its current size, position and state.
+  return ShowWindow(window_handle_, SW_SHOW);
 }
 
 // static

@@ -171,7 +171,7 @@ class ChannelToolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final narrow = constraints.maxWidth < 620;
+        final narrow = constraints.maxWidth < 760;
         final search = TvTextField(
           controller: searchController,
           hintText: hintText,
@@ -183,7 +183,7 @@ class ChannelToolbar extends StatelessWidget {
           showClear: query.isNotEmpty,
           onClear: onClearQuery,
         );
-        final trailing = _trailingControls();
+        final trailing = _trailingControls(narrow: narrow);
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
           child: Focus(
@@ -229,10 +229,30 @@ class ChannelToolbar extends StatelessWidget {
     );
   }
 
-  Widget? _trailingControls() {
+  Widget? _trailingControls({required bool narrow}) {
     final controls = <Widget>[?categoryControl, ?sortControl, ?actionControl];
     if (controls.isEmpty) return null;
     if (controls.length == 1) return controls.single;
+    if (narrow) {
+      final hasSecondRow = sortControl != null || actionControl != null;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ?categoryControl,
+          if (categoryControl != null && hasSecondRow)
+            const SizedBox(height: 8),
+          if (hasSecondRow)
+            Row(
+              children: [
+                if (sortControl != null) Expanded(child: sortControl!),
+                if (sortControl != null && actionControl != null)
+                  const SizedBox(width: 8),
+                ?actionControl,
+              ],
+            ),
+        ],
+      );
+    }
     // The category picker takes the slack; the rest are fixed-width, so on a
     // narrow window it is the one control that can usefully shrink.
     return Row(
@@ -251,6 +271,7 @@ class ChannelToolbarIconButton extends StatefulWidget {
   final String tooltip;
   final IconData icon;
   final bool busy;
+  final bool selected;
   final VoidCallback? onPressed;
 
   const ChannelToolbarIconButton({
@@ -259,6 +280,7 @@ class ChannelToolbarIconButton extends StatefulWidget {
     required this.icon,
     required this.onPressed,
     this.busy = false,
+    this.selected = false,
   });
 
   @override
@@ -299,14 +321,18 @@ class _ChannelToolbarIconButtonState extends State<ChannelToolbarIconButton> {
           focusNode: _node,
           style: IconButton.styleFrom(
             backgroundColor: _focused ? AppColors.panelHi : AppColors.panel,
-            foregroundColor: AppColors.textHi,
+            foregroundColor: widget.selected
+                ? AppColors.accent
+                : AppColors.textHi,
             disabledBackgroundColor: AppColors.panel,
             disabledForegroundColor: AppColors.textLo,
             overlayColor: Colors.transparent,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AppRadius.control),
               side: BorderSide(
-                color: _focused ? AppColors.accent : AppColors.line,
+                color: _focused || widget.selected
+                    ? AppColors.accent
+                    : AppColors.line,
                 width: _focused ? 2 : 1,
               ),
             ),

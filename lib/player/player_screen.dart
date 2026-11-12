@@ -1,6 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer' as developer;
-import 'dart:io' show Platform;
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -28,7 +29,8 @@ import 'player_chrome_prefs.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
 import 'playback_audio_session.dart';
-import 'tray.dart';import 'zap_command.dart';
+import 'tray.dart';
+import 'zap_command.dart';
 import 'next_video_policy.dart';
 import 'zap_quick_list.dart';
 
@@ -39,6 +41,18 @@ const int kReconnectStallMs = 8000;
 /// Cap on the attempt-scaled backoff between repeated reconnect attempts.
 /// Mirrors Android's `ReconnectPolicy.MAX_BACKOFF_MS`.
 const int kReconnectMaxBackoffMs = 30000;
+
+/// The marker a panel puts in an HLS manifest for a channel it will **not**
+/// serve: the playlist answers HTTP 200 but points at
+/// `…?serve_not_available&id=<id>`, so mpv treats it as a live stream and raises
+/// no error — it just keeps fetching that dead URL forever. In a zapping mode
+/// the player probes the manifest for this and skips the channel instead.
+const String kUnavailableManifestMarker = 'serve_not_available';
+
+/// Whether [url] is an HLS manifest worth probing for
+/// [kUnavailableManifestMarker]. A raw MPEG-TS/MP4 stream is not a manifest and
+/// can be large, so it is never fetched just to look at it.
+bool looksLikeHlsManifest(String url) => looksLikeHlsPlaylistUrl(url);
 
 /// Minimum gap (ms) required since the last reconnect attempt before the next
 /// may fire. [priorAttempts] is the number of reconnect attempts already made
@@ -58,9 +72,11 @@ int reconnectMinGapMs({
 /// Whether a media_kit `completed` event should trigger a live reconnect.
 /// A clean server-side EOF surfaces as mpv `eof-reached` → `completed=true`
 /// with `buffering=false`, so the buffering-gated stall watchdog can never see
-/// it (and `reconnect_at_eof` can't compensate — see `kLiveMpvOptions`). Live
-/// treats it as a drop, mirroring the Linux-native `end-file` drop signal; VOD
-/// completing is a legitimate end of playback.
+/// it. A non-HLS live stream gets `reconnect_at_eof` so ffmpeg absorbs that EOF
+/// itself; this predicate is the fallback for every shape that does not (HLS,
+/// and any engine that ignores the option). Live treats it as a drop, mirroring
+/// the Linux-native `end-file` drop signal; VOD completing is a legitimate end
+/// of playback.
 ///
 /// [nativeSessionActive] means specifically that a *separate* engine owns
 /// playback while the media_kit `_player` sits **idle**, so a `completed` event
@@ -814,14 +830,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_fetchedVodDescriptionId == item.id) return;
     _fetchedVodDescriptionId = item.id;
     unawaited(
-      describe(item).then((text) {
-        if (!mounted) return;
-        if (_currentVodMedia?.id != item.id) return;
-        final trimmed = text?.trim();
-        if (trimmed == null || trimmed.isEmpty) return;
-        _fetchedVodDescription = trimmed;
-        unawaited(_syncNativeControlState());
-      }).catchError((_) {}),
+      describe(item)
+          .then((text) {
+            if (!mounted) return;
+            if (_currentVodMedia?.id != item.id) return;
+            final trimmed = text?.trim();
+            if (trimmed == null || trimmed.isEmpty) return;
+            _fetchedVodDescription = trimmed;
+            unawaited(_syncNativeControlState());
+          })
+          .catchError((_) {}),
     );
   }
 
@@ -859,6 +877,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     widget.onAspectChanged?.call(label);
   }
+
   // Live-edge sync for the Windows overlay: false once the user pauses live (and
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
@@ -871,6 +890,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _lastReconnectMs = 0;
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
+  // Hidden to the tray (boss key / close-to-tray). A live stream is **stopped**
+  // rather than paused: a paused live keeps its now-stale buffer, so the resume
+  // plays seconds behind the live edge and the picture breaks where the demuxer
+  // crosses the old segments. Stopping also releases the provider connection,
+  // which is what stops the polling behind a hidden window. VOD keeps the pause
+  // (resuming from the same frame is the point there). Every recovery path that
+  // could reopen the stream checks this flag and stands down while it is set.
+  bool _silenced = false;
 
   /// Typed channel numbers: **[LiveZapController]'s own entry**, not a second
   /// one.
@@ -923,6 +950,15 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _loggedActiveVo = false;
   bool _loggedHwdec = false;
   String? _lastVideoParamsLog;
+  // A black mask over the embedded video during a live zap. The previous
+  // stream's last frame lingers in media_kit's texture across
+  // stop → resolve → open, so without this the old channel flashes back for
+  // about a second after the black screen, then gives way to the new picture.
+  // Raised in [_zapStopCurrent] and lowered once the *new* stream's decoder
+  // reports a pixel format (the point frames start flowing), plus a small grace
+  // so the first new frame has actually replaced the stale one.
+  bool _zapBlackout = false;
+  Timer? _zapBlackoutTimer;
   // HDR10+ detection (Windows/mpv). mpv has no clean "has HDR10+" flag, so we
   // infer it from the ST2094-40 scene dynamic-metadata sub-properties — which are
   // zero for plain HDR10 and, unlike max-pq-y, aren't synthesised by
@@ -935,9 +971,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   // VOD resume plumbing (null when untracked / live).
   Timer? _positionPersistTimer;
   Duration? _pendingEmbeddedResume;
+
   /// The learned run-length has been written back for this route; see
   /// [_recordLearnedMediaDuration].
   bool _mediaDurationRecorded = false;
+
   /// Index into [kAspectModes]: the user's stored choice if they have one,
   /// otherwise [defaultAspectModeIndex] — Fill on a television, Fit on a
   /// desktop, and on a handset whatever the window's shape asks for (so
@@ -960,7 +998,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     1.5,
     2.0,
   ];
-
 
   // Whether playback is *currently* on the native HWND surface. Starts from the
   // initial SDR/HDR decision (`preferWindowsEmbedded`) but flips true when an
@@ -1069,14 +1106,28 @@ class _PlayerScreenState extends State<PlayerScreen>
         _logPlayback('error ${_redactPlayback(message)}');
         if (!mounted) return;
         if (_isLive) {
+          if (_silenced) return;
           _reconnectLive(force: true);
         } else {
-          setState(() => _error = message);
+          // Redacted: media_kit's error text embeds the stream URL, which carries
+          // provider credentials in its path — the message is shown on screen and
+          // pushed to the native error panel.
+          setState(() => _error = _redactPlayback(message));
+          // Clear the native "Loading…" pill: a failed open is not loading.
+          unawaited(_syncNativeControlState());
         }
       }),
     );
     // Track buffering for the live reconnect watchdog.
-    _subs.add(_player.stream.buffering.listen((value) => _buffering = value));
+    _subs.add(
+      _player.stream.buffering.listen((value) {
+        if (value == _buffering) return;
+        _buffering = value;
+        // Drives the Windows GDI overlay's "Loading…" pill. A no-op elsewhere —
+        // `_syncNativeControlState` is gated by `_drivesNativeControlState`.
+        unawaited(_syncNativeControlState());
+      }),
+    );
     // Clean server-side EOF (mpv eof-reached → completed=true, buffering=false)
     // is invisible to the buffering-gated watchdog above — treat it as a live
     // drop, like the Linux-native end-file signal. App-initiated stop() emits
@@ -1099,6 +1150,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           nativeSessionActive: _separateEngineOwnsPlayback,
         );
         if (shouldReconnect) {
+          if (_silenced) return;
           _logPlayback('live stream completed (clean EOF) — reconnecting');
           _reconnectLive(force: true);
           return;
@@ -1227,6 +1279,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           _lastVideoParamsLog = line;
           _logPlayback(line);
         }
+        // A zap's black mask comes off only once the new decoder is producing
+        // frames (a pixel format with real dimensions), never on the "null
+        // format / w,h known" event that arrives before the first frame.
+        if (_zapBlackout &&
+            (params.hwPixelformat ?? params.pixelformat) != null &&
+            (params.w ?? 0) > 0 &&
+            (params.h ?? 0) > 0) {
+          _endZapBlackout();
+        }
         unawaited(_logActiveVideoOutput());
         unawaited(_probeHdr10Plus(params));
         unawaited(_maybeEscalateLinuxNative(params));
@@ -1330,8 +1391,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// Null when this route has no zap session; a closed list is pushed as
   /// `{open: false, …}` so the Lua side always has something to tear down
   /// with rather than having to treat "absent" as "close".
-  Map<String, Object?>? _quickListOverlayPayload() =>
-      _zap?.quickListPayload();
+  Map<String, Object?>? _quickListOverlayPayload() => _zap?.quickListPayload();
 
   /// The shared Flutter overlay's quick list, or null off any route that
   /// doesn't zap. The overlay draws it itself from this pure value object —
@@ -1435,11 +1495,33 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// the surfaces this `_player` actually drives stop here.
   Future<void> _zapStopCurrent() async {
     if (_separateEngineOwnsPlayback) return;
+    _beginZapBlackout();
     try {
       await _player.stop();
     } catch (error) {
       _logPlayback('zap stop failed: ${_redactPlayback('$error')}');
     }
+  }
+
+  /// Cover the embedded video with black while a zap is in flight (see
+  /// [_zapBlackout]).
+  void _beginZapBlackout() {
+    _zapBlackoutTimer?.cancel();
+    _zapBlackoutTimer = null;
+    if (!mounted || _zapBlackout) return;
+    setState(() => _zapBlackout = true);
+  }
+
+  /// Lower the mask once the new stream's decoder reports a pixel format, with a
+  /// short grace so the first new frame has replaced the stale one. Called from
+  /// the `videoParams` listener.
+  void _endZapBlackout() {
+    if (!_zapBlackout || _zapBlackoutTimer != null) return;
+    _zapBlackoutTimer = Timer(const Duration(milliseconds: 150), () {
+      _zapBlackoutTimer = null;
+      if (!mounted || !_zapBlackout) return;
+      setState(() => _zapBlackout = false);
+    });
   }
 
   /// Applies a settled zap on the surface already in use.
@@ -1772,6 +1854,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _invokeNativeZapTo(stream, entry);
     } else if (_linuxNativeSession != null) {
       final session = _linuxNativeSession!;
+      await _applyLinuxLiveStreamLavfOption(session, stream.url);
       await session.command(
         LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
       );
@@ -1785,6 +1868,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else {
       final platform = _player.platform;
       if (platform is NativePlayer) {
+        await _applyLiveStreamLavfOption(stream.url);
         for (final option in mpvBufferOptions(_bufferPreset).entries) {
           try {
             await platform.setProperty(option.key, option.value);
@@ -1800,8 +1884,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       // once its length is known (a cold seek right after open can beat the
       // demuxer). Cleared unconditionally: a step without a resume must not
       // inherit the previous title's pending seek.
-      _pendingEmbeddedResume =
-          (resume != null && resume > Duration.zero) ? resume : null;
+      _pendingEmbeddedResume = (resume != null && resume > Duration.zero)
+          ? resume
+          : null;
       await _player.open(
         Media(
           stream.url,
@@ -1946,7 +2031,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Windows playback. Off Windows there's no separate surface to switch —
     // the embedded VideoController already adopted the same player/controller.
     final adopting = widget.existingPlayer != null;
-    final canSkipOpen = adopting &&
+    final canSkipOpen =
+        adopting &&
         !_hasOpened &&
         (!_usesWindowsNativeSurface || nativeWindowHandle != null);
     if (canSkipOpen && _usesWindowsNativeSurface) _didWindowsHotSwap = true;
@@ -1972,8 +2058,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     await playbackAudioSession.apply(_player);
     if (canSkipOpen) await _player.play();
     _showNativeControls();
-      _hasOpened = true;
-    }
+    _hasOpened = true;
+  }
 
   Future<bool> _tryOpenNativeHdrPlayer() async {
     // Android always tries (engine selection happens inside HdrPlayerActivity).
@@ -2013,7 +2099,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             // natives read it as `EXTRA_ZAP_ENABLED` once, at launch; they
             // fail closed, so an older build that doesn't send it simply
             // draws no button.
-'zapEnabled': widget.zap != null,
+            'zapEnabled': widget.zap != null,
             // Device-wide chrome preferences, for the natives that have no
             // other way to learn them: Android seeds its Compose overlay from
             // these Intent extras once at launch (its Activity has no inbound
@@ -2544,16 +2630,35 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   /// The boss key / hide-to-tray signal (docs/player.md "System tray icon").
-  /// `_player` presents both the embedded and the Windows-native surfaces, so a
-  /// pause silences both; the separate-engine surfaces keep their own idling and
-  /// a pause there is a no-op.
+  /// `_player` presents both the embedded and the Windows-native surfaces. Live
+  /// is **stopped** — a paused live resumes on a stale buffer and breaks at the
+  /// segment boundary — while VOD is paused so it continues from the same frame.
+  /// On a separate-engine surface this `_player` is idle, so both are no-ops and
+  /// that engine keeps its own idling.
   void _onSilenceRequested() {
+    if (_silenced) return;
+    _silenced = true;
+    if (_isLive) {
+      // Stop, not pause: see [_silenced]. This also ends the provider polling.
+      _logPlayback('silence requested: stopping live stream');
+      unawaited(_player.stop());
+      return;
+    }
     _logPlayback('silence requested: pausing player');
     unawaited(_player.pause());
   }
 
-  /// The restore-from-tray leg: resume what [_onSilenceRequested] paused.
+  /// The restore-from-tray leg. A live stream was stopped, so it is reopened at
+  /// the **live edge** ("Go to live") rather than resumed from a stale buffer;
+  /// VOD simply continues from the paused frame.
   void _onResumeRequested() {
+    if (!_silenced) return;
+    _silenced = false;
+    if (_isLive) {
+      _logPlayback('resume requested: reopening live at the edge');
+      unawaited(_goToLive());
+      return;
+    }
     _logPlayback('resume requested: playing player');
     unawaited(_player.play());
   }
@@ -2600,6 +2705,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       'ios engine fallback opening embedded mpv live=$_isLive '
       'resume=${position?.inSeconds ?? 0}s',
     );
+    await _applyLiveStreamLavfOption(stream.url);
     await _player.open(
       Media(
         stream.url,
@@ -2649,6 +2755,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         // --keep-open holds the last frame; Back exits cleanly.
         if (!_isLive) return;
         _buffering = true;
+        if (_silenced) return;
         unawaited(_reconnectLive(force: true));
       case LinuxNativePlaybackSignal.stalled:
         // Initial buffering before the first file-loaded is startup latency,
@@ -2959,11 +3066,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await session.command(['set_property', 'panscan', mode.panscan]);
         // Pushed by every mode, not only Stretch: the cycle has to undo it on
         // the next press.
-        await session.command([
-          'set_property',
-          'keepaspect',
-          mode.keepaspect,
-        ]);
+        await session.command(['set_property', 'keepaspect', mode.keepaspect]);
         await session.command([
           'set_property',
           'video-aspect-override',
@@ -3137,6 +3240,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         // pushes the new state back to the overlay star.
         _toggleFavorite();
         break;
+      case 'retry':
+        // The native error panel's Retry button/OK: the same re-open the Flutter
+        // PlayerErrorOverlay's Retry performs (`_open` clears `_error` first).
+        await _open();
+        break;
       case 'show':
         break;
     }
@@ -3146,6 +3254,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   // Watchdog: a live stream stuck buffering past the threshold gets reloaded.
   void _pollLiveReconnect() {
     if (!_isLive || !mounted) return;
+    // Hidden to the tray: the player is paused and must not be reopened behind
+    // the hidden window. Any recovery it needs is deferred to the restore leg.
+    if (_silenced) {
+      _stalledSinceMs = 0;
+      return;
+    }
     // A settling zap deliberately stopped the stream and is resolving the
     // next one; reading that as a stall would reconnect the channel the user
     // has just left. Mirrors Kotlin's `resolveGate.inFlight` early return.
@@ -3173,12 +3287,30 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// [force] (a hard error) skips the stall threshold but still rate-limits.
   Future<void> _reconnectLive({required bool force}) async {
     if (!_isLive || !mounted) return;
+    // A settling zap has already stopped the stream and is resolving the one the
+    // user asked for; reconnecting here would fight it.
+    if (_silenced || (_zap?.settling ?? false)) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final minGap = reconnectMinGapMs(
       priorAttempts: _reconnectAttempt,
       force: force,
     );
     if (_lastReconnectMs != 0 && now - _lastReconnectMs < minGap) return;
+    // A panel can answer an unavailable channel with a 200 playlist that points
+    // at `serve_not_available`, which mpv accepts as a live stream and retries
+    // forever (no error event). In a zapping mode, skip the dead channel instead
+    // of re-opening it: "stop the current channel early and go to the next".
+    final zap = _zap;
+    if (zap != null &&
+        (zap.autoSwitch.enabled || zap.random) &&
+        await _liveManifestUnavailable()) {
+      _lastReconnectMs = now; // rate-limit the skip like a reconnect
+      _logPlayback(
+        'manifest $kUnavailableManifestMarker — zapping to the next channel',
+      );
+      zap.channelUp();
+      return;
+    }
     _reconnectAttempt++;
     _lastReconnectMs = now;
     _stalledSinceMs = now;
@@ -3197,11 +3329,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         // so reload the source in mpv — same live-edge `loadfile replace` as
         // "Go to live", with headers refreshed alongside the (possibly
         // re-resolved) URL.
+        await _applyLinuxLiveStreamLavfOption(linuxSession, stream.url);
         await linuxSession.command(
           LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
         );
         await linuxSession.command(['loadfile', stream.url, 'replace']);
       } else {
+        await _applyLiveStreamLavfOption(stream.url);
         await _player.open(
           Media(
             stream.url,
@@ -3211,6 +3345,53 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     } catch (error) {
       _logPlayback('live reconnect failed: ${_redactPlayback('$error')}');
+    }
+  }
+
+  /// Whether the live stream's HLS manifest marks the channel unavailable.
+  ///
+  /// Some panels answer an unavailable channel with a 200 and a playlist whose
+  /// segment URI is `…?serve_not_available&id=<id>`. mpv accepts that as a live
+  /// stream, so no error event fires and it retries the dead URL forever. Probe
+  /// the manifest itself and read [kUnavailableManifestMarker]; HLS only, since
+  /// a raw TS/MP4 body is not a manifest and could be large. Fails soft — any
+  /// transport/parse problem means "assume available", so a probe can never on
+  /// its own cause a channel to be skipped.
+  Future<bool> _liveManifestUnavailable() async {
+    final url = _stream.url;
+    if (!looksLikeHlsManifest(url)) return false;
+    final headers = _stream.headers;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(Uri.parse(url));
+      String? userAgent;
+      for (final entry in headers.entries) {
+        if (entry.key.toLowerCase() == HttpHeaders.userAgentHeader) {
+          userAgent = entry.value;
+        } else {
+          request.headers.set(entry.key, entry.value);
+        }
+      }
+      if (userAgent != null) {
+        request.headers.set(HttpHeaders.userAgentHeader, userAgent);
+      }
+      final response = await request.close().timeout(kHttpReadTimeout);
+      final body = await readBoundedBytes(
+        response,
+        contentLength: response.contentLength,
+        maximumBytes: 256 * 1024,
+        idleTimeout: const Duration(seconds: 8),
+        totalTimeout: kHttpReadTimeout,
+        workloadName: 'live manifest',
+      ).timeout(kHttpReadTimeout);
+      return utf8
+          .decode(body, allowMalformed: true)
+          .contains(kUnavailableManifestMarker);
+    } catch (error) {
+      _logPlayback('manifest probe failed: ${_redactPlayback('$error')}');
+      return false;
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -3329,6 +3510,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     'canFavorite': _canFavorite,
     'isFavorite': _favorite,
     'reconnecting': _reconnecting,
+    // The Windows GDI overlay draws a centred "Loading…" pill from this while
+    // the native video HWND has no picture. On that surface the video is a child
+    // window *above* the Flutter layer, so a Flutter spinner would be invisible —
+    // the reported symptom was a plain black screen with no progress. A
+    // reconnect owns its own badge, and a known error is not "loading".
+    'loading': _buffering && !_reconnecting && _error == null,
+    // The native error panel (Windows GDI) — the Flutter PlayerErrorOverlay is
+    // hidden behind the native video HWND there. Already redacted when set.
+    'error': ?_error,
     // The Windows GDI overlay has no open-time payload to read: its whole
     // picture of the stream is [NativeControlState], filled by this push. So
     // these two ride here rather than only on `open`, or Windows would keep
@@ -3377,7 +3567,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           // controller, such as the EPG grid's own play path — where Dart
           // declines the command and the key becomes dead instead of
           // revealing the chrome.
-'zapEnabled': widget.zap != null,
+          'zapEnabled': widget.zap != null,
           // Whether the previous/next pair should be drawn at all. **This**, not
           // `zapEnabled`, is what the Windows GDI overlay gates the two transport
           // buttons on: the pair serves live zapping and VOD stepping alike, and
@@ -3831,6 +4021,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
     if (_linuxNativeSession != null) {
       final session = _linuxNativeSession!;
+      await _applyLinuxLiveStreamLavfOption(session, stream.url);
       await session.command(
         LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
       );
@@ -3839,6 +4030,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _pushLinuxOverlayState();
       return;
     }
+    await _applyLiveStreamLavfOption(stream.url);
     await _player.open(
       Media(
         stream.url,
@@ -3934,6 +4126,39 @@ class _PlayerScreenState extends State<PlayerScreen>
     await _player.playOrPause();
   }
 
+  /// Re-applies the URL-dependent live `stream-lavf-o` before opening [url].
+  ///
+  /// The base live tuning is applied once per surface, but `reconnect_at_eof`
+  /// has to follow the URL: an HLS manifest is finite and must not get it,
+  /// while a raw TS provider that closes each response at a chunk boundary
+  /// needs it to keep the demuxer alive. A zap can cross those two shapes on
+  /// the same player, so every reopen path re-applies the value instead of
+  /// assuming the first open still describes the stream.
+  Future<void> _applyLiveStreamLavfOption(String url) async {
+    if (!_isLive) return;
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    try {
+      await platform.setProperty('stream-lavf-o', liveStreamLavfOForUrl(url));
+    } catch (error) {
+      _logPlayback('warn mpv stream-lavf-o failed: $error');
+    }
+  }
+
+  /// Linux-native counterpart of [_applyLiveStreamLavfOption]: the embedded
+  /// `_player` is idle there, so the option has to reach the mpv process.
+  Future<void> _applyLinuxLiveStreamLavfOption(
+    LinuxNativeSession session,
+    String url,
+  ) async {
+    if (!_isLive) return;
+    await session.command([
+      'set_property',
+      'stream-lavf-o',
+      liveStreamLavfOForUrl(url),
+    ]);
+  }
+
   Future<void> _configureNativePlayer(
     NativePlayer platform,
     int? nativeWindowHandle,
@@ -3943,7 +4168,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // untouched source runs mpv's own defaults exactly as before.
     final bufferOptions = mpvBufferOptions(_bufferPreset);
     final options = _isLive
-        ? {...kLiveMpvOptions, ...bufferOptions}
+        ? {...liveMpvOptionsForUrl(_stream.url), ...bufferOptions}
         : <String, String>{
             ...bufferOptions,
             // File-cache creation can fail for provider HTTP URLs on Windows,
@@ -4159,7 +4384,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
       return;
     }
-    final position = completed ? _player.state.duration : _player.state.position;
+    final position = completed
+        ? _player.state.duration
+        : _player.state.position;
     final duration = _player.state.duration;
     if (duration <= Duration.zero && !completed) return;
     _recordLearnedMediaDuration(duration > Duration.zero ? duration : position);
@@ -4248,6 +4475,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       reconnectTimer.cancel();
       if (wasActive) ResourceCounters.decReconnectTimers();
     }
+    _zapBlackoutTimer?.cancel();
+    _zapBlackoutTimer = null;
     _controlSyncThrottle?.cancel();
     for (final s in _subs) {
       s.cancel();
@@ -4550,22 +4779,15 @@ class _PlayerScreenState extends State<PlayerScreen>
             // button cannot disagree - the VOD branch lives in one place.
             const SingleActivator(LogicalKeyboardKey.pageDown): () =>
                 _zapListOpen
-                    ? _handleZapInput(
-                        const ZapCommand(
-                          ZapCommandKind.move,
-                          kZapPageRows,
-                        ),
-                      )
-                    : _stepNextEntry(),
-            const SingleActivator(LogicalKeyboardKey.pageUp): () =>
-                _zapListOpen
-                    ? _handleZapInput(
-                        const ZapCommand(
-                          ZapCommandKind.move,
-                          -kZapPageRows,
-                        ),
-                      )
-                    : _stepPreviousEntry(),
+                ? _handleZapInput(
+                    const ZapCommand(ZapCommandKind.move, kZapPageRows),
+                  )
+                : _stepNextEntry(),
+            const SingleActivator(LogicalKeyboardKey.pageUp): () => _zapListOpen
+                ? _handleZapInput(
+                    const ZapCommand(ZapCommandKind.move, -kZapPageRows),
+                  )
+                : _stepPreviousEntry(),
             const SingleActivator(LogicalKeyboardKey.mediaLast): () =>
                 _handleZapInput(
                   const ZapCommand(ZapCommandKind.previousChannel),
@@ -4593,12 +4815,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             // that is free on every remote and TV keyboard, where Ctrl is never
             // pressed for anything else. It is deliberately *not* the platform
             // undo chord, which this screen has no undo stack for.
-            SingleActivator(
-              LogicalKeyboardKey.keyZ,
-              control: true,
-            ): () => _handleZapInput(
-              const ZapCommand(ZapCommandKind.autoSwitch),
-            ),
+            SingleActivator(LogicalKeyboardKey.keyZ, control: true): () =>
+                _handleZapInput(const ZapCommand(ZapCommandKind.autoSwitch)),
             for (final entry in kDigitEntryKeys.entries)
               SingleActivator(entry.key): () => _handleZapInput(
                 ZapCommand(ZapCommandKind.digit, entry.value),
@@ -4614,6 +4832,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             child: Stack(
               children: [
                 Positioned.fill(child: _playbackSurface()),
+                // Zap mask: hides the previous channel's last frame, which
+                // otherwise lingers in the embedded texture through the reopen.
+                if (_zapBlackout)
+                  const Positioned.fill(child: ColoredBox(color: Colors.black)),
                 if (_error case final error?)
                   Positioned.fill(
                     child: PlayerErrorOverlay(

@@ -1,4 +1,5 @@
-// Regression net for the series "Continue watching" staleness fix.
+// Regression net for the series "Continue watching" staleness fix, plus the
+// details sheet's own summary line (date · runtime, and the description).
 //
 // Episodes picked in the series browser used to be played by a player route the
 // MediaDetailsSheet pushed itself, which skipped the screen's post-playback
@@ -220,6 +221,48 @@ void main() {
       expect(playedSiblings, isNotNull);
       expect(playedSiblings!.map((e) => e.id), contains('bbb'));
       expect(playedSiblings!.every((e) => e.kind == ContentKind.episode), isTrue);
+    },
+  );
+
+  testWidgets(
+    'the details sheet prints the runtime beside the date and the description',
+    (tester) async {
+      // The pre-play window only had the date, so a movie with a runtime in
+      // the cache showed "when" and nothing about "how long" — the sheet now
+      // runs the value through the same shared formatter the tiles use. The
+      // description (when the provider sent one) prints under it.
+      tester.view.physicalSize = const Size(1000, 1600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final repo = LibraryRepository(source: DemoSource(), db: db);
+      const movie = MediaItem(
+        id: 'movie-1',
+        title: 'Sample Movie',
+        kind: ContentKind.movie,
+        year: '2026-09-29',
+        durationSeconds: 6330,
+        description: 'A sample plot.',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MediaDetailsSheet(
+              repo: repo,
+              item: movie,
+              favorite: false,
+              onToggleFavorite: () {},
+              onPlay: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('1:45:30'), findsOneWidget);
+      expect(find.text('A sample plot.'), findsOneWidget);
     },
   );
 }
