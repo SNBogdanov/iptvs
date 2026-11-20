@@ -34,14 +34,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 // wants a `List<T>` must spell it `kotlin.collections.List`.
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Audiotrack
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Forward5
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
@@ -49,14 +48,13 @@ import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Replay30
 import androidx.compose.material.icons.filled.Replay5
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -910,47 +908,24 @@ private fun RightCluster(
         }
     }
     if (state.isLive) {
+        // The two live toggles are **buttons**, not an overflow menu: one press
+        // reaches either, a D-pad sees both without opening anything, and the
+        // state is visible on the control itself (accent tint) instead of
+        // behind a checkmark in a dropped-down list. Both are owned by Dart's
+        // LiveZapController; the banner reports the direction, so nothing here
+        // keeps a state copy that could disagree with the session.
         if (!spread) Spacer(Modifier.width(8.dp))
-        Box {
-            var menuOpen by remember { mutableStateOf(false) }
-            IconControlButton(Icons.Filled.MoreVert, "More options") {
-                onInteract(); menuOpen = true
-            }
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false },
-            ) {
-                // Both are toggles owned by Dart's LiveZapController; the
-                // banner reports the direction, so the menu needs no state
-                // copy that could disagree with the session.
-                DropdownMenuItem(
-                    text = { Text("Random zapping") },
-                    trailingIcon = if (state.randomZapping) {
-                        { Icon(Icons.Filled.Check, contentDescription = null) }
-                    } else {
-                        null
-                    },
-                    onClick = {
-                        menuOpen = false
-                        onInteract()
-                        callbacks.onZapCommand("zap:random")
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Auto-switch channels") },
-                    trailingIcon = if (state.autoSwitchEnabled) {
-                        { Icon(Icons.Filled.Check, contentDescription = null) }
-                    } else {
-                        null
-                    },
-                    onClick = {
-                        menuOpen = false
-                        onInteract()
-                        callbacks.onZapCommand("zap:auto")
-                    },
-                )
-            }
-        }
+        IconControlButton(
+            icon = Icons.Filled.Shuffle,
+            contentDescription = "Random zapping",
+            active = state.randomZapping,
+        ) { onInteract(); callbacks.onZapCommand("zap:random") }
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(
+            icon = Icons.Filled.Bolt,
+            contentDescription = "Auto-switch channels",
+            active = state.autoSwitchEnabled,
+        ) { onInteract(); callbacks.onZapCommand("zap:auto") }
     }
 }
 
@@ -1003,6 +978,9 @@ fun IconControlButton(
     contentDescription: String,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
+    // Toggle state: an accent-tinted glyph (white while focused, so it stays
+    // legible on the accent-filled focus background).
+    active: Boolean = false,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -1020,7 +998,11 @@ fun IconControlButton(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = PlayerColors.TextHi,
+            tint = when {
+                focused -> Color.White
+                active -> PlayerColors.Accent
+                else -> PlayerColors.TextHi
+            },
             modifier = Modifier.size(22.dp),
         )
     }

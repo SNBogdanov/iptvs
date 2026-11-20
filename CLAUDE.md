@@ -36,10 +36,18 @@ and public metadata APIs. The one *optional* backend is a Supabase-backed cloud 
 
 ```bash
 flutter analyze        # must be clean before committing
-flutter test           # unit tests live under test/
+flutter test           # full suite: release gate (see below), ~30 minutes
+flutter test test/persistence_test.dart   # targeted: the iteration default
 flutter run -d windows
 flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 ```
+
+**`flutter test` is a release gate, not an iteration step.** The full suite takes about 30
+minutes here and runs in its own process, so any build lock has to wrap the whole command
+(`build-lock.ps1 run -CommandLine "..."`) rather than an `acquire` around a shell. While
+iterating, run `flutter analyze` plus the test files for the areas you touched; run the whole
+suite before a release/tag, and before a commit that changes shared code (the data layer, the
+player chrome, `main.dart`).
 
 **On Windows, a fix is not finished until `build\windows\x64\runner\Release\data\app.so` has been
 rebuilt — see "Verification gate" below. `flutter test` proves the logic, not the artifact the
@@ -1832,6 +1840,12 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
 - Mostly pure-logic / persistence unit tests; use `DemoSource` or a small fake `Source` rather
   than hitting the network. Real widget tests exist for `TvTextField`, focus/Back-ladder
   behavior, the EPG grid, and the update dialog — keep them green when touching those areas.
+- **A test must never kill a process by image name.** `windows_update_script_test.dart` used
+  `taskkill /F /IM iptvs.exe` to clean up the payload its updater script launched; that also
+  matched the *installed* app in the user's session — the window vanished mid-playback with exit
+  code 1 and no crash report, every time the suite ran. Scope a kill by executable path (see
+  `_killStagedPayload`) and never by `IMAGENAME`. The same rule applies to any helper script a
+  test writes.
 - The data layer is well covered: Stalker series/episode parsing, Xtream mapping & paging, XMLTV,
   redaction, metadata config, source-hint language detection (`widget_test.dart` — mostly logic
   tests despite the name); redaction + DB migrations + repository cache behaviour (`net_test.dart`,

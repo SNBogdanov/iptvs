@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart' show kDoubleTapMinTime, PointerScrollEvent;
+import 'package:flutter/gestures.dart'
+    show kDoubleTapMinTime, PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/player_chrome_prefs.dart';
@@ -440,7 +441,9 @@ void main() {
 
       final title = tester.getRect(find.text('News at Nine'));
       final progress = tester.getRect(find.byType(LinearProgressIndicator));
-      final next = tester.getRect(find.text('Next · 21:00 – 23:00 · Late Film'));
+      final next = tester.getRect(
+        find.text('Next · 21:00 – 23:00 · Late Film'),
+      );
       final transport = tester.getRect(find.byIcon(Icons.play_arrow));
 
       // Stacked in that order, above the transport row.
@@ -467,7 +470,11 @@ void main() {
       final source = tester.getRect(find.text('Provider Network HD'));
       final strip = tester.getRect(find.text('News at Nine'));
 
-      expect(live.bottom, lessThan(strip.top), reason: 'top bar, not the strip');
+      expect(
+        live.bottom,
+        lessThan(strip.top),
+        reason: 'top bar, not the strip',
+      );
       // Native badge order is source, LIVE, resolution, HDR, fps, clock.
       expect(source.right, lessThanOrEqualTo(live.left));
       expect(
@@ -570,7 +577,11 @@ void main() {
   group('zap banner', () {
     testWidgets('chrome hidden, a revision bump shows the card and the '
         'identity label, not the bars', (tester) async {
-      await pumpOverlay(tester, isLive: true, state: const PlayerState(playing: true));
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+      );
       // Let the chrome auto-hide first, with no zap yet.
       await tester.pump(const Duration(seconds: 5));
       expect(find.byIcon(Icons.pause), findsNothing);
@@ -641,7 +652,11 @@ void main() {
 
     testWidgets('a plain cursor move fades the banner after its own 3s '
         'dwell timer', (tester) async {
-      await pumpOverlay(tester, isLive: true, state: const PlayerState(playing: true));
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+      );
       await tester.pump(const Duration(seconds: 5));
       expect(find.byIcon(Icons.pause), findsNothing);
 
@@ -674,12 +689,20 @@ void main() {
 
     testWidgets('VOD, or a live stream with no zap, renders no banner at '
         'all', (tester) async {
-      await pumpOverlay(tester, isLive: false, state: const PlayerState(playing: true));
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        state: const PlayerState(playing: true),
+      );
       await tester.pump(const Duration(seconds: 5));
       expect(find.byType(AnimatedOpacity), findsNothing);
 
       // Live but zap == null (VOD/catch-up/no-range shape).
-      await pumpOverlay(tester, isLive: true, state: const PlayerState(playing: true));
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+      );
       await tester.pump(const Duration(seconds: 5));
       expect(find.byType(AnimatedOpacity), findsNothing);
     });
@@ -770,11 +793,7 @@ void main() {
         tester,
         isLive: true,
         state: const PlayerState(playing: true),
-        zap: _zap(
-          revision: 1,
-          channelName: 'BBC One',
-          autoSwitchLabel: '7s',
-        ),
+        zap: _zap(revision: 1, channelName: 'BBC One', autoSwitchLabel: '7s'),
       );
       // Hides the chrome and lets the banner's own 3 s dwell run out — the
       // state the countdown is most useful in, and the one it would be
@@ -840,14 +859,13 @@ void main() {
       expect(
         chip.bottom,
         lessThanOrEqualTo(banner.top),
-        reason: 'one shared anchor stacks them; overlap would be a second '
+        reason:
+            'one shared anchor stacks them; overlap would be a second '
             'guessed offset',
       );
     });
 
-    testWidgets('sits on the right, clear of the channel name', (
-      tester,
-    ) async {
+    testWidgets('sits on the right, clear of the channel name', (tester) async {
       await pumpOverlay(
         tester,
         isLive: true,
@@ -1040,9 +1058,9 @@ void main() {
       expect(list, findsOneWidget);
       final listX = tester.getCenter(list).dx;
       final goLiveX = tester.getCenter(find.text('Go to live')).dx;
-      final starX = tester.getCenter(
-        find.byIcon(Icons.star_outline_rounded),
-      ).dx;
+      final starX = tester
+          .getCenter(find.byIcon(Icons.star_outline_rounded))
+          .dx;
       expect(listX, lessThan(goLiveX));
       expect(goLiveX, lessThan(starX));
       // One row: it takes the control row's ordinary geometry, like the star.
@@ -1149,9 +1167,7 @@ void main() {
         );
       });
 
-      testWidgets('a click on the selected row only activates', (
-        tester,
-      ) async {
+      testWidgets('a click on the selected row only activates', (tester) async {
         final sent = <String>[];
         await pumpOverlay(
           tester,
@@ -1213,9 +1229,7 @@ void main() {
         expect(sent, ['zap:move:-$kZapWheelRows']);
       });
 
-      testWidgets('a press in the margin closes the list', (
-        tester,
-      ) async {
+      testWidgets('a press in the margin closes the list', (tester) async {
         final sent = <String>[];
         await pumpOverlay(
           tester,
@@ -1432,8 +1446,7 @@ void main() {
     // match the EPG strip's `20:00 - 21:00` or the `pos / total` label; matched
     // through a predicate because `find.text` takes a String in this Flutter.
     final bareClock = find.byWidgetPredicate(
-      (w) =>
-          w is Text && RegExp(r'^\d{1,2}:\d{2}$').hasMatch(w.data ?? ''),
+      (w) => w is Text && RegExp(r'^\d{1,2}:\d{2}$').hasMatch(w.data ?? ''),
       description: 'a bare HH:mm clock badge',
     );
     final timeLabel = find.textContaining(' / ');
@@ -1499,7 +1512,8 @@ void main() {
       expect(
         tester.widgetList(find.byType(Slider)).length,
         barsWithLabel,
-        reason: 'hiding the position/duration text must leave every bar in place',
+        reason:
+            'hiding the position/duration text must leave every bar in place',
       );
     });
 
@@ -1545,21 +1559,22 @@ void main() {
       expect(bareClock, findsOneWidget);
     });
 
-    testWidgets('turning the clock off also removes the hidden-chrome HUD clock', (
-      tester,
-    ) async {
-      showPlayerClock.value = false;
-      await pumpOverlay(
-        tester,
-        isLive: true,
-        touch: true,
-        state: const PlayerState(playing: true),
-      );
-      await tester.pump(const Duration(seconds: 5));
-      await tester.pump();
+    testWidgets(
+      'turning the clock off also removes the hidden-chrome HUD clock',
+      (tester) async {
+        showPlayerClock.value = false;
+        await pumpOverlay(
+          tester,
+          isLive: true,
+          touch: true,
+          state: const PlayerState(playing: true),
+        );
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump();
 
-      expect(bareClock, findsNothing);
-    });
+        expect(bareClock, findsNothing);
+      },
+    );
 
     // The channel-name HUD: mirrored in the top-left corner of the clock, so
     // the picture still says which channel is on while the chrome is down.

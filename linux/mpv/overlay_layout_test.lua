@@ -367,8 +367,8 @@ check(find_text(render_with(favorited_state), STAR_FILLED) ~= nil,
 -- list (Phase 6 ...)"): right cluster, immediately LEFT of the "Go to live"
 -- chip, which itself sits left of the favorite star. It exists because the
 -- list used to be keyboard/remote-only -- a pointer had no way to open it.
--- U+E2B8 format_list_bulleted, spelled in decimal (Lua 5.1 has no \x escape).
-local LIST_GLYPH = '\238\138\184'
+-- U+E0EE bolt (Icons.bolt), spelled in decimal (Lua 5.1 has no \x escape).
+local LIST_GLYPH = '\238\131\174'
 
 local zapping_state = {}
 for k, v in pairs(live_state) do zapping_state[k] = v end

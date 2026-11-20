@@ -67,6 +67,9 @@ each release's notes also appear on GitHub Releases. New work lands under
   backdrop) the device knows, so the panel's new **History** tab shows a real list with
   landscape (16:9) thumbnails — Continue watching with a progress bar, then Watched —
   without needing the (unsynchronised) catalogue.
+- Settings → **Ask for a profile at startup**: off boots straight into the last used
+  profile (a profile with a PIN still asks for it); on shows the picker whenever there
+  is a real choice. Replaces the cycle row that lived at the top of the Sources screen.
 
 ### Changed
 
@@ -88,6 +91,11 @@ each release's notes also appear on GitHub Releases. New work lands under
   instead of alone on its own.
 - The in-player channel list scrolls through the whole range on touch (a 40-row
   window used to stop at its edge) and gained a close button.
+- Player chrome: picture-in-picture draws Material's `picture_in_picture_alt` instead of
+  a "PiP" text chip (Android, the shared overlay and the drawn Windows GDI button), and
+  Android's live overflow menu became two toggle buttons — **Shuffle** for random zapping
+  and a **bolt** for auto-switch — tinted with the accent while on. The channel-list
+  opener keeps its list glyph on every surface.
 - The player keeps a clock, a VOD position readout and the channel/title name in the corners
   while the chrome is hidden, on Android as well as in the shared overlay — each gated by its own
   Settings preference (the Android name pill and top-bar title follow "Channel name in the player").
@@ -117,6 +125,9 @@ each release's notes also appear on GitHub Releases. New work lands under
 - Watched-progress bars no longer vanish when the last in-progress title finishes
   (e.g. an auto-advance whose next-title fetch fails): the empty Continue-watching
   read cleared the `watched_media` bars until another title was played.
+- VOD/series: with the Continue watching rail on screen, the first **Next page**
+  control no longer lands a row below the fold — page one (and only page one) is
+  measured against the space the rail leaves above the grid.
 - Windows: a failed VOD open now shows a native "Playback error" panel with Retry
   (and OK/Enter/Space) instead of a black screen — the Flutter error overlay was
   behind the native video surface.

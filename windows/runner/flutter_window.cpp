@@ -1457,20 +1457,23 @@ void DrawFullscreenExitButton(HDC hdc, const RECT &rect, bool active = false,
   HPEN pen = CreatePen(PS_SOLID, t, fg);
   if (pen == nullptr) return;
   HGDIOBJ old_pen = SelectObject(hdc, pen);
-  // Vertex nearest the centre, arms running out toward the edges: the corner
-  // "points in", which is what distinguishes it from the enter glyph.
-  const POINT top_left[3] = {{cx - s + a, cy - s + a},
-                             {cx - s, cy - s + a},
-                             {cx - s, cy - s}};
-  const POINT top_right[3] = {{cx + s - a, cy - s + a},
-                              {cx + s, cy - s + a},
-                              {cx + s, cy - s}};
-  const POINT bottom_left[3] = {{cx - s + a, cy + s - a},
-                                {cx - s, cy + s - a},
-                                {cx - s, cy + s}};
-  const POINT bottom_right[3] = {{cx + s - a, cy + s - a},
-                                 {cx + s, cy + s - a},
-                                 {cx + s, cy + s}};
+  // The arms leave the vertex that sits **nearest the centre** and run out
+  // toward the two edges, so the corner points in — the mirror of the enter
+  // glyph, whose vertex is the outer corner. The earlier version put the vertex
+  // on the edge and one arm along it, which read as a bracket with a spur rather
+  // than Material's `fullscreen_exit`.
+  const POINT top_left[3] = {{cx - s, cy - s + a},
+                             {cx - s + a, cy - s + a},
+                             {cx - s + a, cy - s}};
+  const POINT top_right[3] = {{cx + s, cy - s + a},
+                              {cx + s - a, cy - s + a},
+                              {cx + s - a, cy - s}};
+  const POINT bottom_left[3] = {{cx - s, cy + s - a},
+                                {cx - s + a, cy + s - a},
+                                {cx - s + a, cy + s}};
+  const POINT bottom_right[3] = {{cx + s, cy + s - a},
+                                 {cx + s - a, cy + s - a},
+                                 {cx + s - a, cy + s}};
   for (const auto *corner : {top_left, top_right, bottom_left, bottom_right}) {
     // The middle point is the vertex; both arms leave it.
     MoveToEx(hdc, corner[0].x, corner[0].y, nullptr);
@@ -1480,6 +1483,39 @@ void DrawFullscreenExitButton(HDC hdc, const RECT &rect, bool active = false,
   }
   SelectObject(hdc, old_pen);
   DeleteObject(pen);
+}
+
+// "Picture in picture": Material's `picture_in_picture_alt` — a rounded frame
+// with the inset screen at the bottom-right.
+//
+// Segoe MDL2 has no PiP glyph (the "Picture" codepoint is missing from some
+// installed builds and renders as a placeholder box), so this used to be a text
+// chip reading "PiP". Android and the Flutter overlay draw the Material icon,
+// so the native bar draws the same picture at the same weight.
+void DrawPictureInPictureButton(HDC hdc, const RECT &rect, bool active = false,
+                                int radius = kNativeButtonRadius) {
+  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+  const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
+  FillRoundRectAA(hdc, rect, NativeScale(radius), bg);
+
+  const int cx = (rect.left + rect.right) / 2;
+  const int cy = (rect.top + rect.bottom) / 2;
+  const int s = NativeScale(8);              // half the icon's box
+  const int h = NativeScale(5);              // half the frame's height
+  const int t = std::max(2, NativeScale(2)); // frame stroke
+  const RECT frame{cx - s, cy - h, cx + s, cy + h};
+  // Ring first (outer filled, inner cut back to the button's own background),
+  // then the screen flush inside the bottom-right corner — the same
+  // construction as the rest of the drawn glyphs, so edges stay antialiased.
+  FillRoundRectAA(hdc, frame, NativeScale(1), fg);
+  const RECT inner{frame.left + t, frame.top + t, frame.right - t,
+                   frame.bottom - t};
+  FillRoundRectAA(hdc, inner, std::max(1, NativeScale(1)), bg);
+  const int sw = NativeScale(5);
+  const int sh = NativeScale(3);
+  const RECT screen{frame.right - t - sw, frame.bottom - t - sh,
+                    frame.right - t, frame.bottom - t};
+  FillRoundRectAA(hdc, screen, std::max(1, NativeScale(1)), fg);
 }
 
 // Width of a text chip sized to its own label, the way every other overlay
@@ -3759,11 +3795,8 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     DrawFullscreenEnterButton(paint_hdc, l.fullscreen,
                                is_focused(NativeFocusItem::kFullscreen));
   }
-  // A text chip rather than an MDL2 glyph: the "Picture" codepoint is not in
-  // every installed Segoe MDL2 build (it renders as a placeholder box), and
-  // the label is clearer anyway. This is the `M`/`P` pointer counterpart.
-  DrawTextButton(paint_hdc, l.mini, L"PiP",
-                 is_focused(NativeFocusItem::kMiniPlayer));
+  DrawPictureInPictureButton(paint_hdc, l.mini,
+                             is_focused(NativeFocusItem::kMiniPlayer));
   if (l.has_favorite) {
     // Dart owns the store: a click sends "favorite" back and Dart pushes the
     // new state via setControlState. The accent tints the **glyph**, not the
@@ -3785,12 +3818,13 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                    is_focused(NativeFocusItem::kGoLive));
   }
   if (l.has_quick_list) {
-    // Segoe MDL2 "BulletedList". The filled background means focus *or*
-    // engaged, the same split the audio/subtitle/info buttons above use for
-    // their own open panels — here "engaged" is the list being on screen.
+    // Segoe MDL2 "BulletedList" — the channel list, which is what this opens.
+    // The **zapping** toggle is the bolt (`Icons.Filled.Bolt` on Android), not
+    // this button. The filled background means focus *or* engaged, the same
+    // split the audio/subtitle/info buttons above use for their own open
+    // panels — here "engaged" is the list being on screen.
     DrawIconButton(paint_hdc, l.quick_list, L"\xE8FD",
-                   is_focused(NativeFocusItem::kQuickList) ||
-                       QuickListShown());
+                   is_focused(NativeFocusItem::kQuickList) || QuickListShown());
   }
   }  // !l.is_mini (full chrome)
   else {

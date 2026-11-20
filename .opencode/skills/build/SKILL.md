@@ -18,18 +18,64 @@ description: "Сборка iptvs (Flutter): Windows/Android/Linux, pub get, anal
 - Android требует Git LFS: `git lfs install && git lfs pull` — иначе
   `android/app/libs/libmpv-dovi.aar` не слинкуется.
 - CI пин — Flutter 3.44.5; установленный SDK может быть новее — проверяй
-  `flutter --version`, но пин не меняй. CI ожидает чистый `flutter analyze` и
-  зелёный `flutter test`.
+  `flutter --version`, но пин не меняй.
 - Windows: запущенная **установленная** копия `iptvs.exe` не блокирует сборку в
   `build\...\Release` — не убивай её. Если заблокирован сам Release-exe
   (запущен из Release), сообщи и не убивай процесс без согласия.
+- **Никогда не убивай процессы по имени образа** (`taskkill /IM iptvs.exe`,
+  `Stop-Process -Name iptvs`): на машине может быть запущено установленное
+  приложение пользователя. Если нужно снять именно свой процесс — только по PID,
+  который ты сам запустил, или по пути внутри `build\...`.
+
+## Два режима проверки
+
+**Итерационная сборка — по умолчанию.** Пользователь ждёт артефакт, а не
+релизный гейт:
+
+```powershell
+flutter pub get
+flutter analyze
+flutter test test/<затронутые области>_test.dart   # профильные, не весь набор
+flutter build <цель> --release --no-pub
+```
+
+Профильные тесты выбирай по изменению: плеер — `player_overlay_test`,
+`media_*`; база/миграции — `persistence_test`, `released_schema_fixtures_test`;
+облако — `cloud_*`, `watch_state_test`; прокси — `proxy_config_test`. Если
+изменение общее (ядро, `AppDatabase`, `main.dart`), возьми более широкий набор,
+но не весь `test/`.
+
+**Релизная сборка — только когда в задании явно сказано «релиз» / «перед
+релизом».** Полный `flutter test` (~30 минут, отдельный процесс и отдельный
+PID), затем артефакты:
+
+```powershell
+flutter pub get
+flutter analyze
+flutter test
+flutter build <цель> --release --no-pub
+```
+
+Полный набор обязателен перед тегом/релизом и перед коммитом, который трогает
+общий код. В отчёте для релизной сборки — число passed/skipped и **все**
+падения (даже известные env-флейки называй явно).
+
+**Лок — одна команда на всю сборку** (включая долгий `flutter test`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\SERGEYBO\.config\opencode\bin\build-lock.ps1 run -Project iptvs -Kind <вид> -CommandLine "<вся цепочка команд>"
+```
+
+`run` держит лок, пока команда не завершится, и снимает его сам; `exit 2` —
+занято, тогда не собирай. Не определяй «просроченность» лока по PID — только по
+возрасту, и снимает её скрипт.
 
 ## Сборка
 
 ```powershell
 flutter pub get
 flutter analyze
-flutter test
+# тесты — по режиму выше (профильные / полный)
 # Windows
 flutter build windows --release --no-pub
 # Android

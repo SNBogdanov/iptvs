@@ -1644,6 +1644,22 @@ class HdrPlayerActivity : ComponentActivity() {
         @Volatile
         private var pendingAutoSwitch: Boolean? = null
 
+        /**
+         * Stores the modes for an Activity that does not exist yet.
+         *
+         * `MainActivity` used to drop a `setZapModes` push outright when
+         * [instance] was null — which is *always* the case for the seed Dart
+         * sends right after `open`, because `startActivity` is asynchronous.
+         * The overlay then drew random/auto-switch as **off** until the user
+         * toggled one, even though the zap controller had started with the
+         * device preference on. The push now lands here instead, and
+         * `onCreate` applies it.
+         */
+        fun seedZapModes(random: Boolean?, autoSwitch: Boolean?) {
+            random?.let { pendingRandomZapping = it }
+            autoSwitch?.let { pendingAutoSwitch = it }
+        }
+
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_IS_LIVE = "is_live"

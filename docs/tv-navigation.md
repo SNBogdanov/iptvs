@@ -752,8 +752,9 @@ the button therefore stays under the pointer. Everywhere else opening the list *
 chrome down** (for the reason in the bullet above), which takes the button off screen and makes
 a second press impossible. Before it the list was keyboard/remote-only: a mouse or a finger had
 no way to open it at all. It is a focus stop like the favorite star wherever the surface has a
-focus ring; the glyph is each platform's own bulleted-list icon (Material
-`format_list_bulleted`, Compose `Icons.AutoMirrored.Filled.List`, Segoe MDL2 `\xE8FD`).
+focus ring; the glyph is each platform's **list** picture (Material `format_list_bulleted`,
+Compose `Icons.AutoMirrored.Filled.List`, U+E2B8 in the Lua OSD, MDL2 `\xE8FD` in the GDI
+overlay) — the **bolt** is the zapping-mode toggle, not this opener.
 
 **Once it is open the pointer drives it too** — a click on a row is the keys' OK verbatim (cursor
 to that row, then play it), and a wheel notch moves the cursor three rows. The wheel is **claimed**

@@ -157,9 +157,22 @@ Dart `open` call passes `title`/`sourceName`/`isLive`/EPG now-next/headers/subti
 The transport row draws **previous/next** beside play/pause when Dart sends
 `stepEnabled` (live zapping or VOD stepping; fails closed). They send the shared
 `zap:down`/`zap:up`, so the route decides between channel and entry. On live, the
-right cluster ends with a **three-dot overflow** whose items send `zap:random`
-(toggle random zapping) and `zap:auto` (toggle auto-switch); both are Dart-owned
-toggles acknowledged by the zap banner, so the menu carries no state copy.
+right cluster carries **two toggle buttons** — a shuffle glyph for random zapping
+(`zap:random`) and an autorenew glyph for auto-switch (`zap:auto`), each tinted
+with the accent while it is on. They replaced a three-dot overflow menu: a remote
+had to open a menu to reach either, and the state only showed as a checkmark
+inside it. Both remain Dart-owned toggles acknowledged by the zap banner, so the
+buttons carry no state copy that could disagree with the session.
+
+The PiP and channel-list controls use their Material pictures everywhere:
+`picture_in_picture_alt` (the frame with the inset screen; Android, the shared
+Flutter overlay and a hand-drawn glyph in the Windows GDI bar, since Segoe MDL2
+has no PiP codepoint) and a **list** for the channel list (Material
+`format_list_bulleted` on Android, the shared overlay and the Lua OSD; MDL2
+`E8FD` in the GDI bar). **Zapping's own toggles** are the two Android buttons:
+Shuffle for random, a **bolt** for auto-switch — the bolt is the "zap" picture
+and belongs to the mode, not to the list. The PiP button used to be a "PiP" text
+chip on Windows and in the shared overlay.
 
 **In portrait the bottom bar is two rows, or three only when the volume slider really needs
 its own.** A 360 dp phone leaves ~312 dp inside the edge padding, and VOD is the widest case:
@@ -1492,10 +1505,11 @@ any value that *holds* a map, so a row needs no second set of helpers) and then 
 
 **The control-row opener.** `BottomLayout::quick_list` is the leftmost control of the right
 cluster — **immediately left of "Go to live"** — placed last in a cluster that lays out
-right-to-left. Segoe MDL2 `\xE8FD` ("BulletedList"), the Windows icon set's own name for what
-Android draws as `Icons.AutoMirrored.Filled.List` and the Flutter/Lua overlays draw as Material
-`format_list_bulleted` (U+E2B8): one meaning, each platform's glyph, never one codepoint claimed
-across all four. It is gated on `ZapActive()` — `is_live && zap_enabled`, where `zap_enabled`
+right-to-left. A **channel list**, drawn as each surface's list picture: Segoe MDL2 `\xE8FD`
+("BulletedList") in the GDI bar, Material `format_list_bulleted` on the shared overlay and in the
+Lua OSD (U+E2B8, verified against the vendored font as `format_list_bulleted_baseline`), and
+`Icons.AutoMirrored.Filled.List` in Compose. The **bolt** is the zapping *mode* toggle
+(random/auto-switch, Android only), not this opener. It is gated on `ZapActive()` — `is_live && zap_enabled`, where `zap_enabled`
 arrives on `setControlState` (this surface has no `open` payload to read it from) — the **same**
 predicate the key ring uses for Left and `G`, so the pointer affordance and the keys can never
 disagree about whether a list exists. Focus order (`FocusableItems`): **quick list → Go to live →
@@ -3656,11 +3670,11 @@ every other button in the row); a focus stop like the star wherever the surface 
 The accent tints **nothing** here: it opens a panel rather than carrying state, which is what the
 star's accent means.
 
-**One meaning, each platform's glyph** — a bulleted list: Material `format_list_bulleted` on the
-shared Flutter overlay and in the Lua OSD (U+E2B8, verified against the vendored
-`MaterialIcons-Regular.otf` cmap as `format_list_bulleted_baseline`, like every other glyph in
-that table), `Icons.AutoMirrored.Filled.List` in Compose, Segoe MDL2 `\xE8FD` ("BulletedList") in
-the GDI overlay. Deliberately *not* one codepoint asserted across four icon sets.
+**One picture per icon set, one meaning** — the channel list: Material `format_list_bulleted` on
+the shared Flutter overlay, Compose `Icons.AutoMirrored.Filled.List`, U+E2B8 in the Lua OSD's
+vendored `MaterialIcons-Regular.otf` cmap (verified as `format_list_bulleted_baseline`), and MDL2
+`\xE8FD` in the GDI overlay. The **bolt** belongs to the zapping *modes* instead — Android's
+random/auto-switch toggle buttons — not to the button that opens the list.
 
 **Three of the four only open; Windows toggles.** Android, Linux and the shared Flutter overlay
 send `zap:list` and stand the chrome down as the list opens, so the button is off screen while

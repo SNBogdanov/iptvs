@@ -434,7 +434,19 @@ class MainActivity : FlutterActivity() {
                 "setZapModes" -> {
                     val args = call.arguments as? Map<*, *>
                     if (args != null) {
-                        HdrPlayerActivity.instance?.get()?.applyZapModes(args)
+                        val player = HdrPlayerActivity.instance?.get()
+                        if (player != null) {
+                            player.applyZapModes(args)
+                        } else {
+                            // The Activity is still starting (`startActivity` is
+                            // asynchronous, `open` answers at once). Dropping
+                            // this left the overlay's random/auto-switch buttons
+                            // showing "off" on entry; keep it for `onCreate`.
+                            HdrPlayerActivity.seedZapModes(
+                                random = args["random"] as? Boolean,
+                                autoSwitch = args["autoSwitch"] as? Boolean,
+                            )
+                        }
                     }
                     result.success(true)
                 }

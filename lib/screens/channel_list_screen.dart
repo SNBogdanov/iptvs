@@ -15,6 +15,7 @@ import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../data/source_refresh_store.dart';
 import '../data/source_store.dart';
+import '../data/vod_card_orientation.dart';
 import '../sources/refresh_interval.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
@@ -874,6 +875,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   @override
   void initState() {
     super.initState();
+    // The VOD card shape lives in a global notifier that is toggled from a
+    // Settings route pushed *over* this screen, so nothing here rebuilds on its
+    // own. The grid listens for its own tiles, but the **page window** is
+    // computed above it (rows per screen depend on the card's aspect), so
+    // without this a shape change left "Next page" revealing the old number of
+    // rows until some unrelated rebuild came along.
+    vodCardOrientation.addListener(_onVodCardShapeChanged);
     _createRepositoryControllers();
     _focus = LiveFocusCoordinator(
       scrollController: _scrollController,
@@ -1294,7 +1302,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     });
   }
 
+  /// Auto-load is a **touch** affordance: phones/tablets infinite-scroll, while
+  /// TV and desktop keep the explicit "Next page" control as their stop.
+  ///
+  /// Desktop has to be excluded for a second, sharper reason: pressing that
+  /// control scrolls to `maxScrollExtent`, which is exactly the condition the
+  /// scroll-driven loader reacts to — so one press revealed the next window and
+  /// immediately auto-revealed another one (twice the rows of a screen, on a
+  /// platform where the button is the whole mechanism).
+  bool get _autoLoadMediaOnScroll =>
+      (Platform.isAndroid && !isTelevision) || Platform.isIOS;
+
   void _runAutoLoadMedia(ContentKind kind) {
+    if (!_autoLoadMediaOnScroll) return;
     final controller = _media(kind);
     final snap = controller.snapshot;
     if (snap == null || controller.loading || controller.loadingMore) return;
@@ -1394,8 +1414,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     setState(() => _mediaDisplayPages[kind] = pages);
   }
 
+  /// A VOD card-shape toggle changed how tall a cell is, and therefore how many
+  /// rows make a "page". Rebuild so the window is recomputed from the new shape
+  /// instead of keeping the old row count.
+  void _onVodCardShapeChanged() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
   @override
   void dispose() {
+    vodCardOrientation.removeListener(_onVodCardShapeChanged);
     alwaysOnTopEnabled.removeListener(_syncAlwaysOnTop);
     resumeRequest.removeListener(_onResumeRequested);
     silenceRequest.removeListener(_onSilenceRequested);
@@ -4115,9 +4144,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onLoadMore: () => _mediaLoadMore(_tab),
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
             // Phones/tablets auto-load on scroll; the button only flashed
-            // under the finger. TV keeps it as the D-pad fallback.
-            autoLoadMore:
-                (Platform.isAndroid && !isTelevision) || Platform.isIOS,
+            // under the finger. TV and desktop keep it as the only mechanism —
+            // and the scroll loader is gated on the same rule, or pressing the
+            // button (which scrolls to the bottom) would trigger it too.
+            autoLoadMore: _autoLoadMediaOnScroll,
             resumeProgress: _media(_tab).resumeProgress,
             continueWatching: _media(_tab).continueWatching,
             onResume: (item) =>

@@ -38,15 +38,32 @@ permissions:
 - Принять список целей и собрать **все** за один запуск (`windows` по умолчанию, `android`, `linux`); не возвращать управление после первой.
 - Если цели не переданы — уточни их и подтверди полную сборку.
 - Android требует Git LFS: `git lfs install && git lfs pull` (иначе `android/app/libs/libmpv-dovi.aar` не слинкуется).
-- Flutter — 3.44.5; CI ожидает чистый `flutter analyze` и зелёный `flutter test`.
+- Flutter — 3.44.5 (установленный SDK может быть новее).
+- **Никогда не убивай процессы по имени образа** (`taskkill /IM iptvs.exe`, `Stop-Process -Name iptvs`): так можно снять установленное приложение пользователя. Только по PID своего процесса или по пути внутри `build\...`.
+
+## Режим проверки
+
+Задание говорит, какой режим нужен; **если не сказано — итерационный**.
+
+**Итерационный (по умолчанию):** `flutter pub get`, `flutter analyze`, **профильные** тесты по затронутым областям (`flutter test test/<область>_test.dart`), затем сборка. Полный `flutter test` не запускать: это ~30 минут и отдельный процесс, он имеет смысл только перед релизом.
+
+**Релизный (в задании «релиз» / «перед релизом»):** `flutter pub get`, `flutter analyze`, **полный** `flutter test` (passed/skipped + все падения в отчёте), затем артефакты.
+
+Лок — одной командой на всю сборку:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\SERGEYBO\.config\opencode\bin\build-lock.ps1 run -Project iptvs -Kind <вид> -CommandLine "<вся цепочка команд>"
+```
+
+`exit 2` — лок занят, не собирай. «Просроченность» лока определяется только по возрасту (6 ч), не по PID.
 
 ## Сборка
 
 ```powershell
 flutter pub get
 flutter analyze
-flutter test
-# Windows (закрой запущенный iptvs.exe — он блокирует вывод)
+# тесты — по режиму (профильные / полный)
+# Windows (не убивай запущенный и установленный iptvs.exe)
 flutter build windows --release --no-pub
 # Android
 flutter build apk --release

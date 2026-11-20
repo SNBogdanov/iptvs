@@ -2127,13 +2127,15 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // Windows picture-in-picture: the window shrinks to the
                 // frameless always-on-top mini-player. Absent on surfaces that
                 // did not wire the callback (every non-Windows platform).
-                // A text chip, matching the native GDI bar: the Material PiP
-                // glyphs are not worth a font-subset dependency for a label
-                // this short.
+                // Material's own PiP picture, the same one Android draws
+                // (`Icons.Filled.PictureInPictureAlt`) and the native GDI bar
+                // now draws: the old "PiP" text chip was a placeholder for a
+                // glyph that only looked missing because the app had never
+                // named it (icon tree-shaking keeps what is used).
                 if (widget.onToggleMiniPlayer case final enterMini?
                     when playerControlsPrefs.value.shows(PlayerControl.pip))
-                  _textButton(
-                    'PiP',
+                  _button(
+                    Icons.picture_in_picture_alt,
                     'Picture in picture (P)',
                     enterMini,
                     semanticsLabel: 'Picture in picture',
@@ -2143,7 +2145,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                     widget.fullscreen
                         ? Icons.fullscreen_exit
                         : Icons.fullscreen,
-                    widget.fullscreen ? 'Leave fullscreen (F)' : 'Fullscreen (F)',
+                    widget.fullscreen
+                        ? 'Leave fullscreen (F)'
+                        : 'Fullscreen (F)',
                     widget.onToggleFullscreen,
                   ),
               ];

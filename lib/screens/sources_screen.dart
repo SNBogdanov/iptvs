@@ -7,7 +7,6 @@ import '../data/distribution_channel.dart';
 import '../data/cloud_config.dart';
 import '../data/diagnostics_log.dart';
 import '../data/expiry_cache.dart';
-import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
 import '../data/net.dart';
 import '../data/source_store.dart';
@@ -285,10 +284,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
             ? const Center(child: CircularProgressIndicator())
             : Column(
                 children: [
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: _PickerStartupCard(),
-                  ),
                   if (DistributionConfig.directUpdaterEnabled) ...[
                     const Padding(
                       padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -1530,96 +1525,6 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   }
 }
 
-/// "OK to cycle" tri-state row for when the boot-time profile picker appears
-/// (see [ProfilePickerStartup]). A single focus stop, so the D-pad passes over
-/// it like any list row; OK/tap cycles Auto → Always → Never.
-class _PickerStartupCard extends StatefulWidget {
-  const _PickerStartupCard();
-
-  @override
-  State<_PickerStartupCard> createState() => _PickerStartupCardState();
-}
-
-class _PickerStartupCardState extends State<_PickerStartupCard> {
-  static const _store = LocalProfileStore();
-  ProfilePickerStartup? _mode; // null while loading
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final mode = await _store.pickerStartup();
-    if (mounted) setState(() => _mode = mode);
-  }
-
-  Future<void> _cycle() async {
-    final current = _mode ?? ProfilePickerStartup.auto;
-    final next = ProfilePickerStartup
-        .values[(current.index + 1) % ProfilePickerStartup.values.length];
-    setState(() => _mode = next);
-    await _store.setPickerStartup(next);
-  }
-
-  String get _valueLabel => switch (_mode) {
-    ProfilePickerStartup.always => 'Always',
-    ProfilePickerStartup.off => 'Never',
-    _ => 'Auto',
-  };
-
-  String get _hint => switch (_mode) {
-    ProfilePickerStartup.always => 'Shown on every launch',
-    ProfilePickerStartup.off => 'Never shown at startup',
-    _ => 'Shown when more than one profile exists',
-  };
-
-  @override
-  Widget build(BuildContext context) {
-    return FocusableCard(
-      onTap: _cycle,
-      scrollOnFocus: false,
-      debugLabel: 'sources.pickerStartup',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            const Icon(
-              Icons.switch_account_outlined,
-              size: 20,
-              color: AppColors.textLo,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Profile picker at startup'),
-                  Text(
-                    _hint,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.textLo,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Text(
-              _valueLabel,
-              style: const TextStyle(
-                color: AppColors.accent,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _UpdateTrackCard extends StatefulWidget {
   const _UpdateTrackCard();
 
@@ -1710,7 +1615,7 @@ class _UpdateTrackCardState extends State<_UpdateTrackCard> {
   }
 }
 
-/// "Check for updates" row. A single focus stop (like [_PickerStartupCard]);
+/// "Check for updates" row. A single focus stop (like the update-track row);
 /// OK/tap runs a manual GitHub check and drives the update flow. The hint shows
 /// the running version (see [appVersion]).
 class _UpdateCard extends StatefulWidget {

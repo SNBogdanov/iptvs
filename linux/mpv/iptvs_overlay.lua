@@ -91,7 +91,9 @@ local ICON = {
     history              = utf8_char(0xE314),
     -- The quick-list opener in the control row — Flutter's
     -- `Icons.format_list_bulleted` (0xE2B8 -> "format_list_bulleted_baseline"
-    -- in this font's cmap), so all four surfaces draw the same glyph.
+    -- in this font's cmap), so all four surfaces draw the same list glyph.
+    -- (Zapping's own toggle — random/auto-switch — is the bolt, and only the
+    -- Android overlay has buttons for it.)
     format_list_bulleted = utf8_char(0xE2B8),
 }
 

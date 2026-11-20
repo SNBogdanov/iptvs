@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/local_profile_store.dart';
 import '../data/proxy_config.dart';
 import '../data/vod_card_orientation.dart';
 import '../player/double_tap_action.dart';
@@ -45,6 +46,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   int? _seekStep;
   ProxyConfig? _proxy;
   DoubleTapAction? _doubleTap;
+  ProfilePickerStartup? _pickerStartup;
 
   @override
   void initState() {
@@ -71,6 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final doubleTap = DoubleTapAction.parse(
       await widget.store.rawDoubleTapAction(),
     );
+    final pickerStartup = await const LocalProfileStore().pickerStartup();
     if (mounted) {
       setState(() {
         _closeToTray = closeToTray;
@@ -86,6 +89,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _nextBehavior = nextBehavior;
         _seekStep = seekStep;
         _doubleTap = doubleTap;
+        _pickerStartup = pickerStartup;
         _proxy = ProxyConfig(
           mode: ProxyMode.parse(proxyRaw?['mode']),
           host: proxyRaw?['host'] ?? '',
@@ -112,6 +116,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final next = !(_randomZapping ?? false);
     setState(() => _randomZapping = next);
     await widget.store.setRandomZapping(next);
+  }
+
+  /// "Ask for a profile at startup." On = the picker appears whenever there is
+  /// a choice to make (the historical `auto` behaviour); off = boot straight
+  /// into the last profile, which stays the active one in the keychain. A
+  /// profile with a PIN still asks for it — that gate lives in the picker and
+  /// is not something this switch may bypass.
+  Future<void> _toggleAskForProfile() async {
+    final asking =
+        (_pickerStartup ?? ProfilePickerStartup.auto) !=
+        ProfilePickerStartup.off;
+    final next = asking ? ProfilePickerStartup.off : ProfilePickerStartup.auto;
+    setState(() => _pickerStartup = next);
+    await const LocalProfileStore().setPickerStartup(next);
   }
 
   Future<void> _toggleAlwaysOnTop() async {
@@ -239,6 +257,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           children: [
+            _SettingTile(
+              icon: Icons.switch_account_outlined,
+              title: 'Ask for a profile at startup',
+              subtitle:
+                  'Off opens the last used profile straight away. A profile '
+                  'protected by a PIN still asks for it.',
+              trailing:
+                  (_pickerStartup ?? ProfilePickerStartup.auto) ==
+                      ProfilePickerStartup.off
+                  ? 'Off'
+                  : 'On',
+              onTap: _toggleAskForProfile,
+            ),
             if (Platform.isWindows)
               _SettingTile(
                 icon: Icons.close_fullscreen_outlined,
@@ -404,8 +435,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'for forward / next. **Live channels always step** — this '
                   'choice is for films and episodes: Previous/Next steps to the '
                   'neighbouring title, Seek moves by the VOD seek step below.',
-              trailing:
-                  (_doubleTap ?? DoubleTapAction.previousNext).label,
+              trailing: (_doubleTap ?? DoubleTapAction.previousNext).label,
               onTap: _cycleDoubleTap,
             ),
           ],

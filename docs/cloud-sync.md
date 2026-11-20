@@ -1062,7 +1062,8 @@ watching?" grid that combines **cloud profiles** (only when built with Supabase 
 paired) and **local profiles**, which need no cloud at all. At boot the screen decides for itself
 whether to appear: `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:,
 hasActiveProfile:)` with the persisted `ProfilePickerStartup` mode (`auto` = only when >1 profile,
-`always`, `off`; cycled from a `FocusableCard` row atop `sources_screen.dart`) — otherwise it
+`always`, `off`) — set from **Settings → "Ask for a profile at startup"** (on = `auto`, off =
+`off`, so a switched-off install boots straight into the last profile) — otherwise it
 silently short-circuits to `HomeShell`, so a single-profile install boots exactly as before. A
 **PIN-locked active profile overrides every mode** and holds the screen; see
 [Profile PINs](#profile-pins). An **ownerless device — profiles exist but none is active —

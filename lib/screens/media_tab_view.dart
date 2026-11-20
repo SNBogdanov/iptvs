@@ -391,7 +391,16 @@ class MediaTabView extends StatelessWidget {
       );
       return cells;
     }
-    final grid = MediaGridMetrics.forSize(windowSize);
+    // The shape the grid is actually drawn with. `forSize` defaults to the
+    // portrait poster, and this estimate used to take that default while the
+    // grid below passed `vodCardOrientation` — so with landscape cards the
+    // prediction said "two rows" for a viewport that fits four, and every page
+    // revealed a short window with the "Next page" card floating a row above
+    // the bottom edge.
+    final grid = MediaGridMetrics.forSize(
+      windowSize,
+      orientation: vodCardOrientation.value,
+    );
     final tileWidth = grid.tileWidth(constraints.maxWidth);
     final aspect = grid.childAspectRatio(
       tileWidth: tileWidth,
@@ -491,10 +500,13 @@ class MediaTabView extends StatelessWidget {
         // height, or the list's rows that fit — and a row counts only when at
         // least half of it is visible.
         //
-        // **The Continue-watching rail does NOT shrink the first page.** It is a
-        // sliver the user scrolls past, above the grid; folding its height into
-        // the row count made page 1 one row short of every later page (2 rows vs
-        // 3 on a real window). Every page is the same full screen of the grid.
+        // **The Continue-watching rail shortens page 1 only.** It is a sliver
+        // above the grid, so the first screen has room for fewer rows; the
+        // earlier rule deliberately ignored it and made every page the same full
+        // screen, which put page 1's "Next page" card a whole row below the
+        // fold whenever the rail was up ("первая кнопка Next уходит на строку
+        // дальше"). Pages after the first start below the rail in the scroll
+        // view, so they keep the full height.
         final railHeight = showRail
             ? _ContinueWatchingRail.height(context)
             : 0.0;
@@ -505,10 +517,20 @@ class MediaTabView extends StatelessWidget {
           windowSize: windowSize,
           textBudget: textBudget,
         );
-        // **The "Next page" card takes the last cell of every screen**, so page
-        // `p` shows `p * screen - 1` items and the card is cell `p * screen` —
-        // the bottom-right corner.
-        final pageLimit = displayPages * screen - 1;
+        final firstScreen = railHeight <= 0
+            ? screen
+            : _screenCells(
+                constraints,
+                constraints.maxHeight - railHeight,
+                useGrid: useGrid,
+                windowSize: windowSize,
+                textBudget: textBudget,
+              );
+        // **The "Next page" card takes the last cell of the current page.** Page
+        // 1 therefore shows `firstScreen - 1` items; every further press adds a
+        // full `screen` of rows (the rail is scrolled past by then), and the card
+        // lands in the bottom-right cell of the page it belongs to.
+        final pageLimit = (firstScreen - 1) + (displayPages - 1) * screen;
         final targetIndex = jumpTargetIndex ?? -1;
         final hasJumpTarget =
             targetIndex >= 0 &&
@@ -516,9 +538,21 @@ class MediaTabView extends StatelessWidget {
             jumpTargetId != null &&
             visible[targetIndex].id == jumpTargetId;
         final jumpLimit = hasJumpTarget ? targetIndex + 1 : 0;
+        // The tile the user last played is revealed even when it fell outside a
+        // shortened page — returning from a details sheet must land where they
+        // left. With the Continue-watching rail on screen page 1 holds fewer
+        // rows, so "visible" alone is not enough any more: the tile (and its
+        // focus) used to drop out of the window and the rail took the focus.
+        final lastPlayedIndex = lastPlayedId == null
+            ? -1
+            : visible.indexWhere((media) => media.id == lastPlayedId);
+        final lastPlayedLimit = lastPlayedIndex >= 0 ? lastPlayedIndex + 1 : 0;
         // Never shrink below the floor within this dataset (a resize cannot
         // unmount an already-shown card; see minShown).
-        final shownLimit = math.max(math.max(pageLimit, minShown), jumpLimit);
+        final shownLimit = math.max(
+          math.max(pageLimit, minShown),
+          math.max(jumpLimit, lastPlayedLimit),
+        );
         final shown = visible.length <= shownLimit
             ? visible
             : visible.sublist(0, shownLimit < 0 ? 0 : shownLimit);
@@ -536,7 +570,8 @@ class MediaTabView extends StatelessWidget {
               '${windowSize.height.toStringAsFixed(0)} '
               'body=${constraints.maxHeight.toStringAsFixed(1)} '
               'rail=${railHeight.toStringAsFixed(1)} showRail=$showRail '
-              'useGrid=$useGrid screen=$screen displayPages=$displayPages '
+              'useGrid=$useGrid screen=$screen firstScreen=$firstScreen '
+              'displayPages=$displayPages '
               'shownLimit=$shownLimit visible=${visible.length} '
               'shown=${shown.length} snapshotHasMore=${snapshot?.hasMore}',
         );
@@ -1454,7 +1489,8 @@ class _MediaListTile extends StatelessWidget {
                     listenable: vodCardOrientation,
                     builder: (context, _) => _Poster(
                       item: item,
-                      width: _MediaListTile.thumbHeight *
+                      width:
+                          _MediaListTile.thumbHeight *
                           vodCardOrientation.value.aspectRatio,
                       height: _MediaListTile.thumbHeight,
                     ),
