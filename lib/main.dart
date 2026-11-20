@@ -15,18 +15,24 @@ import 'package:media_kit/media_kit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/app_database.dart';
+import 'data/app_settings_store.dart';
 import 'data/cloud_config.dart';
 import 'data/device_class.dart';
 import 'data/diagnostics_log.dart';
 import 'data/net.dart' show redactText;
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
+import 'data/proxy_config.dart';
 import 'data/source_store.dart';
 import 'data/vod_card_orientation.dart';
 import 'player/clock_format.dart';
+import 'player/playback_audio_session.dart';
 import 'player/player_chrome_prefs.dart';
+import 'player/double_tap_action.dart';
+import 'player/player_controls_prefs.dart';
 import 'player/tray.dart';
 import 'player/window_placement.dart';
+import 'screens/media_category_cache.dart';
 import 'screens/profile_pick_screen.dart';
 import 'theme.dart';
 
@@ -46,11 +52,21 @@ const int kAndroidImageCacheBytes = 32 << 20;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Before any HttpClient exists: `dart:io` ignores the platform proxy, so
+  // images/API calls bypassed it while the native players honoured it. The
+  // override goes in synchronously and answers per request, so the keychain and
+  // platform lookups behind it (`loadProxyConfig`, fired below) never sit on
+  // the path to the first frame.
+  installProxyOverride();
+  unawaited(loadProxyConfig());
   if (defaultTargetPlatform == TargetPlatform.android) {
     PaintingBinding.instance.imageCache.maximumSizeBytes =
         kAndroidImageCacheBytes;
   }
   MediaKit.ensureInitialized();
+  // Device-wide volume/mute survives restarts: restore it before any player
+  // route can open (the first one is a profile pick and a catalogue load away).
+  unawaited(playbackAudioSession.load());
   // The Windows runner's X-button policy (hide to tray vs quit) is a persisted
   // device preference that must reach the native side before the first close.
   // Fired before the boot group below so its keychain read overlaps the others;
@@ -84,6 +100,12 @@ Future<void> main() async {
   // cannot be consumed yet. The notifiers start at true, which is what an
   // untouched install draws anyway.
   unawaited(loadPlayerChromePrefs());
+  // Which optional player controls to draw. Same reasoning: nothing reads it
+  // until a player route opens, and the notifier starts at "everything shown",
+  // which is what an untouched install draws anyway.
+  unawaited(loadPlayerControlsPrefs());
+  // What a double tap on the picture does. Same boot timing and same reasoning.
+  unawaited(loadDoubleTapAction());
   final store = SourceStore();
   // Cloud init, opening the database and reading the source list are mutually
   // independent — only the identity migration below needs the database and the
@@ -120,6 +142,10 @@ Future<void> main() async {
       '${redactText('$error')}',
     );
   }
+  // Remembered movie/series categories, read before the first list can open so
+  // `MediaTabController` can restore them synchronously (a `load()` with an
+  // awaited keychain read would delay the first provider fetch).
+  await preloadMediaCategoryPrefs(sources.map((source) => source.id));
   runApp(IptvApp(db: db, store: store));
 }
 
@@ -172,6 +198,22 @@ class _IptvAppState extends State<IptvApp> {
         requestSilence();
       } else if (call.method == 'trayShown') {
         requestResume();
+      } else if (call.method == 'windowPlacementChanged') {
+        // The runner reports the frame when a move/resize gesture ends, so the
+        // position survives even when the quit path never reaches a lifecycle
+        // event (tray Exit, forced close).
+        final args = call.arguments;
+        if (args is Map) {
+          final placement = WindowPlacement.fromRunner(
+            args.cast<Object?, Object?>(),
+          );
+          if (placement != null) {
+            const settings = AppSettingsStore();
+            if (await settings.rememberWindowPlacement()) {
+              await settings.setWindowPlacement(placement.encode());
+            }
+          }
+        }
       }
       return null;
     });

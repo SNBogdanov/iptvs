@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../data/library_repository.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import '../widgets/artwork_cache.dart';
 import '../widgets/image_utils.dart';
 
 /// EPG timeline grid: one row per channel, programme cells positioned on a
@@ -851,6 +852,9 @@ class _ChannelRow extends StatelessWidget {
                           borderRadius: BorderRadius.circular(6),
                           child: CachedNetworkImage(
                             imageUrl: logo,
+                            // Shared cache + direct-then-proxy fetcher: see
+                            // [artworkCacheManager].
+                            cacheManager: artworkCacheManager,
                             width: 30,
                             height: 30,
                             // Contain, like every other channel-logo surface:

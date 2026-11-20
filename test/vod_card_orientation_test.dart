@@ -1,7 +1,11 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_settings_store.dart';
 import 'package:iptvs/data/vod_card_orientation.dart';
+import 'package:iptvs/screens/media_tab_view.dart';
+import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/theme.dart';
 
 /// The card-shape preference is one enum behind three layers — the keychain, the
 /// live notifier the grid listens to, and the grid's own default — and the only
@@ -118,6 +122,71 @@ void main() {
     test('the label is what the tile prints', () {
       expect(VodCardOrientation.portrait.label, 'Portrait');
       expect(VodCardOrientation.landscape.label, 'Landscape');
+    });
+  });
+
+  group('the narrow list row follows the shape', () {
+    // A phone window: under the media grid's 600 dp floor, so the tab renders
+    // list rows — the surface where the preference used to do nothing at all,
+    // because a phone never reaches the poster grid.
+    Future<void> mount(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final scroll = ScrollController();
+      final focus = FocusNode();
+      addTearDown(scroll.dispose);
+      addTearDown(focus.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: MediaTabView(
+              kind: ContentKind.movie,
+              visible: const [
+                MediaItem(id: 'm1', title: 'One', kind: ContentKind.movie),
+              ],
+              snapshot: null,
+              loading: false,
+              loadingMore: false,
+              error: null,
+              showingSearch: false,
+              lastPlayedId: null,
+              scrollController: scroll,
+              firstFocusNode: focus,
+              displayPages: 1,
+              isFavorite: (_) => false,
+              onOpenMedia: (_) {},
+              onLoadMore: () {},
+              onRetry: () {},
+              continueWatching: const [],
+              onResume: (_) {},
+              onRemoveContinueWatching: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('only the width follows the preference', (tester) async {
+      await mount(tester);
+      Size thumb() => tester.getSize(
+        find.byKey(const ValueKey('media.list.thumb')).first,
+      );
+
+      // Portrait keeps the 2:3 poster, landscape widens to a 16:9 band.
+      expect(thumb().height, 84);
+      expect(thumb().width, closeTo(84 * (2 / 3), 0.01));
+
+      vodCardOrientation.value = VodCardOrientation.landscape;
+      await tester.pump();
+
+      // The height is what the paging math counts rows by, so it must not move —
+      // that was the reason the row used to ignore the setting entirely.
+      expect(thumb().height, 84);
+      expect(thumb().width, closeTo(84 * (16 / 9), 0.01));
     });
   });
 }

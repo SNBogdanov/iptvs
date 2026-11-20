@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Reading the active network's LinkProperties (its HTTP proxy) for Dart. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- Android TV: the app runs on TVs but doesn't require TV hardware, and it
          must work without a touchscreen so the Leanback launcher will list it. -->
@@ -40,6 +42,11 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Receives the PiP menu actions (play/pause, previous/next, mute);
+             not exported, only reachable through the player's PendingIntents. -->
+        <receiver
+            android:name=".PipActionReceiver"
+            android:exported="false" />
         <activity
             android:name=".HdrPlayerActivity"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode"

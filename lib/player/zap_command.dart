@@ -74,6 +74,13 @@ enum ZapCommandKind {
   /// renderers. A surface that bound it privately would have a second copy of
   /// the on/off state.
   autoSwitch,
+
+  /// Turn random zapping on or off, whichever it currently is.
+  ///
+  /// The same toggle as Ctrl+R and the Settings switch, exposed to surfaces
+  /// that have an overflow menu but no keyboard. The banner message reports
+  /// the direction, so the menu item itself needs no state copy.
+  random,
 }
 
 /// A parsed member of the zap vocabulary. [value] is meaningful for
@@ -121,6 +128,8 @@ ZapCommand? parseZapCommand(String? raw) {
       return const ZapCommand(ZapCommandKind.back);
     case 'zap:auto':
       return const ZapCommand(ZapCommandKind.autoSwitch);
+    case 'zap:random':
+      return const ZapCommand(ZapCommandKind.random);
   }
   if (raw.startsWith('zap:digit:')) {
     final digit = int.tryParse(raw.substring('zap:digit:'.length));

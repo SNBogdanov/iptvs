@@ -55,6 +55,13 @@ dependencies:
   supabase_flutter: ^2.15.4
   url_launcher: ^6.3.2
   cached_network_image: ^4.0.2
+  # Both were already resolved transitively (flutter_cache_manager 3.4.5 via
+  # cached_network_image, http 1.6.0 via it) and are now named because the
+  # artwork cache manager (`lib/widgets/artwork_cache.dart`) builds its own
+  # `FileService` on top of them: the direct-then-proxy fetcher cannot be
+  # expressed through `CachedNetworkImage`'s own arguments.
+  flutter_cache_manager: ^3.4.5
+  http: ^1.6.0
   package_info_plus: ^10.2.1
   cryptography: ^2.9.0
   timezone: ^0.11.1

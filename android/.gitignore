@@ -16,3 +16,5 @@ key.properties
 # is signed with the same key and installs over the previous one on a test device
 # (no uninstall needed). Standard public android debug creds — not a release secret.
 !app/debug.keystore
+
+/keystore.properties

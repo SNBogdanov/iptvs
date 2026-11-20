@@ -4,12 +4,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
+import '../data/app_settings_store.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/load_token.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
+import 'media_category_cache.dart';
 import 'media_sort.dart';
 
 /// Pseudo-category id for the "Favorites" view (live and media). Not a provider
@@ -73,8 +75,17 @@ class MediaTabController extends ChangeNotifier {
     required this.kind,
     required this.repo,
     this.onEnrichError,
-  }) : firstFocusNode = RoutedFocusNode('media.${kind.name}.first'),
-       scrollController = ScrollController();
+    AppSettingsStore? store,
+  }) : _settings = store ?? const AppSettingsStore(),
+       firstFocusNode = RoutedFocusNode('media.${kind.name}.first'),
+       scrollController = ScrollController() {
+    // Synchronous restore from the boot-time cache: no `await` on the path to
+    // the first fetch, so a refresh immediately reloads the selected category
+    // and callers that expect `load()` to start synchronously keep working.
+    categoryId = cachedMediaCategory(repo.source.id, kind.name);
+  }
+
+  final AppSettingsStore _settings;
 
   /// Loaded page(s) for the current category (drives paging / "load more").
   MediaLibrarySnapshot? snapshot;
@@ -519,7 +530,18 @@ class MediaTabController extends ChangeNotifier {
       searchResults = const [];
       searchQuery = null;
     });
+    unawaited(_persistCategory(value));
     await load();
+  }
+
+  /// Remembers the browsed category across restarts and source reloads. Failure
+  /// is silent: a preference is not worth surfacing, and the next start simply
+  /// falls back to "All".
+  Future<void> _persistCategory(String? value) async {
+    cacheMediaCategory(repo.source.id, kind.name, value);
+    try {
+      await _settings.setMediaCategory(repo.source.id, kind.name, value);
+    } catch (_) {}
   }
 
   /// If currently viewing Favorites, fall back to "All" (used when the last
@@ -527,6 +549,7 @@ class MediaTabController extends ChangeNotifier {
   void resetFavoritesCategoryToAll() {
     if (categoryId == kFavoritesCategoryId) {
       _set(() => categoryId = null);
+      unawaited(_persistCategory(null));
     }
   }
 

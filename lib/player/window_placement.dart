@@ -189,8 +189,38 @@ Future<void> applySavedWindowPlacement({
   AppSettingsStore? store,
   MethodChannel? channel,
 }) async {
-  final placement = await readWindowPlacement(store: store);
+  final settings = store ?? const AppSettingsStore();
+  final placement = await readWindowPlacement(store: settings);
   if (placement == null) return;
+  // Older builds recorded the PiP frame as the main window when the app quit
+  // from PiP. If the stored placement is exactly the stored PiP frame, it is
+  // that corruption, not a window the user arranged: ignore it and let the
+  // runner's startup placement stand instead of opening at PiP size.
+  final miniRaw = await settings.miniPlayerPlacement();
+  if (miniRaw != null) {
+    final parts = miniRaw.split(',').map(int.tryParse).toList();
+    if (parts.length == 4 &&
+        parts.every((value) => value != null) &&
+        parts[0] == placement.x &&
+        parts[1] == placement.y &&
+        parts[2] == placement.width &&
+        parts[3] == placement.height) {
+      DiagnosticsLog.instance.add(
+        'player',
+        'saved window placement equals the PiP frame - keeping the startup '
+        'position',
+      );
+      // Replace the corrupt record with whatever the runner settles on, so the
+      // next launch is not stuck skipping the same value forever.
+      unawaited(
+        Future<void>.delayed(
+          const Duration(seconds: 1),
+          () => recordWindowPlacement(store: settings),
+        ),
+      );
+      return;
+    }
+  }
   final method = channel ?? const MethodChannel(kWindowsRunnerChannel);
   try {
     final applied = await method.invokeMethod<bool>(

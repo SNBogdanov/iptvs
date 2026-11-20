@@ -645,3 +645,55 @@ records "now" so the scheduled one does not immediately fire again. An absent/un
 as *never refreshed*, which the planner treats as due: the safe direction, since a missing record
 must not silently disable the feature.
 
+
+## The HTTP proxy
+
+`dart:io` deliberately ignores the platform proxy, and everything in this app that speaks HTTP -
+the panel API, EPG, update checks and every poster/logo through `flutter_cache_manager` - sits on
+it. So the app resolves a proxy itself and installs one `HttpOverrides.global`
+(`lib/data/proxy_config.dart`), whose `findProxy` answers **per request** from
+`effectiveProxy`. That is what makes a Settings change apply to the next request without
+rebuilding anything, and it means a client created before the boot-time lookup finishes still uses
+the proxy.
+
+**Three modes, `System` by default - and the default is the absent key.** Every install that
+predates the setting already followed the device proxy, so reading an unset value as anything else
+would silently change how those installs reach the network. `Custom` uses a typed host:port
+(`Settings -> Proxy server`, which switches the mode to `Custom` on save because leaving a typed
+address inert reads as a broken setting). `Off` connects directly.
+
+Where `System` comes from:
+- **Android** - `MainActivity.systemProxy()` reads the active network's
+  `LinkProperties.httpProxy` (falling back to the JVM proxy properties and `ProxySelector`).
+  It also returns `ProxyInfo.exclusionList`, which is **not optional**: the Wi-Fi proxy in the
+  field carries `xl=*.site,37.1.194.25`, and forcing those through the proxy breaks the panel they
+  exist for. Requires `ACCESS_NETWORK_STATE`.
+- **Windows** - the "Internet options" dialog, which is registry-only:
+  `HKCU\...\Internet Settings` (`ProxyEnable`, `ProxyServer`, `ProxyOverride`), read with one
+  `reg query`. `ProxyServer` may be `host:port` or a per-scheme run; HTTPS wins, then HTTP, and a
+  `socks` entry switches the type.
+- **Everything else** - the `https_proxy`/`http_proxy`/`all_proxy` environment variables.
+
+A bypass entry matches a literal host or IP, `*.example.com`, `.example.com`, `<local>` (a dotless
+LAN name), a bare `*`, or an interior wildcard; matching is case-insensitive. **A LAN address is
+bypassed even without a bypass entry**, which is the platform's own `<local>` rule and not a
+convenience: the panel can live on a dotless name (`http://transmission/player_api.php`), and a real
+proxy answers such a request by closing the connection — reported as "Connection closed before full
+header was received" on Android while the same URL worked through curl, which bypasses LAN names.
+`ProxyEndpoint.isLocalHost` is the rule: dotless names, `.local`, `localhost`, and the private IPv4/
+IPv6 ranges go `DIRECT`; the proxy is for the internet. A half-filled `Custom` choice (empty host,
+bad port) resolves to **direct** rather than to a proxy that does not exist, and the diagnostics log
+records what was resolved (`[iptvs.net] proxy 192.168.1.4:8888 (HTTP, mode=system, bypass=2)` or
+`[iptvs.net] no proxy (mode=system, direct)`).
+
+**Artwork is the exception: direct first, proxy only on failure.** Posters frequently come from a
+LAN address beside the panel, and a phone's Wi-Fi proxy would otherwise send a local host through
+the proxy and blank every thumbnail; a CDN the network filters fails direct and then succeeds
+through the proxy. `ProxyAwareFileService` (`lib/widgets/artwork_cache.dart`) therefore fetches
+through a raw `HttpClient` with `findProxy = DIRECT`, and if that throws (a dropped connect) or
+answers a non-success status (a block page's 403) retries through the configured proxy. The direct
+attempt has a **4 s** connect timeout - it precedes every artwork download, so the default 20 s
+would stall a grid - and a host that fails direct is remembered for 10 minutes so twenty posters on
+a blocked CDN pay that timeout once, not twenty times. Every `CachedNetworkImage` in the app passes
+`cacheManager: artworkCacheManager`, which is the default cache key (`libCachedImageData`) so
+already-downloaded artwork is reused, with that file service behind it.

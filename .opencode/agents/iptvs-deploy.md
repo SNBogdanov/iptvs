@@ -1,21 +1,43 @@
 ---
 description: "Деплой iptvs (Windows) в C:\\Program Files\\IPTVS: проверка свежей сборки, копирование, SHA-256. Use when deploying a built iptvs Windows release."
 mode: subagent
-permission:
-  edit:
-    "*": deny
-    "C:/Windows/TEMP/opencode/**": allow
-    "C:/Windows/Temp/opencode/**": allow
-    "C:/Windows/ServiceProfiles/LocalService/AppData/Local/Temp/opencode/**": allow
-    "C:/Windows/SERVIC~1/LOCALS~1/AppData/Local/Temp/opencode/**": allow
-  bash:
-    "*": allow
-    "*git push*": deny
-    "*git commit*": deny
-  task: { "*": deny }
-  todowrite: deny
-  webfetch: deny
-  websearch: deny
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: edit
+    resource: "C:/Windows/TEMP/opencode/**"
+    effect: allow
+  - action: edit
+    resource: "C:/Windows/Temp/opencode/**"
+    effect: allow
+  - action: edit
+    resource: "C:/Windows/ServiceProfiles/LocalService/AppData/Local/Temp/opencode/**"
+    effect: allow
+  - action: edit
+    resource: "C:/Windows/SERVIC~1/LOCALS~1/AppData/Local/Temp/opencode/**"
+    effect: allow
+  - action: shell
+    resource: "*"
+    effect: allow
+  - action: shell
+    resource: "*git push*"
+    effect: deny
+  - action: shell
+    resource: "*git commit*"
+    effect: deny
+  - action: subagent
+    resource: "*"
+    effect: deny
+  - action: todowrite
+    resource: "*"
+    effect: deny
+  - action: webfetch
+    resource: "*"
+    effect: deny
+  - action: websearch
+    resource: "*"
+    effect: deny
 ---
 
 Ты — деплой-агент iptvs (`C:\Users\SERGEYBO\Documents\Projects\iptvs`). Работаешь только с Windows-сборкой.

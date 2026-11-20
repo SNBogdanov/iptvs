@@ -1,9 +1,12 @@
 package com.gchofficial.iptvs
 
+import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -23,6 +26,7 @@ import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.DebugCounters
+import com.gchofficial.iptvs.player.DoubleTapAction
 import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.FrameLivenessWatch
@@ -149,6 +153,18 @@ class HdrPlayerActivity : ComponentActivity() {
     // closes the list is a question about a mode stack only Dart holds.
     // Replaced wholesale by the next push, so it can only ever be early.
     private var zapQuickListOpenOptimistic = false
+
+    /**
+     * Whether the viewer picked a framing in this session (the aspect chip in
+     * the control row).
+     *
+     * A zap payload carries the `aspect` Dart held at launch, so re-applying it
+     * on every channel change reverted a choice made after the player opened —
+     * the reported "масштаб слетает при переключении каналов". The local choice
+     * wins for the rest of the session; Dart still receives it through
+     * `reportAspect` on each cycle and through RESULT_ASPECT on exit.
+     */
+    private var aspectChosenLocally = false
 
     // When Dart last reported a zap resolve in flight (`setZapBanner`'s
     // `settling`). While one is, the reconnect watchdog stands down: the
@@ -438,6 +454,30 @@ class HdrPlayerActivity : ComponentActivity() {
         // draws exactly the chrome it draws today, rather than losing a badge.
         uiState.showClock = intent.getBooleanExtra(EXTRA_SHOW_CLOCK, true)
         uiState.showPlaybackTimes = intent.getBooleanExtra(EXTRA_SHOW_TIMES, true)
+        // Optional controls (Settings → "Player controls"). Fail open: an empty
+        // or absent list shows everything, which is what every install drew
+        // before the setting existed.
+        val hiddenControls = intent.getStringExtra(EXTRA_HIDDEN_CONTROLS)
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            .orEmpty()
+        uiState.showsPreviousNext = "previous_next" !in hiddenControls
+        uiState.showsSeek10 = "seek10" !in hiddenControls
+        uiState.showsMute = "mute" !in hiddenControls
+        uiState.showsVolume = "volume" !in hiddenControls
+        uiState.showsQuickList = "quick_list" !in hiddenControls
+        uiState.showsFavorite = "favorite" !in hiddenControls
+        uiState.showsSubtitles = "subtitles" !in hiddenControls
+        uiState.showsAspect = "aspect" !in hiddenControls
+        uiState.showsPip = "pip" !in hiddenControls
+        uiState.showsInfo = "info" !in hiddenControls
+        uiState.doubleTapAction = DoubleTapAction.fromWire(
+            intent.getStringExtra(EXTRA_DOUBLE_TAP),
+        )
+        uiState.seekStepSeconds = intent.getIntExtra(EXTRA_SEEK_STEP, 10)
+            .coerceIn(1, 600)
         // Favorite toggle (live only): seeded from the Dart store, read back on
         // exit (see finish) so the channel list reflects it on return.
         // Opens on the mode Dart is already in (the user's stored choice, or a
@@ -454,6 +494,20 @@ class HdrPlayerActivity : ComponentActivity() {
         // Fails closed: an older Dart build that doesn't send the key simply
         // offers no quick-list button, exactly as before.
         uiState.canZap = intent.getBooleanExtra(EXTRA_ZAP_ENABLED, false)
+        uiState.stepEnabled = intent.getBooleanExtra(EXTRA_STEP_ENABLED, false)
+        // The live zap modes Dart pushes for the overflow menu's checkmarks.
+        // The push can land in the window between `open` returning and this
+        // method building `uiState` (MainActivity's channel answers at once,
+        // while `startActivity` is asynchronous), and dropping it there left
+        // "Random zapping" unchecked at launch until the user toggled it — so
+        // the values are kept in the companion and re-applied here.
+        pendingRandomZapping?.let { uiState.randomZapping = it }
+        pendingAutoSwitch?.let { uiState.autoSwitchEnabled = it }
+        // Preserve the user's audible level across a muted session, so the
+        // close result can report it with RESULT_MUTED and unmuting restores
+        // that level rather than full volume.
+        uiState.audibleVolume = initialAudibleVolume
+        if (initialMuted) uiState.muted = true
 
         if (shared != null) {
             val sharedEngine = shared.first
@@ -519,6 +573,18 @@ class HdrPlayerActivity : ComponentActivity() {
     /** Session-wide start volume (0..1); absent (old callers) = 1f. */
     private val initialVolume: Float
         get() = intent.getFloatExtra(EXTRA_VOLUME, 1f).coerceIn(0f, 1f)
+
+    /** The audible level to restore after unmute; never 0. */
+    private val initialAudibleVolume: Float
+        get() = intent
+            .getFloatExtra(
+                EXTRA_AUDIBLE_VOLUME,
+                if (initialVolume > 0f) initialVolume else 1f,
+            )
+            .coerceIn(0.1f, 1f)
+
+    private val initialMuted: Boolean
+        get() = intent.getBooleanExtra(EXTRA_MUTED, initialVolume <= 0f)
 
     private fun startWithExoPlayer() {
         val exo = ExoPlayerEngine(
@@ -818,6 +884,39 @@ class HdrPlayerActivity : ComponentActivity() {
      * browsing, the strip should describe the channel they are browsing to.
      * [applyZap] puts both back in step when the move settles.
      */
+    /** Live zap modes for the overflow menu's checkmarks; no banner involved. */
+    fun applyZapModes(args: Map<*, *>) {
+        // Recorded even before `uiState` exists: the launch-time seed can land
+        // ahead of `onCreate` (see the companion's `pending*` fields).
+        (args["random"] as? Boolean)?.let { pendingRandomZapping = it }
+        (args["autoSwitch"] as? Boolean)?.let { pendingAutoSwitch = it }
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        uiState.randomZapping = pendingRandomZapping ?: false
+        uiState.autoSwitchEnabled = pendingAutoSwitch ?: false
+    }
+
+    /**
+     * Position/duration the engine is at right now, for Dart's resume store.
+     *
+     * The Activity reports its final position on `nativeClosed`, which is all a
+     * route exit needs — but a VOD Previous/Next step swaps the stream inside
+     * the session, so the outgoing title never reaches that report and its
+     * resume point was lost ("the position is not remembered when I press
+     * Next"). Dart asks for it before the swap instead.
+     *
+     * `uiState.positionMs` is the same value the scrubber draws, kept current
+     * by the progress ticker.
+     */
+    fun currentPlaybackPosition(): Map<String, Any> {
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) {
+            return mapOf("positionMs" to 0L, "durationMs" to 0L)
+        }
+        return mapOf(
+            "positionMs" to uiState.positionMs.coerceAtLeast(0L),
+            "durationMs" to uiState.durationMs.coerceAtLeast(0L),
+        )
+    }
+
     fun applyZapBanner(args: Map<*, *>) {
         if (!::uiState.isInitialized || isFinishing || isDestroyed) return
         uiState.channelNumber = (args["channelNumber"] as? Number)?.toInt()
@@ -832,8 +931,19 @@ class HdrPlayerActivity : ComponentActivity() {
         val settling = args["settling"] as? Boolean ?: false
         uiState.zapSettling = settling
         zapSettlingSinceMs = if (settling) System.currentTimeMillis() else 0L
-        uiState.zapBannerAtMs = System.currentTimeMillis()
-        uiState.zapBannerVisible = true
+        // The push carries the timestamp only a *new* zap changes; a refresh
+        // (auto-switch countdown, aspect, reconnect) repeats the old one. So a
+        // **newer** stamp re-opens the banner and anything else must not: the
+        // auto-switch tick fires every second, and re-opening on it made the
+        // channel name disappear on the 3 s timer and pop straight back.
+        val stamp = (args["atMs"] as? Number)?.toLong()?.takeIf { it > 0L }
+        if (stamp == null) {
+            uiState.zapBannerAtMs = System.currentTimeMillis()
+            uiState.zapBannerVisible = true
+        } else if (stamp > uiState.zapBannerAtMs) {
+            uiState.zapBannerAtMs = stamp
+            uiState.zapBannerVisible = true
+        }
     }
 
     /**
@@ -905,6 +1015,7 @@ class HdrPlayerActivity : ComponentActivity() {
         subtitles = emptyList()
 
         uiState.title = (args["title"] as? String).orEmpty()
+        (args["isLive"] as? Boolean)?.let { uiState.isLive = it }
         uiState.sourceName = args["sourceName"] as? String
         uiState.channelName = (args["channelName"] as? String)?.takeIf { it.isNotBlank() }
             ?: uiState.title.takeIf { it.isNotBlank() }
@@ -913,8 +1024,16 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState.epgNext = epgFromMap(args, "epgNextTitle", "epgNextStartMs", "epgNextStopMs", null)
         uiState.canFavorite = args["canFavorite"] as? Boolean ?: false
         uiState.isFavorite = args["isFavorite"] as? Boolean ?: false
-        (args["aspect"] as? String)?.let { label ->
-            AspectMode.entries.firstOrNull { it.label == label }?.let { uiState.aspect = it }
+        // The payload's `aspect` is the framing Dart knew about at *launch*.
+        // Once the viewer cycles the framing in this session, their choice
+        // outranks it — otherwise every channel change re-applied the launch
+        // value and the picture snapped back ("масштаб слетает при переключении
+        // каналов"). Dart still learns the final choice through RESULT_ASPECT
+        // and through `reportAspect` on each cycle.
+        if (!aspectChosenLocally) {
+            (args["aspect"] as? String)?.let { label ->
+                AspectMode.entries.firstOrNull { it.label == label }?.let { uiState.aspect = it }
+            }
         }
         uiState.digitBuffer = ""
         zapDigitsPendingOptimistic = false
@@ -1044,14 +1163,24 @@ class HdrPlayerActivity : ComponentActivity() {
         },
         onSeekTo = { engine?.seekTo(it) },
         onSeekBy = { if (!uiState.isLive) engine?.seekBy(it) },
-        onSetVolume = { engine?.setVolume(it) },
+        onSetVolume = { value ->
+            if (value > 0f) uiState.audibleVolume = value
+            engine?.setVolume(value)
+        },
         onToggleMute = { engine?.toggleMute() },
         onSelectAudio = { engine?.selectAudio(it) },
         onSelectSubtitle = { engine?.selectSubtitle(it) },
         onSetSpeed = { engine?.setSpeed(it) },
         onCycleAspect = {
             uiState.aspect = AspectMode.entries[(uiState.aspect.ordinal + 1) % AspectMode.entries.size]
+            aspectChosenLocally = true
             engine?.applyAspect(uiState.aspect)
+            // Tell Dart. It owns the label sequence that every zap payload
+            // carries (`kAspectModes`), and it only ever learned this choice
+            // from RESULT_ASPECT at exit — so the *next* zap re-sent the stale
+            // label and the picture snapped back to the old framing on every
+            // channel change.
+            MainActivity.instance?.get()?.reportAspect(uiState.aspect.label)
         },
         // Live streams are typically non-seekable, so "go to live" reloads the
         // source — reconnecting drops the buffer and resumes at the live edge.
@@ -1175,7 +1304,99 @@ class HdrPlayerActivity : ComponentActivity() {
         } else {
             Rational(16, 9)
         }
-        return PictureInPictureParams.Builder().setAspectRatio(ratio).build()
+        return PictureInPictureParams.Builder()
+            .setAspectRatio(ratio)
+            // The system provides expand/close; these are the transport actions
+            // iOS/Windows show in their mini bars. Android displays as many as
+            // `getMaxNumPictureInPictureActions` allows, in this order.
+            .setActions(
+                listOf(
+                    pipAction(
+                        PIP_ACTION_PLAY_PAUSE,
+                        if (uiState.isPlaying) android.R.drawable.ic_media_pause
+                        else android.R.drawable.ic_media_play,
+                        if (uiState.isPlaying) "Pause" else "Play",
+                        1,
+                    ),
+                    pipAction(
+                        PIP_ACTION_PREVIOUS,
+                        android.R.drawable.ic_media_previous,
+                        "Previous",
+                        2,
+                    ),
+                    pipAction(
+                        PIP_ACTION_NEXT,
+                        android.R.drawable.ic_media_next,
+                        "Next",
+                        3,
+                    ),
+                    pipAction(
+                        PIP_ACTION_MUTE,
+                        if (uiState.muted || uiState.volume <= 0f) {
+                            android.R.drawable.ic_lock_silent_mode_off
+                        } else {
+                            android.R.drawable.ic_lock_silent_mode
+                        },
+                        if (uiState.muted || uiState.volume <= 0f) "Unmute" else "Mute",
+                        4,
+                    ),
+                ),
+            )
+            .build()
+    }
+
+    /** One PiP menu action, delivered to [PipActionReceiver]. */
+    private fun pipAction(
+        command: String,
+        iconRes: Int,
+        title: String,
+        requestCode: Int,
+    ): RemoteAction {
+        val intent = Intent(this, PipActionReceiver::class.java)
+            .setAction(ACTION_PIP)
+            .putExtra(EXTRA_PIP_COMMAND, command)
+        val pending = PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return RemoteAction(
+            Icon.createWithResource(this, iconRes),
+            title,
+            title,
+            pending,
+        )
+    }
+
+    /** Runs a PiP menu action while the Activity is alive. */
+    private fun onPipAction(command: String) {
+        if (!::uiState.isInitialized) return
+        when (command) {
+            PIP_ACTION_PLAY_PAUSE -> {
+                engine?.playPause()
+                refreshPipActions()
+            }
+            PIP_ACTION_PREVIOUS -> sendZap("zap:down")
+            PIP_ACTION_NEXT -> sendZap("zap:up")
+            PIP_ACTION_MUTE -> {
+                engine?.toggleMute()
+                refreshPipActions()
+            }
+        }
+    }
+
+    /** Rebuilds the PiP menu once the engine's state change has landed. */
+    private fun refreshPipActions() {
+        if (!uiState.inPip) return
+        window.decorView.postDelayed(
+            {
+                if (!isFinishing && uiState.inPip) {
+                    setPictureInPictureParams(pipParams())
+                }
+            },
+            200L,
+        )
     }
 
     /** Clamp to Android's accepted aspect band (~0.418..2.39) to avoid a crash. */
@@ -1239,7 +1460,14 @@ class HdrPlayerActivity : ComponentActivity() {
             // The final audio state: a mute/level chosen inside this Activity
             // is the input to the next open anywhere (see EXTRA_VOLUME). 0
             // while muted — the Dart session reads `record(0)` as mute.
-            result.putExtra(RESULT_VOLUME, uiState.volume)
+            // The audible level, even while muted: Dart keeps level and mute
+            // flag apart so unmuting later restores this level, not 100%.
+            result.putExtra(
+                RESULT_VOLUME,
+                if (uiState.muted || uiState.volume <= 0f) uiState.audibleVolume
+                else uiState.volume,
+            )
+            result.putExtra(RESULT_MUTED, uiState.muted)
             hasResult = true
             if (hasResult) setResult(RESULT_OK, result)
         }
@@ -1398,6 +1626,22 @@ class HdrPlayerActivity : ComponentActivity() {
         var instance: WeakReference<HdrPlayerActivity>? = null
             private set
 
+        /**
+         * The last zap modes Dart pushed, kept for the gap between `open`
+         * returning and [onCreate] building `uiState`.
+         *
+         * Dart seeds the overflow menu's checkmarks right after `open`, which is
+         * a plain MethodChannel answer while `startActivity` is asynchronous —
+         * so the seed can arrive before there is any `uiState` to write to. It
+         * used to be dropped there, and "Random zapping" showed no checkmark
+         * until the user toggled it once.
+         */
+        @Volatile
+        private var pendingRandomZapping: Boolean? = null
+
+        @Volatile
+        private var pendingAutoSwitch: Boolean? = null
+
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_IS_LIVE = "is_live"
@@ -1427,6 +1671,15 @@ class HdrPlayerActivity : ComponentActivity() {
          */
         const val EXTRA_VOLUME = "volume"
 
+        /** Whether to draw the previous/next pair (live zap or VOD step). */
+        const val EXTRA_STEP_ENABLED = "stepEnabled"
+
+        /** Mute flag from Dart's session (see [RESULT_MUTED]). */
+        const val EXTRA_MUTED = "muted"
+
+        /** Level to restore after unmuting (see [PlayerUiState.audibleVolume]). */
+        const val EXTRA_AUDIBLE_VOLUME = "audibleVolume"
+
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
 
@@ -1452,6 +1705,29 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_SHOW_CLOCK = "show_clock"
         const val EXTRA_SHOW_TIMES = "show_times"
 
+        /**
+         * Comma list of optional controls the chrome must **not** draw (see
+         * `PlayerControl.storageName` in `lib/player/player_controls_prefs.dart`).
+         *
+         * Absent or empty means everything is shown; unknown names are ignored,
+         * so a newer Dart build can hide only the controls this build knows.
+         */
+        const val EXTRA_HIDDEN_CONTROLS = "hidden_controls"
+
+        /**
+         * What a double tap on the picture does — `DoubleTapAction.wire`.
+         *
+         * Absent reads as previous/next, the default.
+         */
+        const val EXTRA_DOUBLE_TAP = "double_tap"
+
+        /**
+         * How far the ±seek buttons and a seek double tap move a title, in
+         * seconds (Settings → "VOD seek step"). Absent keeps 10 s, which is what
+         * the overlay hard-coded before the preference existed.
+         */
+        const val EXTRA_SEEK_STEP = "seek_step_seconds"
+
         /** Result extras: final position/duration + favorite, for the Dart stores. */
         const val RESULT_POSITION_MS = "position_ms"
         const val RESULT_DURATION_MS = "duration_ms"
@@ -1463,6 +1739,26 @@ class HdrPlayerActivity : ComponentActivity() {
          * the input to the *next* open anywhere (see [EXTRA_VOLUME]).
          */
         const val RESULT_VOLUME = "volume"
+
+        /**
+         * The user's mute flag, separate from [RESULT_VOLUME]'s audible level:
+         * Dart's session keeps them apart so unmuting restores the level.
+         */
+        const val RESULT_MUTED = "muted"
+
+        /** PiP menu actions (see [pipAction]) and their receiver contract. */
+        const val ACTION_PIP = "com.gchofficial.iptvs.PIP_ACTION"
+        const val EXTRA_PIP_COMMAND = "pip_command"
+        const val PIP_ACTION_PLAY_PAUSE = "playPause"
+        const val PIP_ACTION_PREVIOUS = "previous"
+        const val PIP_ACTION_NEXT = "next"
+        const val PIP_ACTION_MUTE = "mute"
+
+        /** Runs a PiP action on the live player, if there is one. */
+        fun handlePipAction(command: String?) {
+            if (command == null) return
+            instance?.get()?.onPipAction(command)
+        }
 
         /**
          * Local decoder rebuilds allowed per handoff. One: a second would be a

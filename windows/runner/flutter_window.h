@@ -60,6 +60,21 @@ private:
   void ResetZapBanner();
   void SetNativeWindowFullscreen(bool fullscreen);
   void SetNativeWindowMiniPlayer(bool mini);
+
+  /// Re-reads the window's real fullscreen state into the cache and into the
+  /// GDI bar's `fullscreen` flag.
+  ///
+  /// Called at the end of every window-mode transition, because the bar's
+  /// button glyph is `fullscreen ? "leave" : "enter"` and a value captured at
+  /// some other moment is exactly how a windowed player ended up drawing "leave
+  /// fullscreen" — entering PiP restyles the window to `WS_POPUP`, and a
+  /// `setControlState` arriving while still mini latched `fullscreen = true`
+  /// with nothing to correct it after the restore.
+  void SyncFullscreenCache();
+  // Starts the frameless window's own caption-less drag (see the definition).
+  void StartMiniPlayerDrag();
+  // Sends the current PiP frame to Dart for persistence.
+  void NotifyMiniPlacement();
   void RegisterNativeHdrPlayerChannel();
   void RegisterTrayChannel();
   // Answers `iptvs/clock`'s `locale` with the user's regional date/time format
@@ -121,6 +136,33 @@ private:
   // Always-on-top mini-player mode. Mutually exclusive with fullscreen; both
   // save/restore through the shared *_windowed_* placement fields below.
   bool native_window_mini_ = false;
+  // Aspect ratio captured on entry; WM_SIZING keeps it while dragging a mini
+  // edge. Also remembers the mode and pinned-chrome state to restore on exit.
+  double mini_aspect_ = 16.0 / 9.0;
+  bool mini_return_fullscreen_ = false;
+  bool mini_prev_pinned_ = false;
+  // Which mini-player edges are glued to the monitor work area (recomputed on
+  // WM_EXITSIZEMOVE, honoured by WM_SIZING).
+  bool mini_snap_left_ = false;
+  bool mini_snap_right_ = false;
+  bool mini_snap_top_ = false;
+  bool mini_snap_bottom_ = false;
+  // Custom drag state (mini_dragging_ = mouse captured, offset = grab point in
+  // window coordinates).
+  bool mini_dragging_ = false;
+  POINT mini_drag_offset_ = {};
+  // Main-window frame/show state captured on entry; re-applied explicitly on
+  // exit (SetWindowPlacement alone left a "maximized" window at PiP size).
+  RECT mini_restore_frame_ = {};
+  bool mini_restore_frame_valid_ = false;
+  bool mini_restore_maximized_ = false;
+  // The compact frame actually applied on entry, used to reject a "restore"
+  // rect that is merely the PiP size (the failure mode reported after a second
+  // visit).
+  RECT mini_applied_frame_ = {};
+  // Frame asked for by Dart when re-entering PiP, consumed by the next entry.
+  RECT mini_pending_frame_ = {};
+  bool mini_has_pending_frame_ = false;
   WINDOWPLACEMENT native_windowed_placement_ = {};
   LONG_PTR native_windowed_style_ = 0;
   LONG_PTR native_windowed_ex_style_ = 0;

@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,18 +35,28 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Forward30
+import androidx.compose.material.icons.filled.Forward5
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Replay30
+import androidx.compose.material.icons.filled.Replay5
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -68,6 +77,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -175,7 +185,10 @@ fun PlayerScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(PlayerColors.Ink)
+            // Pure black behind the picture: the app's own `Ink` is a dark
+            // blue-grey, and in a letterboxed frame that reads as "the player
+            // has a grey background" rather than as a cinema screen.
+            .background(Color.Black)
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
@@ -210,13 +223,44 @@ fun PlayerScreen(
             Box(
                 Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
+                    .pointerInput(state.doubleTapAction, state.isLive, state.stepEnabled) {
+                        val half = size.width / 2f
                         detectTapGestures(
                             onTap = {
                                 if (state.controlsVisible) {
                                     state.controlsVisible = false
                                 } else {
                                     poke()
+                                }
+                            },
+                            // Left half goes back/previous, right half
+                            // forward/next — the gesture every touch player
+                            // offers, and the reason `onTap` now waits out the
+                            // double-tap window before toggling the chrome.
+                            onDoubleTap = { offset ->
+                                val forward = offset.x >= half
+                                val step = state.seekStepSeconds.coerceAtLeast(1) * 1_000L
+                                // Live always steps the channel: the setting
+                                // exists for titles, where "seek" and "next
+                                // entry" are genuinely different intents, and
+                                // seeking a live stream is not a thing. Leaving
+                                // the choice in force there made a double tap
+                                // do nothing at all once "Seek" was picked.
+                                val action = if (state.isLive) {
+                                    DoubleTapAction.PreviousNext
+                                } else {
+                                    state.doubleTapAction
+                                }
+                                when (action) {
+                                    // The configured VOD step, not a hard 10 s:
+                                    // the ±buttons beside the scrubber move by
+                                    // the same amount.
+                                    DoubleTapAction.Seek -> if (!state.isLive) {
+                                        callbacks.onSeekBy(if (forward) step else -step)
+                                    }
+                                    DoubleTapAction.PreviousNext -> if (state.stepEnabled) {
+                                        callbacks.onZapCommand(if (forward) "zap:up" else "zap:down")
+                                    }
                                 }
                             },
                         )
@@ -254,6 +298,21 @@ fun PlayerScreen(
             ControlsOverlay(state, callbacks, playFocus, nowMillis) { poke() }
         }
 
+        // What the corners keep while the chrome is down: the wall clock and,
+        // on VOD, how far into the title the viewer is. The shared Flutter
+        // overlay has always had this HUD, and without it two Settings
+        // preferences were invisible on Android the moment the bars faded — a
+        // phone showed neither a clock (its status bar is gone in immersive
+        // mode) nor a position, which read as "the current time and the
+        // playback time are missing".
+        AnimatedVisibility(
+            visible = !state.controlsVisible && !state.inPip && !state.quickList.open,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            PersistentHud(state, nowMillis)
+        }
+
         // Above the bars: the quick list is what the user is looking at while
         // it is open, and the Activity hides the chrome as it arrives anyway.
         AnimatedVisibility(
@@ -261,14 +320,25 @@ fun PlayerScreen(
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
-            QuickListPanel(state) { row ->
-                // A tap names a row; the cursor is still Dart's to move, so
-                // this is "put the cursor here, then OK" rather than a second
-                // way to activate — one path, one set of rules.
-                val delta = row.index - state.quickList.selectedIndex
-                if (delta != 0) callbacks.onZapCommand("zap:move:$delta")
-                callbacks.onZapCommand("zap:activate")
-            }
+            QuickListPanel(
+                state,
+                onActivateRow = { row ->
+                    // A tap names a row; the cursor is still Dart's to move, so
+                    // this is "put the cursor here, then OK" rather than a second
+                    // way to activate - one path, one set of rules.
+                    val delta = row.index - state.quickList.selectedIndex
+                    if (delta != 0) callbacks.onZapCommand("zap:move:$delta")
+                    callbacks.onZapCommand("zap:activate")
+                },
+                // Phones and tablets: an explicit close, because the panel has
+                // no Back key and the OS gesture means summoning the system bar
+                // over a fullscreen picture first.
+                onClose = if (state.isTv) {
+                    null
+                } else {
+                    { callbacks.onZapCommand("zap:close") }
+                },
+            )
         }
 
         // Menus + info panel sit above the bars; they imply controls are visible.
@@ -326,6 +396,48 @@ private fun ControlsOverlay(
             TopBar(state, callbacks, nowMillis, onInteract)
             Spacer(Modifier.weight(1f))
             BottomBar(state, callbacks, playFocus, nowMillis, onInteract)
+        }
+    }
+}
+
+/**
+ * The information the corners keep while the chrome is down.
+ *
+ * Top-right is the wall clock when Settings has it on; bottom-right is the VOD
+ * `position / duration` readout. Both are plain badges in the same style the
+ * bars use, positioned at the same insets, so nothing jumps when the bars fade
+ * in or out. Nothing here is a control: the tap layer below still handles every
+ * press, exactly like the shared Flutter overlay's `_persistentHud()`.
+ *
+ * Sits at the same edge geometry as [TopBar]/[BottomBar] — including the TV
+ * overscan insets — so the pills line up with the badges they replace.
+ */
+@Composable
+private fun PersistentHud(state: PlayerUiState, nowMillis: Long) {
+    if (!state.showClock && (state.isLive || !state.showPlaybackTimes)) return
+    val edge = PlayerDimens.edgePadding(state.isTv)
+    val outerVertical = PlayerDimens.edgeExtraVertical(state.isTv)
+    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+        if (state.showClock) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 18.dp + outerVertical, end = edge),
+            ) {
+                Badge(if (state.isTv) formatClock(nowMillis) else clockHm(nowMillis))
+            }
+        }
+        // VOD only, and only once the engine knows the duration: a `0:00 / 0:00`
+        // pill on a stream that is still resolving would claim a position that
+        // does not exist yet.
+        if (!state.isLive && state.showPlaybackTimes && state.durationMs > 0) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 18.dp + outerVertical, end = edge),
+            ) {
+                Badge("${formatTime(state.positionMs)} / ${formatTime(state.durationMs)}")
+            }
         }
     }
 }
@@ -437,9 +549,14 @@ private fun TopBadges(state: PlayerUiState, nowMillis: Long) {
     state.resolutionBadge()?.let { Badge(it) }
     state.hdrBadge()?.let { Badge(it, accent = true) }
     state.fpsBadge()?.let { Badge(it) }
-    if (state.isTv && state.showClock) Badge(formatClock(nowMillis))
+    if (state.showClock) {
+        // Dated on a TV (ten-foot, glanceable, matches the Dart overlay's
+        // `dated: !touch`), bare `HH:mm` on a phone where space is tight.
+        Badge(if (state.isTv) formatClock(nowMillis) else clockHm(nowMillis))
+    }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BottomBar(
     state: PlayerUiState,
@@ -480,33 +597,50 @@ private fun BottomBar(
                 Spacer(Modifier.height(12.dp))
             }
         }
-        // Below ~560dp (phone portrait) the transport + right cluster won't fit on
-        // one line, so the right cluster wraps onto a second row. Both rows are
-        // left-grouped with the same rhythm so they read as a balanced pair.
+        // Below ~560dp (phone portrait) the controls do not fit on one line.
+        // VOD is the worst case: Prev/Next *and* ±10s are all present, so the
+        // transport row alone is already ~250dp of a 360dp phone and a
+        // fixed-width volume slider pushed the mute button and the track off
+        // the right edge (the report was "mute and the volume bar don't fit in
+        // portrait").
+        //
+        // **Rows are packed, not fixed.** Mute belongs with the transport, so
+        // it rides that row; the volume slider and the contextual cluster then
+        // share a `FlowRow`, which wraps only when they genuinely do not fit.
+        // The result is two rows in the common case (volume hidden, or a live
+        // cluster small enough to sit beside the slider) and three only when a
+        // VOD cluster and the slider together exceed the width — instead of the
+        // unconditional three the mute-in-its-own-row version produced.
         BoxWithConstraints {
             val compact = maxWidth < 560.dp
             if (compact) {
                 Column(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        // Uniform gaps for every control (the parent Row supplies them, so
-                        // TransportControls omits its own spacers) — avoids per-spacer
-                        // rounding that left a wider forward-10s→mute gap on some devices.
+                    FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        // Fixed-width volume so the row stays left-grouped (matching the
-                        // cluster row below) instead of the slider stretching to the edge.
-                        TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(140.dp), spread = true)
+                        // Uniform gaps come from the parent, so TransportControls
+                        // omits its own spacers (`spread = true`).
+                        TransportControls(state, callbacks, playFocus, onInteract, spread = true)
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                    Spacer(Modifier.height(10.dp))
+                    FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        // The parent Row supplies the 8dp gaps, so skip the
-                        // cluster's own inter-button spacers (`spread = true`).
+                        if (state.showsVolume) {
+                            // A fixed lane, not `weight`: inside a FlowRow a
+                            // weighted child has no row to distribute against,
+                            // and 120dp is the same width landscape uses.
+                            VolumeSlider(
+                                state,
+                                callbacks,
+                                onInteract,
+                                Modifier.width(120.dp),
+                            )
+                        }
+                        // The parent supplies the gaps, so skip the cluster's own
+                        // inter-button spacers (`spread = true`).
                         RightCluster(state, callbacks, playFocus, onInteract, spread = true)
                     }
                 }
@@ -515,7 +649,11 @@ private fun BottomBar(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(120.dp))
+                    TransportControls(state, callbacks, playFocus, onInteract)
+                    if (state.showsVolume) {
+                        Spacer(Modifier.width(8.dp))
+                        VolumeSlider(state, callbacks, onInteract, Modifier.width(120.dp))
+                    }
                     Spacer(Modifier.weight(1f))
                     RightCluster(state, callbacks, playFocus, onInteract)
                 }
@@ -524,15 +662,15 @@ private fun BottomBar(
     }
 }
 
-/** Play/pause, ±10s (VOD), mute + volume. `volumeModifier` sizes the volume slider
- *  (a fixed width in both layouts, so the transport row stays left-grouped). */
+/** Play/pause, Prev/Next (when stepping is available), ±10s (VOD) and mute.
+ *  The volume *slider* is [VolumeSlider], drawn after this row in landscape and
+ *  in the wrapping cluster row in portrait. */
 @Composable
-private fun RowScope.TransportControls(
+private fun TransportControls(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
     onInteract: () -> Unit,
-    volumeModifier: Modifier,
     spread: Boolean = false,
 ) {
     // When `spread`, the parent Row supplies uniform gaps (`spacedBy`), so we omit
@@ -543,26 +681,73 @@ private fun RowScope.TransportControls(
         focusRequester = playFocus,
         onClick = { onInteract(); callbacks.onPlayPause() },
     )
-    if (!state.isLive) {
+    if (state.stepEnabled && state.showsPreviousNext) {
         if (!spread) Spacer(Modifier.width(8.dp))
-        IconControlButton(Icons.Filled.Replay10, "Back 10s") {
-            onInteract(); callbacks.onSeekBy(-10_000)
+        IconControlButton(Icons.Filled.SkipPrevious, "Previous") {
+            onInteract(); callbacks.onZapCommand("zap:down")
         }
         if (!spread) Spacer(Modifier.width(8.dp))
-        IconControlButton(Icons.Filled.Forward10, "Forward 10s") {
-            onInteract(); callbacks.onSeekBy(10_000)
+        IconControlButton(Icons.Filled.SkipNext, "Next") {
+            onInteract(); callbacks.onZapCommand("zap:up")
         }
     }
-    if (!spread) Spacer(Modifier.width(8.dp))
-    IconControlButton(
-        icon = if (state.muted || state.volume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-        contentDescription = "Mute",
-    ) { onInteract(); callbacks.onToggleMute() }
-    if (!spread) Spacer(Modifier.width(8.dp))
+    if (!state.isLive && state.showsSeek10) {
+        // The configured VOD step, shared with the seek double tap: the buttons
+        // and the gesture must move by the same amount or one of them is lying.
+        val stepSeconds = state.seekStepSeconds.coerceAtLeast(1)
+        val stepMs = stepSeconds * 1_000L
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(seekIconFor(forward = false, seconds = stepSeconds), "Back ${stepSeconds}s") {
+            onInteract(); callbacks.onSeekBy(-stepMs)
+        }
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(seekIconFor(forward = true, seconds = stepSeconds), "Forward ${stepSeconds}s") {
+            onInteract(); callbacks.onSeekBy(stepMs)
+        }
+    }
+    // Mute rides the transport, not the volume slider's row: on a phone it was
+    // the one control left on a row of its own once the slider was hidden, which
+    // read as a wasted strip of picture for a single button.
+    if (state.showsMute) {
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(
+            icon = if (state.muted || state.volume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+            contentDescription = "Mute",
+        ) { onInteract(); callbacks.onToggleMute() }
+    }
+}
+
+/**
+ * The seek glyph for [seconds], the same rule the shared Flutter overlay uses:
+ * Material only ships numbered icons for 5, 10 and 30, so 15/60 fall back to the
+ * plain 10 glyph rather than printing a number that disagrees with the step.
+ * The content description always carries the real number.
+ */
+private fun seekIconFor(forward: Boolean, seconds: Int): ImageVector = when (seconds) {
+    5 -> if (forward) Icons.Filled.Forward5 else Icons.Filled.Replay5
+    30 -> if (forward) Icons.Filled.Forward30 else Icons.Filled.Replay30
+    else -> if (forward) Icons.Filled.Forward10 else Icons.Filled.Replay10
+}
+
+/**
+ * The volume track alone; mute lives in [TransportControls].
+ *
+ * `width` is where the caller decides the lane: a fixed 120 dp in both layouts,
+ * so the control keeps the same footprint on a phone and on a TV. The slider is
+ * its own row only when it does not fit beside the contextual cluster — see the
+ * compact branch of `BottomBar`.
+ */
+@Composable
+private fun VolumeSlider(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    onInteract: () -> Unit,
+    width: Modifier,
+) {
     SlimSlider(
         value = if (state.muted) 0f else state.volume,
         onValueChange = { onInteract(); callbacks.onSetVolume(it) },
-        modifier = volumeModifier,
+        modifier = width,
         // In the transport row it reads as one of the controls, and needs a
         // focus state a remote user can actually see — see [SlimSlider].
         chip = true,
@@ -571,7 +756,7 @@ private fun RowScope.TransportControls(
 
 /** Contextual right cluster: speed (VOD), audio, subtitles, aspect, info. */
 @Composable
-private fun RowScope.RightCluster(
+private fun RightCluster(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
@@ -597,7 +782,7 @@ private fun RowScope.RightCluster(
     // `applyQuickList` stands the chrome down on the closed→open edge, so this
     // control is off screen for as long as the list is up and can never be
     // pressed a second time. Back is what closes it here.
-    if (state.showQuickListButton) {
+    if (state.showQuickListButton && state.showsQuickList) {
         IconControlButton(
             icon = Icons.AutoMirrored.Filled.List,
             contentDescription = "Channel list",
@@ -642,7 +827,7 @@ private fun RowScope.RightCluster(
         }
         if (!spread) Spacer(Modifier.width(8.dp))
     }
-    if (state.canFavorite) {
+    if (state.canFavorite && state.showsFavorite) {
         IconControlButton(
             icon = if (state.isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
             contentDescription = if (state.isFavorite) "Remove from favorites" else "Add to favorites",
@@ -663,25 +848,72 @@ private fun RowScope.RightCluster(
         }
         if (!spread) Spacer(Modifier.width(8.dp))
     }
-    if (state.showSubtitleButton) {
+    if (state.showSubtitleButton && state.showsSubtitles) {
         IconControlButton(Icons.Filled.ClosedCaption, "Subtitles") {
             onInteract(); state.openMenu =
                 if (state.openMenu == PlayerMenu.Subtitles) PlayerMenu.None else PlayerMenu.Subtitles
         }
         if (!spread) Spacer(Modifier.width(8.dp))
     }
-    TextControlButton(state.aspect.label, "Aspect ratio") {
-        onInteract(); callbacks.onCycleAspect()
+    if (state.showsAspect) {
+        TextControlButton(state.aspect.label, "Aspect ratio") {
+            onInteract(); callbacks.onCycleAspect()
+        }
     }
-    if (state.supportsPip) {
+    if (state.supportsPip && state.showsPip) {
         if (!spread) Spacer(Modifier.width(8.dp))
         IconControlButton(Icons.Filled.PictureInPictureAlt, "Picture in picture") {
             onInteract(); callbacks.onEnterPip()
         }
     }
-    if (!spread) Spacer(Modifier.width(8.dp))
-    IconControlButton(Icons.Filled.Info, "Stream info") {
-        onInteract(); state.infoOpen = !state.infoOpen
+    if (state.showsInfo) {
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(Icons.Filled.Info, "Stream info") {
+            onInteract(); state.infoOpen = !state.infoOpen
+        }
+    }
+    if (state.isLive) {
+        if (!spread) Spacer(Modifier.width(8.dp))
+        Box {
+            var menuOpen by remember { mutableStateOf(false) }
+            IconControlButton(Icons.Filled.MoreVert, "More options") {
+                onInteract(); menuOpen = true
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+            ) {
+                // Both are toggles owned by Dart's LiveZapController; the
+                // banner reports the direction, so the menu needs no state
+                // copy that could disagree with the session.
+                DropdownMenuItem(
+                    text = { Text("Random zapping") },
+                    trailingIcon = if (state.randomZapping) {
+                        { Icon(Icons.Filled.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onInteract()
+                        callbacks.onZapCommand("zap:random")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Auto-switch channels") },
+                    trailingIcon = if (state.autoSwitchEnabled) {
+                        { Icon(Icons.Filled.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onInteract()
+                        callbacks.onZapCommand("zap:auto")
+                    },
+                )
+            }
+        }
     }
 }
 

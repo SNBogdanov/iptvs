@@ -19,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/screens/media_category_cache.dart';
 import 'package:iptvs/screens/media_tab_controller.dart';
 import 'package:iptvs/screens/media_sort.dart';
 import 'package:iptvs/sources/demo_source.dart';
@@ -154,6 +155,9 @@ void main() {
   late MediaTabController controller;
 
   setUp(() async {
+    // The remembered-category cache is process-wide; a case that switches
+    // category must not leak that selection into the next controller.
+    resetMediaCategoryCacheForTest();
     tempDir = Directory.systemTemp.createTempSync('iptvs_media_tab_test');
     db = await AppDatabase.openAt('${tempDir.path}/iptv.db');
     repo = _GatedRepo(source: DemoSource(), db: db, autoEnrichMetadata: false);

@@ -105,6 +105,11 @@ same way. So only video extends under the cutout, and a transient swipe-revealed
 covers a control. When changing the overlay layout, keep new chrome inside one of those two inset
 groups rather than aligning it against the raw window edge.
 
+**The surface behind the picture is pure black, not the app's `Ink`.** `Ink` is a dark blue-grey
+(`0xFF0E0F13`), which is right for the app's own pages and wrong in a letterbox: a portraited
+16:9 stream showed wide grey bands and read as "the player has a grey background" rather than as a
+cinema screen. The Compose root paints `Color.Black`; the window background was already black.
+
 **On a TV that is not enough**, because `safeDrawingPadding()` reports zero insets on essentially
 every Android TV while the panel may still crop. `PlayerDimens.TvEdgePadding` (40 dp) and
 `TvEdgeExtraVertical` (+14 dp on the outer edge only) carry that job, selected through
@@ -129,7 +134,14 @@ channel needs the toggle applied to whichever channel is actually current, not t
 `RESULT_FAVORITE` will describe at close. Both reports are absolute (never a toggle), so they can
 never disagree, and `RESULT_FAVORITE` stays as the one report guaranteed to survive a kill. Dart
 applies either through the same `FavoritesController.toggle` the channel list uses, so an in-player
-toggle shows up in the list on return. The embedded media_kit overlay carries the same star,
+toggle shows up in the list on return.
+
+**An aspect chosen in the player outranks every later zap payload.** Each `zapTo` carries the
+`aspect` Dart held at *launch*, so re-applying it on a channel change reverted a framing the viewer
+picked after the player opened — the reported "the zoom keeps resetting when I change channels".
+`HdrPlayerActivity.aspectChosenLocally` flips on the aspect chip's cycle and makes the local value
+win for the rest of the session; Dart is kept in step by `reportAspect` (`nativeAspect`, each cycle)
+and by RESULT_ASPECT at exit. The embedded media_kit overlay carries the same star,
 toggling the store directly. **Every surface draws it in the same slot** — the control row,
 immediately right of "Go to live" — at that row's ordinary button size: Kotlin `RightCluster`,
 iOS `clusterStack`, the Windows GDI `BottomLayout::favorite`, the shared Flutter `cluster`, and the
@@ -141,6 +153,25 @@ scrubber sits, and a **"Go to live"** control (shown once behind the edge) that 
 to the live edge; the LIVE badge greys when behind. Most control logic lives in Kotlin, but the
 Dart `open` call passes `title`/`sourceName`/`isLive`/EPG now-next/headers/subtitles, and
 `MainActivity` calls back `nativeClosed` so the Dart route pops on exit.
+
+The transport row draws **previous/next** beside play/pause when Dart sends
+`stepEnabled` (live zapping or VOD stepping; fails closed). They send the shared
+`zap:down`/`zap:up`, so the route decides between channel and entry. On live, the
+right cluster ends with a **three-dot overflow** whose items send `zap:random`
+(toggle random zapping) and `zap:auto` (toggle auto-switch); both are Dart-owned
+toggles acknowledged by the zap banner, so the menu carries no state copy.
+
+**In portrait the bottom bar is two rows, or three only when the volume slider really needs
+its own.** A 360 dp phone leaves ~312 dp inside the edge padding, and VOD is the widest case:
+play, Prev/Next, ±10 s and mute is ~304 dp, so a fixed-width volume slider after them pushed the
+mute button and the track off the right edge (reported as "mute and the volume bar don't fit").
+`BottomBar`'s `compact` branch therefore draws the transport **with mute on it** in one `FlowRow`,
+then the slider and the contextual cluster in a second `FlowRow` that wraps only when they do not
+fit together. Volume hidden, or a live cluster small enough to sit beside a 120 dp slider, gives
+two rows; a VOD cluster plus the slider gives three. This replaced a fixed three-row layout in which
+hiding the slider left mute alone on a row of its own — "a whole strip of picture for one button".
+`VolumeSlider` is the track alone; landscape draws it inline after the transport at the same 120 dp.
+The compact breakpoint is unchanged at 560 dp (`PlayerDimens.compactWidth`).
 
 **"Go to live" re-resolves through the same single-flight gate the reconnect watchdog uses**
 (`ResolveGate` in `android/.../player/LiveResolve.kt`, `HdrPlayerActivity.withFreshLiveLocator`):
@@ -1142,10 +1173,104 @@ a valid health check** — it reports `vo->dwidth/dheight`, which is already cor
 case, so a mismatch-gated fix would silently miss it. That is why the forcing pass is unconditional
 rather than gated on an observed mismatch: the failure it covers cannot be observed from Dart.
 
-A **mini-player** mode (`setMiniPlayer`, toggled with the `M` key) restyles the top-level window
-into a compact frameless always-on-top window docked bottom-right — draggable via the video area
-(manual `WM_NCLBUTTONDOWN`/`HTCAPTION` from the surface WndProc), resizable via `WS_THICKFRAME`,
-mutually exclusive with fullscreen, restoring the saved placement on exit/`prepareExit`.
+A **mini-player / picture-in-picture** mode (`setMiniPlayer`, toggled by the `M` key or the
+`Picture` button in the ordinary HUD) restyles the top-level window into a compact frameless
+always-on-top window docked bottom-right - draggable via the video area by its own captured
+drag (`StartMiniPlayerDrag`; deliberately **not** a system `HTCAPTION` move loop, whose Aero Snap
+resized the frameless window at screen edges), resizable via `WS_THICKFRAME`,
+mutually exclusive with fullscreen, restoring the saved placement on exit/`prepareExit`. The
+mini bar replaces the full chrome: no top bar/badges, one compact row with play/pause,
+previous/next (when the route has step targets), mute, **restore** and **close**. Restore is the
+same `miniPlayer` toggle and returns to the mode the user came from (windowed, or fullscreen
+re-entered natively via `SetNativeWindowFullscreen`). Close posts `WM_CLOSE`, so the
+close-to-tray preference still decides whether it hides or quits. Resizing is aspect-locked in
+`WM_SIZING` (`EnforceMiniAspect`) to the ratio captured on entry — both axes are adjusted, so a
+side drag resizes the whole window — and the bar **auto-hides while playing**, leaving clean
+video-only PiP; mouse movement over the video (the surface posts the same reveal message the full
+player uses) or any tap brings it back, and paused playback keeps it up. The previous pin state
+is restored on exit.
+The custom drag snaps **live**: within ~14 px of a work-area edge the frame is pulled onto that
+edge, and the grab offset is deliberately *not* re-anchored on a snap, so pulling away detaches
+after those ~14 px instead of sticking forever. The offset is re-anchored only when a true outer
+edge clamps the frame (then the cursor has overshot and the window must follow the reverse move
+at once). The glued sides are recorded on release (and on `WM_EXITSIZEMOVE` after a resize) and
+kept glued while resizing — a snapped axis wins over the aspect lock when both of its sides are
+pinned. Rewriting the drag rectangle inside Windows' own move loop was what made the rest of a
+drag behave as a resize; this loop is ours.
+
+Everything here is per-monitor, never assumed at `(0,0)`: the drag reads the work area of the
+monitor under the cursor (`MonitorFromPoint`), so negative coordinates, different resolutions and
+taskbars on any side work; snap flags are recomputed against that monitor's work rect. An edge
+shared with another monitor snaps like any other when approached from inside, but is not a wall:
+once the frame is pushed past it, the neighbour's area takes over (clamped to the virtual
+desktop), so the window crosses freely while every monitor boundary is still a snap target.
+`WM_DPICHANGED` is intercepted in mini mode: Windows' suggested rect would change the window's
+shape on a monitor with different scaling, so only its width/position are taken and the height is
+rebuilt from the entry aspect, then clamped to the new work area.
+
+Restoring from the mini-player also restores the **show state**: a maximized source window is
+`SW_RESTORE`d before the compact restyle (the saved placement keeps `SW_SHOWMAXIMIZED`), the
+normal frame is then captured with `GetWindowRect` — **not** `WINDOWPLACEMENT.rcNormalPosition`,
+whose workspace coordinates could fail the secondary-monitor check and fall into the
+"maximized at PiP size" path — and the exit re-applies `ApplyFramePlacement` with that frame and
+maximize flag. A captured frame whose size equals the applied PiP frame (within 4 px of DWM
+rounding) is treated as a corrupt capture and skipped, and the fallback no longer calls
+`SetWindowPlacement` on its own: it sets `rcNormalPosition` via `SetWindowPos` and then applies the
+show command. `SetWindowPlacement` alone was not enough after the style round-trip; the explicit
+frame is what makes a second visit restore correctly. **The fallback frame is itself checked**: once a
+restore has landed at the compact size, `rcNormalPosition` faithfully reproduces it, so a
+PiP-sized normal rect (≤ 700 px wide and equal to the applied PiP frame) is replaced by 70 % of the
+work area instead of restoring the wall again.
+
+**Three states, one owner.** Fullscreen on Windows belongs to the *window*: the GDI bar's glyph is
+derived from `WS_OVERLAPPEDWINDOW` on every `setControlState` (not from Dart's cached flag), because
+VOD and Live used to disagree — a film drew the inward "leave fullscreen" arrows while Live drew
+"Full", and nothing told Dart that entering PiP had silently left fullscreen. The mini transition now
+reports both `miniPlayerChanged` and `fullscreenChanged`, `mini_return_fullscreen_` is derived from
+the style at entry (so leaving PiP re-enters fullscreen even when the runner never initiated it), and
+`createSurface`/`destroySurface`/`prepareExit` **reset the whole `NativeControlState`** — a hidden
+overlay that kept its state painted the last film's title, synopsis and scrubber over a live channel
+the moment a zap banner repainted it.
+
+**Icons: the two arrows, and they point at the destination.** Every window affordance is the same
+pair — `E740` (two arrows outward) = "go fullscreen", `E73F` (two arrows inward) = "go to a normal
+window" — in the full bar *and* in the mini bar, on both the GDI and the Flutter overlay, and for
+Live as well as VOD (the Flutter mini bar used to print the word **Full**, which said nothing about
+where the press actually lands). The mini bar's restore button therefore draws **the mode it returns
+to**: expand when PiP was entered from fullscreen (`g_native_mini_return_fullscreen`, mirrored from
+`mini_return_fullscreen_`; Dart keeps the same value in `_miniReturnFullscreen`), collapse when it
+was entered from a normal window. The fullscreen button in the ordinary chrome follows the same rule
+in reverse — collapse while fullscreen, expand while windowed — which is why the Flutter overlay now
+takes `fullscreen` from `PlayerScreen`.
+
+The PiP frame itself is remembered across visits and runs: after entry, every drag/resize gesture
+and every restore, the runner sends `miniPlacementChanged` (`x,y,width,height`, physical pixels)
+and Dart stores it in the keychain (`AppSettingsStore.miniPlayerPlacement`). `setMiniPlayer`
+accepts the saved frame back on entry, clamped to a live monitor's work area, so the window
+reopens where the user left it — including after quitting the app from PiP — instead of jumping
+to the bottom-right corner.
+
+The zap blackout mask is an overlay above the whole playback surface (it hides the previous
+channel's stale frame). A channel that goes into reconnect before producing a frame never clears
+it, which also hid every control (and the mini bar). `_reconnectLive` now drops the mask when the
+reconnect starts, with the chrome pinned by `_reconnecting`, so Back/restore/close stay reachable
+on a stalled stream. The boss key (`F12`) hides the mini window to the tray exactly as it
+does the full player, and tray restore brings the mini geometry back. `TopControlsHeight()` is
+0 and `BottomControlsHeight()` is `kNativeBottomControlsHeightMini` in this mode, which is what
+keeps the click-through region and hit-testing to the single bar.
+
+The **embedded (media_kit texture) surface** — the normal Windows SDR live/VOD path — gets the
+same window mode through the same `setMiniPlayer` call, but draws its bar in Flutter instead:
+`EmbeddedPlayerControls` switches to a compact row (play/pause, previous/next, mute,
+back-to-player, close) that fades out after three seconds while playing — hover or tap reveals it,
+and paused playback keeps it up, matching the native bar — the PiP button sits beside fullscreen in the right cluster, and
+`P` is the keyboard counterpart on both surfaces. The runner deliberately does **not** create
+its GDI overlay for this path (`SetNativeWindowMiniPlayer` only recreates it when
+`native_video_surface_` exists), because the full Flutter chrome is already there. Dragging the
+embedded mini window goes through `beginWindowDrag`, which starts the same captured
+`StartMiniPlayerDrag`, and the
+embedded Close uses the `closeWindow` method so close-to-tray still applies. `Escape` in the
+mini-player restores the full player rather than popping the route.
 
 ### Live zapping (Phase 4 — native HWND key ring + banner)
 
@@ -1239,6 +1364,13 @@ is why it can't reuse the ordinary control state at all.
   *directly*, before flipping visibility: a layered window keeps whatever was last composited into
   it, so hiding it with the banner still on the DIB would flash that banner for one frame the next
   time the chrome came up.
+- **Android keys its banner timer on the push's `atMs`, not on arrival.** The
+  auto-switch countdown re-pushes the banner every second without touching the
+  stamp; when `HdrPlayerActivity.applyZapBanner` stamped `now` on every push,
+  that repaint restarted the 3 s hide timer forever and the channel-name banner
+  sat over a hidden-chrome picture. `_pushZapBanner` now sends `_zapBannerAtMs`
+  and the Activity only falls back to `now` when the key is absent (an older
+  Dart build).
 - **The banner reuses the existing cached back buffer** (`OverlayBackBuffer`) — no new DIB — and
   composites through the same `CompositeOverlayBands` helper the ordinary chrome paint uses
   (extracted from the pre-existing inline code specifically so the two paths can't diverge).
@@ -1537,10 +1669,17 @@ the window goes away.
 Five decisions here are load-bearing, and each one is a failure mode rather than a style preference:
 
 - **Recording is driven by *moments*, never by `WM_MOVE`.** A keychain write per drag frame is not a
-  cost worth paying. It writes on the two moments where the geometry is about to stop being observable:
+  cost worth paying. It writes on the moments where the geometry is about to stop being observable:
+  `WM_EXITSIZEMOVE` (the runner pushes `windowPlacementChanged` once a move/resize gesture ends),
   `silenceRequest` (the tray hide, where `GetWindowRect` still answers — a hidden window keeps its rect)
   and the `paused`/`detached`/`hidden` lifecycle. A redundant trigger writes the same value again and
   costs nothing; a *missed* one is the bug.
+- **Quitting from PiP must remember the main window, not the compact one.** While
+  `native_window_mini_` is set, `getWindowPlacement` returns the restore frame captured on entry (plus
+  its `maximized` flag) instead of the PiP rect; otherwise a quit from PiP re-opened the app at PiP
+  position/size on every later run. A stored placement that is exactly the stored PiP frame is treated
+  as that old corruption at boot (`applySavedWindowPlacement`) and skipped, so a polluted record cannot
+  keep the window small until the next normal save.
 - **A monitor can be gone by the time the app reopens** — an undocked dock, a projector left behind. So
   the runner requires the saved rect to still land on a monitor, with `MonitorFromRect` +
   **`MONITOR_DEFAULTTONULL`**: `NEAREST` would silently accept one, and restoring onto a detached monitor
@@ -1573,6 +1712,45 @@ runs unconditionally at boot on Windows, off Windows there's no handler at all, 
 none either. Pinned by `test/window_placement_test.dart` (encode/decode incl. the negative origin a
 left-of-primary monitor reports, the reject cases, and both directions against a real `AppSettingsStore`
 over the mocked keychain plus a mocked runner).
+
+### Persisted playback audio state
+
+`PlaybackAudioSession` (`lib/player/playback_audio_session.dart`) is the device-wide authority for
+the user's volume and muted choice (the live preview's deliberate silence is never recorded).
+It now also survives restarts: `main` calls `playbackAudioSession.load()` once at boot, which
+reads `app_playback_volume` / `app_playback_muted` from the keychain, and `record()` — the single
+place a user gesture updates the session — schedules a debounced write (250 ms, so dragging the
+slider is one write, not dozens). Persistence is enabled only **after** the load completes, so a
+gesture racing boot cannot overwrite the stored values with the in-memory defaults. Every player
+open still applies the session (`applyTo`), so the restored mute/level is what the next session
+actually sounds like.
+
+**Android's native player takes part too.** Its Activity starts a fresh audio session, so Dart's
+`open` payload carries `volume` (applied, 0 while muted), `muted` and `audibleVolume`; `MainActivity`
+forwards them as `EXTRA_VOLUME`/`EXTRA_MUTED`/`EXTRA_AUDIBLE_VOLUME`, and `HdrPlayerActivity` seeds
+`PlayerUiState.audibleVolume` from them. On close it reports the audible level (not 0 while muted)
+plus `RESULT_MUTED`, which Dart feeds to `PlaybackAudioSession.recordReported`; unmuting therefore
+restores the level the user had, not 100%. The level is never invented from the engine's 0 while
+muted.
+
+### Persisted media tab category
+
+The last browsed category of each media tab is remembered per **source and kind**
+(`app_media_category_<sourceId>_movie|series`), because category ids are provider-specific. The
+`MediaTabController` reads it once on its first load — before fetching, so a refresh (manual or
+scheduled) reloads the *selected* category instead of falling back to "All" — and writes it from
+`setCategory` (including the `null` that the hidden-category fallback and Favorites reset use).
+A keychain failure silently keeps "All". The category dropdown only receives a
+`value` that is actually present in its `items`: a restored id arriving before the
+category list (or one the provider has since dropped) is shown as "All" instead of
+tripping `DropdownButton`'s "exactly one item with this value" assertion — the
+transient red error screen on Live→Movies.
+
+**"Play movies immediately"** (`app_movie_quick_play`, Settings) skips the movie details sheet:
+`ChannelListScreen._openMedia` hands the catalogue row straight to `_playMedia`, which resolves
+the stream itself and still honours the saved resume position. Series are unchanged (their sheet
+is how a season/episode is chosen), and the setting is read at tap time so a change made in
+Settings applies without recreating the screen.
 
 ### Player chrome preferences: the clock, the VOD time readout, and the channel name
 
@@ -1614,6 +1792,69 @@ the name's band capped at 60% of the width so it can never reach the clock. Andr
 the Linux Lua OSD still apply the preferences to their chrome badge/readout only, so their
 persistent HUDs (and the name element in particular) remain outstanding.
 Pinned by `test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
+
+### Player controls: which buttons the chrome draws
+
+**Settings → "Player controls"** opens a route of ten toggles — the user's own
+list, because a full overlay on a phone was reported as *too cluttered*:
+**Previous / Next**, **Back / forward 10 s**, **Mute**, **Volume bar**,
+**Channel list**, **Favorite**, **Subtitles**, **Aspect ratio**, **Picture in
+picture**, **Stream info** (`lib/player/player_controls_prefs.dart`).
+
+The value is a set of **hidden** controls stored as a comma list of wire names
+(`PlayerControl.storageName`) under one key, and **absence means everything is
+shown** — an install that never opens the page draws exactly the chrome it
+always has, and an unknown name written by a newer build is dropped rather than
+resurrecting every control the user did turn off (`decode`). Play/pause has no
+toggle: it is the one control whose absence would leave nothing to press, and it
+holds the overlay's initial focus.
+
+It reaches the surfaces the way the chrome preferences above do: the shared
+Flutter overlay reads the notifier at build time (Settings is unreachable from a
+player route), and Android receives one `hiddenControls` string on the `open`
+Intent (`EXTRA_HIDDEN_CONTROLS`), parsed in `HdrPlayerActivity.onCreate` into
+`PlayerUiState.showsPreviousNext` … `showsInfo`, which gate the corresponding
+composables in `PlayerControls.kt`. Empty is the fail-open default, so an older
+Dart build that sends nothing keeps today's chrome. A row whose controls are all
+hidden is dropped with them — the portrait volume lane disappears rather than
+leaving an empty strip.
+
+Pinned by `test/player_controls_prefs_test.dart` (encoding, unknown names,
+publish-then-persist, the key cleared when everything is shown again).
+
+### Double tap on the picture
+
+**Left half goes back/previous, right half forward/next** — the halves are fixed,
+only the *action* is a preference (Settings → "Double tap on the picture",
+`lib/player/double_tap_action.dart`): **Previous / Next** (the default) or
+**Seek**. **The preference is titles-only: live always steps the channel**,
+whatever is stored — seeking a live stream is not a thing, and leaving the choice
+in force there made a double tap do nothing at all once "Seek" was picked. On
+titles, Previous/Next is the default because it is the only one of the two with
+something to do on *every* stream, and it uses the same `zap:up`/`zap:down` the
+transport buttons send, so VOD steps an episode or film and live steps a channel,
+exactly as configured by `stepEnabled`. **Seek moves by the configured VOD seek step** (Settings → "VOD
+seek step", 5–60 s), the same amount the ±`N` buttons beside the scrubber move —
+so 15/30/60 s all move that far, and the Android buttons carry the same step
+(`EXTRA_SEEK_STEP` → `PlayerUiState.seekStepSeconds`, and the glyph follows
+Material's 5/10/30 set with the real number kept in the content description).
+Seek is titles-only: live has no position to seek, so a double
+tap there does nothing rather than something wrong.
+
+The value rides the Android open Intent (`EXTRA_DOUBLE_TAP`,
+`DoubleTapAction.fromWire`), and the tap layer answers it in
+`PlayerControls.kt` — which is also why the single tap now waits out the
+double-tap window before toggling the chrome; that is the standard cost of the
+gesture, not a regression. The shared Flutter overlay does the same for **touch
+only**, through `onDoubleTapDown` (the position) + `onDoubleTap` (the action).
+**On Windows a double click keeps its old meaning — toggle fullscreen** — on
+both surfaces (the Flutter overlay hands it to `onToggleFullscreen`; the GDI
+overlay never had a double-click action and still doesn't). Asked for
+explicitly: the desktop gesture was in use, and the setting is a touch
+gesture.
+
+Pinned by `test/double_tap_action_test.dart` (wire names, unknown value reads as
+the default, the two-way cycle, persist/clear).
 
 ### The VOD seek step and the selectable progress bar
 
@@ -1777,6 +2018,16 @@ Pinned by `test/clock_format_test.dart`.
 **Outstanding:** the Android Compose, iOS and Linux Lua overlays still print their own clock; only
 the Windows pair reads the regional format so far.
 
+### Infinite scroll in the media grid
+
+`ChannelListScreen._maybeAutoLoadMedia` listens to each media tab's
+`scrollController`: within 400 px of the end it reveals the next display window
+(`_mediaDisplayPages`) and, for provider-paged tabs, calls `loadMore()`. A 500 ms
+per-tab cooldown keeps one flick from revealing several windows at once, and
+`shownCountFloor`/`hasMore` stop it when nothing is left. The "Next page" card
+remains as a keyboard/D-pad fallback, but a finger no longer has to find and
+press it.
+
 ### VOD/series card shape
 
 The media grid's cards are **portrait (2:3) or landscape (16:9)**, one global
@@ -1808,13 +2059,18 @@ Three consequences worth stating because they are decisions, not accidents:
   from the Settings route pushed *over* the media tab, so nothing in the media tab
   rebuilds on its own and a plain read would leave the cards in the old shape until
   some unrelated rebuild came along. `ListenableBuilder` on `vodCardOrientation` wraps
-  the `SliverGrid` only — the Continue-watching rail and the narrow-layout list are
-  not cards and keep their own shapes.
-- **The rail stays 16:9 in both modes, and the narrow list thumbnail stays 2:3.** The
-  rail's thumbnails are video-frame screenshots and backdrop stills — already landscape
-  by nature, and cropping them into a portrait box is what it was fixed for — while the
-  list row's 58x84 thumb is sized to the two-line text block beside it; a 16:9 thumb
-  there would be 33 px tall next to 60 px of text. Neither is a card.
+  the `SliverGrid` and, separately, each list row's thumbnail (see the last bullet) —
+  the Continue-watching rail is not a card and keeps its own shape.
+- **The rail stays 16:9 in both modes; the narrow list thumbnail follows the shape, in width only.**
+  The rail's thumbnails are video-frame screenshots and backdrop stills — already landscape
+  by nature, and cropping them into a portrait box is what it was fixed for — so they stay.
+  The list row is what the setting could not reach: a phone never gets the grid (it needs a
+  ≥600 × 500 dp window), so a handset draws rows instead, and a preference that changed
+  nothing there reads as a broken setting. Its **height stays 84** (the paging math counts
+  rows by `rowExtent = 84 + 24`) and only the width follows the ratio — ~56 px in portrait,
+  ~149 px in landscape — so the 16:9 thumb widens instead of collapsing to the 33 px it
+  would be with the old fixed 58 px width. It listens to `vodCardOrientation` for the same
+  reason the grid does.
 
 Pinned by `test/vod_card_orientation_test.dart` (encoding, fail-closed `parse`,
 publish-then-persist, and the notifier surviving a simulated reboot) and, in
@@ -2401,6 +2657,16 @@ stays null for VOD, catch-up, and every route that isn't channel-list-borne, so 
   through and is still declined, so this cannot turn a dead key into a silently swallowed one, and
   live is untouched so the step handlers can still call back in without recursing. Pinned by
   `test/vod_step_session_test.dart` and `test/player_overlay_test.dart`.
+
+- **A step persists the outgoing title first.** `_stepVodEntry` awaits
+  `_persistPlaybackPosition()` between "the neighbour resolved" and "the cursor moves", because the
+  position store otherwise only learns about a title when the *route* closes (`nativeClosed` on
+  Android, `dispose`/pop elsewhere) — and a step never closes it: the next stream replaces the
+  current one inside the same session. Reported as "the position is not remembered when I press
+  Next". The Android Activity is asked for its live position over the `playerPosition` method
+  (its `uiState.positionMs` is the same value the scrubber draws); Windows/Linux read their own
+  engine's state as before. The same call is what the auto-advance path already does before moving
+  on.
 
 - **The resolver is state-based, never reuse of the route's original widget fields.** The
   `_current*` mirrors already exist so a single live route survives probes/episodes without a
@@ -3550,6 +3816,18 @@ A **pointer tap** on a row sends `zap:move:<delta>` then `zap:activate` (`Player
 onZapCommand`) rather than activating directly — one path, one set of rules, and the cursor stays
 Dart's to move.
 
+**On a touch surface the panel is the whole list, and it closes with a button.** `kZapWindowRows`
+(40) exists because a *cursor walk* never needs more than a screenful, but a finger scrolls the
+`LazyColumn` itself — so a window cut around the cursor stopped dead at its edge with hundreds of
+channels still below it, reported as "the channel list hits a wall, practically unusable". The
+window size is therefore a controller field (`LiveZapController.windowRows`), set by
+`channel_list_screen` to the whole range (capped at 4000) when the device is a handset
+(`Platform.isAndroid && !isTelevision`, or iOS) and left at 40 for TV/desktop, where the cursor
+walks and the payload stays a few kilobytes. Free scrolling then works with no drag-to-cursor
+mapping at all. The header also carries a **close (X) button** off TV: Back works
+(`PlayerBackAction.QuickListBack` → `zap:back`), but on a phone that means summoning the system
+gesture bar over a fullscreen picture first, which is not a control.
+
 ### Shared Flutter overlay banner (Phase 3)
 
 **Implemented.** The embedded surface (and, since it's the same media_kit `_player`, the Windows SDR
@@ -3616,6 +3894,13 @@ When `HdrPlayerActivity` enters picture-in-picture it is reparented into its own
 so `moveTaskToBack()` from the player would hide the PiP window itself (black screen). To show the
 launcher behind the PiP window it instead calls `MainActivity.instance` (a `WeakReference`
 companion) to move the *main* task back.
+
+The PiP window's transport is the system menu plus `PictureInPictureParams.setActions`: play/pause,
+previous, next and mute, built in `pipParams()` as `RemoteAction`s whose `PendingIntent`s target
+the non-exported `PipActionReceiver` (a `getActivity` intent would foreground the app). Previous
+and next send the shared `zap:down`/`zap:up` vocabulary, so the route decides between live zapping
+and VOD stepping exactly as the Windows mini bar does; mute refreshes the params so its icon
+follows `PlayerUiState.muted`. Expand and close are the system's own affordances.
 
 ## Live auto-reconnect
 

@@ -37,7 +37,9 @@ void logImageFailure(Object error, String url) {
   _suppressedImageFailures = 0;
   // Channel logos and catch-up artwork can come straight off the provider, so
   // these URLs are not all public CDN links — redact like any other.
-  DiagnosticsLog.instance.add(
+  // `addAndPrint` also reaches the console in debug builds, so a connected
+  // device can be diagnosed from logcat without opening the in-app log.
+  DiagnosticsLog.instance.addAndPrint(
     'image',
     'fetch failed url=${redactUrl(url)} error=$error'
     '${suppressed > 0 ? ' (+$suppressed suppressed)' : ''}',

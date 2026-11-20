@@ -49,6 +49,26 @@ enum class AspectMode(val label: String) {
 }
 
 /**
+ * What a double tap on the picture does (Settings → "Double tap on the
+ * picture"), seeded from `EXTRA_DOUBLE_TAP`.
+ *
+ * The halves are fixed: left goes back/previous, right forward/next. Only the
+ * *action* is a preference, because the two serve different viewers — a film
+ * watcher expects a seek, someone zapping expects the next channel. The wire
+ * names match `DoubleTapAction.storageValue` in
+ * `lib/player/double_tap_action.dart`.
+ */
+enum class DoubleTapAction(val wire: String) {
+    PreviousNext("prev_next"),
+    Seek("seek");
+
+    companion object {
+        fun fromWire(value: String?): DoubleTapAction =
+            entries.firstOrNull { it.wire == value } ?: PreviousNext
+    }
+}
+
+/**
  * How long the zap banner stays up after a press, before it fades.
  *
  * Long enough to read a channel name and its now/next after a single press,
@@ -89,19 +109,20 @@ class PlayerUiState(
     /** Active source's display name, shown as a top-bar badge. */
     var sourceName by mutableStateOf(sourceName)
 
-    /** True on Android TV (drives the clock badge, hidden on phones). */
+    /** True on Android TV (drives TV-only geometry and the dated clock format). */
     var isTv by mutableStateOf(isTv)
 
     /**
-     * Whether the top bar draws its wall-clock badge (Settings → "Clock in the
+     * Whether the overlay draws its wall clock (Settings → "Clock in the
      * player"), seeded from `EXTRA_SHOW_CLOCK` on the open Intent.
      *
-     * **Separate from [isTv]**, which answers a different question: whether a
-     * clock belongs here at all. Android's badge is TV-only because a phone
-     * already shows the system clock in its status bar, so this only ever
-     * *removes* the badge where it exists — turning it on does not give a phone
-     * one. Every other surface draws the badge unconditionally and gates only
-     * on this.
+     * **Not gated on [isTv] any more.** The badge used to be TV-only on the
+     * reasoning that a phone already shows the clock in its status bar — but the
+     * player runs immersive, so the status bar is gone exactly while a clock is
+     * wanted, and "Clock in the player" silently did nothing on a phone. The
+     * shared Flutter overlay has always drawn it on every device, with a bare
+     * `HH:mm` off TV. What [isTv] still decides is the *format* — dated with a
+     * weekday on a TV, `HH:mm` on a phone.
      */
     var showClock by mutableStateOf(true)
 
@@ -112,9 +133,47 @@ class PlayerUiState(
      * Hides the two labels and keeps the slider, matching the Windows GDI
      * overlay and iOS: the bar stays draggable, so this costs an at-a-glance
      * position rather than the ability to seek. Live has no scrubber, so this
-     * has nothing to answer there.
+     * has nothing to answer there. Since the persistent HUD landed it also
+     * gates the bottom-right readout drawn while the chrome is hidden.
      */
     var showPlaybackTimes by mutableStateOf(true)
+
+    /**
+     * Which optional controls the control row draws, seeded from
+     * `EXTRA_HIDDEN_CONTROLS` (Settings → "Player controls").
+     *
+     * All default to true, so an older Dart build that sends no list draws
+     * exactly the chrome every install has always had. Play/pause has no flag:
+     * it is the one control whose absence would leave nothing to press (and the
+     * overlay's initial focus would have nowhere to go).
+     */
+    var showsPreviousNext by mutableStateOf(true)
+    var showsSeek10 by mutableStateOf(true)
+    var showsMute by mutableStateOf(true)
+    var showsVolume by mutableStateOf(true)
+    var showsQuickList by mutableStateOf(true)
+    var showsFavorite by mutableStateOf(true)
+    var showsSubtitles by mutableStateOf(true)
+    var showsAspect by mutableStateOf(true)
+    var showsPip by mutableStateOf(true)
+    var showsInfo by mutableStateOf(true)
+
+    /**
+     * What a double tap on the picture does, seeded from `EXTRA_DOUBLE_TAP`.
+     *
+     * Absent reads as [DoubleTapAction.PreviousNext] — the default, and the only
+     * one of the two that has something to do on live as well as on titles.
+     */
+    var doubleTapAction by mutableStateOf(DoubleTapAction.PreviousNext)
+
+    /**
+     * How far the ±seek buttons and a seek double tap move a title, in seconds
+     * (Settings → "VOD seek step", `EXTRA_SEEK_STEP`).
+     *
+     * 10 by default, which is the step this overlay hard-coded before the
+     * preference existed, so an absent extra keeps the old behaviour.
+     */
+    var seekStepSeconds by mutableStateOf(10)
 
     /** Live EPG now/next snapshot; null for VOD. */
     var epgNow by mutableStateOf(epgNow)
@@ -133,6 +192,12 @@ class PlayerUiState(
 
     var volume by mutableStateOf(1f) // 0..1
     var muted by mutableStateOf(false)
+
+    /**
+     * Last non-zero level. `volume` drops to 0 on mute, so this is what an
+     * unmute restores and what the close result reports to Dart while muted.
+     */
+    var audibleVolume by mutableStateOf(1f)
     var speed by mutableStateOf(1.0f)
 
     // Fill, matching every other surface (Dart `_aspectModeIndex`, Swift
@@ -290,6 +355,17 @@ class PlayerUiState(
 
     /** In Android picture-in-picture: the overlay hides all chrome (video only). */
     var inPip by mutableStateOf(false)
+
+    /**
+     * Whether the previous/next transport pair is meaningful on this route:
+     * live zapping or VOD stepping, decided by Dart (`stepEnabled` on the open
+     * payload). Fails closed - an older Dart build draws no pair.
+     */
+    var stepEnabled by mutableStateOf(false)
+
+    /** Live zap modes, pushed by Dart (`setZapModes`): the overflow menu's checkmarks. */
+    var randomZapping by mutableStateOf(false)
+    var autoSwitchEnabled by mutableStateOf(false)
 
     /** Whether the device supports PiP at all — gates the manual "Enter PiP" button. */
     var supportsPip by mutableStateOf(false)

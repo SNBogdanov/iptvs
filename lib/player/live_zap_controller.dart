@@ -542,6 +542,12 @@ _rangeCatId = rangeCategoryId,
       toggleAutoSwitch();
       return true;
     }
+    // Random zapping is session pace, not navigation, so it is claimed before
+    // the quick list can divert it - the same rule auto-switch follows.
+    if (command.kind == ZapCommandKind.random) {
+      toggleRandom();
+      return true;
+    }
     // **While the quick list is open it owns navigation.** Nothing here can
     // change channel except an explicit OK on a row: a list on screen that
     // the user is reading must not have channels changing behind it, and the
@@ -555,6 +561,9 @@ _rangeCatId = rangeCategoryId,
         // practice. Present so the vocabulary stays exhaustively matched, which
         // is what makes a *future* command a compile error here rather than a
         // key that silently does nothing. `true`: it is this controller's.
+        return true;
+      case ZapCommandKind.random:
+        // Same: claimed above, before the list could capture it.
         return true;
       case ZapCommandKind.channelUp:
         channelUp();
@@ -605,6 +614,9 @@ _rangeCatId = rangeCategoryId,
         // the session, not to the highlighted row, so an open list does not
         // capture it. Unreachable, and `true` if it ever is — see the matching
         // arm there.
+        return true;
+      case ZapCommandKind.random:
+        // Same contract as auto-switch.
         return true;
       case ZapCommandKind.openList:
         return true;
@@ -1142,6 +1154,17 @@ _rangeCatId = rangeCategoryId,
     ZapQuickListMode.schedule => _scheduleCursor,
   };
 
+  /// How many rows the published window carries.
+  ///
+  /// [kZapWindowRows] is right for a surface that can only *walk* the cursor — a
+  /// TV remote, a wheel, PageDown — where 40 is more than a screenful and the
+  /// payload stays a few kilobytes. **A touch surface gets the whole range
+  /// instead**: a finger scrolls the list itself, and a window cut around the
+  /// cursor made it stop dead at the window's edge with hundreds of channels
+  /// still below — reported as "the channel list hits a wall". Set by
+  /// `channel_list_screen`, which knows whether this device is a handset.
+  int windowRows = kZapWindowRows;
+
   /// The quick list as one immutable snapshot — the Flutter overlay's input
   /// and, through [ZapQuickListState.toPayload], the `setQuickList` wire
   /// payload. Built fresh on read; nothing caches it, because every field is
@@ -1150,8 +1173,9 @@ _rangeCatId = rangeCategoryId,
     if (!_listOpen) return ZapQuickListState.closed;
     final total = _quickListTotal;
     final cursor = total == 0 ? 0 : _quickListCursor;
-    final start = zapWindowStart(total: total, selected: cursor);
-    final end = total < start + kZapWindowRows ? total : start + kZapWindowRows;
+    final window = windowRows <= 0 ? kZapWindowRows : windowRows;
+    final start = zapWindowStart(total: total, selected: cursor, window: window);
+    final end = total < start + window ? total : start + window;
     return ZapQuickListState(
       open: true,
       mode: _listMode,

@@ -15,13 +15,33 @@ class AppSettingsStore {
   static const _kAlwaysOnTop = 'app_always_on_top';
   static const _kRememberPlacement = 'app_remember_window_placement';
   static const _kWindowPlacement = 'app_window_placement';
+  // PiP keeps its own frame: re-entering the mini-player returns to where the
+  // user left it, independently of the main window's saved placement.
+  static const _kMiniPlayerPlacement = 'app_mini_player_placement';
+  // Device-wide playback audio state, restored before the first player route
+  // opens. Volume is the audible level; `muted` is the user's separate choice
+  // (so unmuting restores the level, and a muted session survives a restart).
+  static const _kPlaybackVolume = 'app_playback_volume';
+  static const _kPlaybackMuted = 'app_playback_muted';
+  // "Play movies immediately": selecting a movie starts it instead of opening
+  // the details sheet with a Play button.
+  static const _kMovieQuickPlay = 'app_movie_quick_play';
   static const _kVodCardOrientation = 'app_vod_card_orientation';
+  // HTTP proxy choice: `system` (default, absent), `custom` with a host:port,
+  // or `off`. Device-wide: it describes this machine's network, not a source.
+  static const _kProxy = 'app_http_proxy';
   static const _kShowPlayerClock = 'app_show_player_clock';
   static const _kShowPlaybackTimes = 'app_show_playback_times';
   static const _kShowChannelName = 'app_show_channel_name';
   static const _kAutoPlayNext = 'app_auto_play_next';
   static const _kNextVideoBehavior = 'app_next_video_behavior';
   static const _kSeekStepSeconds = 'app_seek_step_seconds';
+  // Which optional controls the player's chrome draws, as a comma list of wire
+  // names (`PlayerControl.storageName`). Absent = everything shown.
+  static const _kHiddenPlayerControls = 'app_hidden_player_controls';
+  // What a double tap on the picture does (`DoubleTapAction.storageValue`).
+  // Absent = previous/next, the default.
+  static const _kDoubleTapAction = 'app_double_tap_action';
 
   final FlutterSecureStorage _storage;
 
@@ -96,6 +116,55 @@ class AppSettingsStore {
   Future<void> setWindowPlacement(String value) =>
       _storage.write(key: _kWindowPlacement, value: value);
 
+  /// The last PiP frame as `x,y,width,height`, or null when the mini-player was
+  /// never used. Same physical-pixel frame space as [windowPlacement].
+  Future<String?> miniPlayerPlacement() =>
+      _storage.read(key: _kMiniPlayerPlacement);
+
+  Future<void> setMiniPlayerPlacement(String value) =>
+      _storage.write(key: _kMiniPlayerPlacement, value: value);
+
+  Future<String?> playbackVolume() => _storage.read(key: _kPlaybackVolume);
+
+  Future<void> setPlaybackVolume(String value) =>
+      _storage.write(key: _kPlaybackVolume, value: value);
+
+  Future<String?> playbackMuted() => _storage.read(key: _kPlaybackMuted);
+
+  Future<void> setPlaybackMuted(String value) =>
+      _storage.write(key: _kPlaybackMuted, value: value);
+
+  Future<bool> movieQuickPlay() async =>
+      (await _storage.read(key: _kMovieQuickPlay)) == 'true';
+
+  Future<void> setMovieQuickPlay(bool value) => value
+      ? _storage.write(key: _kMovieQuickPlay, value: 'true')
+      : _storage.delete(key: _kMovieQuickPlay);
+
+  /// Last category browsed in a media tab, per source and kind ("movie" /
+  /// "series"). Category ids are provider-specific, so the source id is part of
+  /// the key: switching providers must not land in a category that only exists
+  /// on another portal.
+  String _mediaCategoryKey(String sourceId, String kind) =>
+      'app_media_category_${sourceId}_$kind';
+
+  Future<String?> mediaCategory(String sourceId, String kind) =>
+      _storage.read(key: _mediaCategoryKey(sourceId, kind));
+
+  /// Stores the selection; `null` means "All" and deletes the row so an
+  /// untouched install keeps a clean keychain.
+  Future<void> setMediaCategory(
+    String sourceId,
+    String kind,
+    String? categoryId,
+  ) {
+    final key = _mediaCategoryKey(sourceId, kind);
+    if (categoryId == null) {
+      return _storage.delete(key: key);
+    }
+    return _storage.write(key: key, value: categoryId);
+  }
+
   /// The stored VOD/series card orientation as `VodCardOrientation.storageValue`,
   /// or null when nothing was ever chosen — which reads as the default.
   ///
@@ -114,6 +183,64 @@ class AppSettingsStore {
       await _storage.delete(key: _kVodCardOrientation);
     } else {
       await _storage.write(key: _kVodCardOrientation, value: value);
+    }
+  }
+
+  /// The stored proxy choice as `{mode, host, port}`, or null when the user
+  /// never touched it — which reads as *system*, the behaviour every install
+  /// had before the setting existed.
+  ///
+  /// One compact value rather than three keys: it is written and read as a
+  /// whole, and a half-updated triple (mode flipped, host not yet) would be a
+  /// state the user never chose. Hosts never contain `;`, so the separator is
+  /// safe; anything unparseable reads as absent.
+  Future<Map<String, String>?> rawProxyConfig() async {
+    final raw = await _storage.read(key: _kProxy);
+    if (raw == null || raw.isEmpty) return null;
+    final parts = raw.split(';');
+    if (parts.length < 3) return null;
+    return {'mode': parts[0], 'host': parts[1], 'port': parts[2]};
+  }
+
+  /// Writes the proxy choice. The default mode (system) with no address clears
+  /// the key, so an untouched-or-reset preference does not look like a choice.
+  Future<void> setRawProxyConfig(Map<String, String> value) async {
+    final mode = value['mode'] ?? '';
+    final host = value['host'] ?? '';
+    final port = value['port'] ?? '';
+    if (mode.isEmpty && host.isEmpty && port.isEmpty) {
+      await _storage.delete(key: _kProxy);
+      return;
+    }
+    await _storage.write(key: _kProxy, value: '$mode;$host;$port');
+  }
+
+  /// The comma list of optional player controls the user hid, or null when the
+  /// default (everything shown) is in force.
+  ///
+  /// An opaque string like [rawVodCardOrientation]: `PlayerControl` owns the
+  /// names, so this store never learns what a "volume bar" is. Absence is the
+  /// default, so the whole-everything state is never written.
+  Future<String?> rawHiddenPlayerControls() =>
+      _storage.read(key: _kHiddenPlayerControls);
+
+  Future<void> setRawHiddenPlayerControls(String? value) async {
+    if (value == null || value.isEmpty) {
+      await _storage.delete(key: _kHiddenPlayerControls);
+    } else {
+      await _storage.write(key: _kHiddenPlayerControls, value: value);
+    }
+  }
+
+  /// The stored double-tap choice (`DoubleTapAction.storageValue`), or null for
+  /// the default (previous/next).
+  Future<String?> rawDoubleTapAction() => _storage.read(key: _kDoubleTapAction);
+
+  Future<void> setRawDoubleTapAction(String? value) async {
+    if (value == null || value.isEmpty) {
+      await _storage.delete(key: _kDoubleTapAction);
+    } else {
+      await _storage.write(key: _kDoubleTapAction, value: value);
     }
   }
 
@@ -207,7 +334,9 @@ class AppSettingsStore {
   /// this store carries an opaque string (same contract as
   /// [rawVodCardOrientation]).
   Future<NextVideoPlayedBehavior> nextVideoPlayedBehavior() async =>
-      NextVideoPlayedBehavior.parse(await _storage.read(key: _kNextVideoBehavior));
+      NextVideoPlayedBehavior.parse(
+        await _storage.read(key: _kNextVideoBehavior),
+      );
 
   Future<void> setNextVideoPlayedBehavior(NextVideoPlayedBehavior value) async {
     // The default is absence, so writing it back would make the keychain look
@@ -228,8 +357,9 @@ class AppSettingsStore {
   /// allowed ladder lives in `player/seek_step.dart`; this store keeps only the
   /// number, and normalising on read means a hand-edited keychain cannot put a
   /// nonsense step on screen.
-  Future<int> seekStepSeconds() async =>
-      normalizeSeekStep(int.tryParse(await _storage.read(key: _kSeekStepSeconds) ?? ''));
+  Future<int> seekStepSeconds() async => normalizeSeekStep(
+    int.tryParse(await _storage.read(key: _kSeekStepSeconds) ?? ''),
+  );
 
   Future<void> setSeekStepSeconds(int value) async {
     final step = normalizeSeekStep(value);

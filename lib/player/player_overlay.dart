@@ -1,20 +1,24 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/gestures.dart' show GestureBinding, PointerScrollEvent;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/net.dart' show cleanImageUrl;
 import '../sources/source.dart';
 import '../theme.dart';
+import '../widgets/artwork_cache.dart';
 import '../widgets/image_utils.dart';
 import 'clock_format.dart';
 import 'playback_audio_session.dart';
+import 'double_tap_action.dart';
 import 'player_chrome_prefs.dart';
+import 'player_controls_prefs.dart';
 import 'zap_quick_list.dart';
 
 /// The narrow slice of a media_kit [Player] the embedded overlay reads and
@@ -256,9 +260,44 @@ class PlayerVideoSurface extends StatefulWidget {
   /// wherever the embedded toggle is the right one.
   final VoidCallback? onRequestFullscreen;
 
+  /// Windows only: the window is in the always-on-top mini-player mode, so the
+  /// overlay shrinks to the compact PiP bar (the native surface draws its own).
+  final bool miniPlayer;
+
+  /// Whether the window is fullscreen right now, so the fullscreen control
+  /// draws "leave" (two arrows inward) instead of "enter" (two arrows outward).
+  /// Native surfaces read this from the window style; the shared overlay is
+  /// told, because on Windows the window is the owner of that state.
+  final bool fullscreen;
+
+  /// Where the mini-player returns to: true when PiP was entered from
+  /// fullscreen. The PiP bar's restore button draws the **destination** — an
+  /// expand glyph for fullscreen, a collapse glyph for a normal window — so the
+  /// icon can never promise a mode the press does not deliver.
+  final bool miniReturnFullscreen;
+
+  /// Enters the mini-player. Null on surfaces/platforms without it, which is
+  /// also what hides the button.
+  final VoidCallback? onToggleMiniPlayer;
+
+  /// Closes the app through the runner's close-to-tray policy. Null hides the
+  /// PiP bar's close button.
+  final VoidCallback? onCloseApp;
+
+  /// Keep the chrome up while the route is reconnecting: the controls (and the
+  /// Back button) are the only way out of a stalled stream, so they must not
+  /// auto-hide behind it.
+  final bool pinnedChrome;
+
   const PlayerVideoSurface({
     super.key,
     this.onRequestFullscreen,
+    this.miniPlayer = false,
+    this.fullscreen = false,
+    this.miniReturnFullscreen = false,
+    this.onToggleMiniPlayer,
+    this.onCloseApp,
+    this.pinnedChrome = false,
     required this.player,
     required this.controller,
     required this.title,
@@ -406,6 +445,12 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             onGoLive: widget.onGoLive,
             onCycleAspect: widget.onCycleAspect,
             onToggleFullscreen: togglePlayerFullscreen,
+            fullscreen: widget.fullscreen,
+            miniReturnFullscreen: widget.miniReturnFullscreen,
+            miniPlayer: widget.miniPlayer,
+            onToggleMiniPlayer: widget.onToggleMiniPlayer,
+            onCloseApp: widget.onCloseApp,
+            pinnedChrome: widget.pinnedChrome,
           );
         },
       );
@@ -555,6 +600,12 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.onGoLive,
     required this.onCycleAspect,
     required this.onToggleFullscreen,
+    this.miniPlayer = false,
+    this.fullscreen = false,
+    this.miniReturnFullscreen = false,
+    this.onToggleMiniPlayer,
+    this.onCloseApp,
+    this.pinnedChrome = false,
     this.touch = false,
   });
 
@@ -632,6 +683,30 @@ class EmbeddedPlayerControls extends StatefulWidget {
   /// Unused when [touch] is set — the route is already fullscreen there, so the
   /// control and the double-tap gesture are both absent (see [touch]).
   final VoidCallback onToggleFullscreen;
+
+  /// Windows embedded surface: draw the compact picture-in-picture bar instead
+  /// of the full chrome (see [PlayerVideoSurface.miniPlayer]).
+  final bool miniPlayer;
+
+  /// Whether the window is fullscreen right now (see
+  /// [PlayerVideoSurface.fullscreen]).
+  final bool fullscreen;
+
+  /// Where the mini bar's restore button returns to (see
+  /// [PlayerVideoSurface.miniReturnFullscreen]).
+  final bool miniReturnFullscreen;
+
+  /// Enters the mini-player. The PiP button in the transport cluster is drawn
+  /// only when this is wired, and the mini bar's restore button reuses it.
+  final VoidCallback? onToggleMiniPlayer;
+
+  /// Closes the app from the mini bar, through the runner's close-to-tray
+  /// policy. Null hides the button.
+  final VoidCallback? onCloseApp;
+
+  /// Chrome stays visible while the stream is reconnecting (see
+  /// [PlayerVideoSurface.pinnedChrome]).
+  final bool pinnedChrome;
 
   /// Tunes the overlay for a **finger** rather than a mouse pointer. False
   /// everywhere but iOS, so Linux/Windows keep their existing pointer behavior
@@ -1026,11 +1101,44 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   bool _visible = true;
   bool _showInfo = false;
 
+  /// Windows embedded PiP: the compact bar auto-hides so the floating window
+  /// is just video, and comes back on hover/tap (or stays up while paused).
+  bool _miniBarVisible = true;
+  Timer? _miniHideTimer;
+  static const _kMiniBarHideDelay = Duration(seconds: 3);
+
+  void _scheduleMiniHide() {
+    _miniHideTimer?.cancel();
+    _miniHideTimer = null;
+    if (!widget.miniPlayer) return;
+    if (!widget.controls.state.playing) {
+      if (!_miniBarVisible && mounted) setState(() => _miniBarVisible = true);
+      return;
+    }
+    _miniHideTimer = Timer(_kMiniBarHideDelay, () {
+      _miniHideTimer = null;
+      if (mounted) setState(() => _miniBarVisible = false);
+    });
+  }
+
+  void _revealMiniBar() {
+    if (!widget.miniPlayer) return;
+    if (!_miniBarVisible && mounted) {
+      setState(() => _miniBarVisible = true);
+    }
+    _scheduleMiniHide();
+  }
+
   /// How long the zap banner stays up after a press, before it fades — the
   /// Dart mirror of Kotlin's `ZAP_BANNER_VISIBLE_MS`.
   static const kZapBannerVisible = Duration(seconds: 3);
 
   Timer? _zapTimer;
+
+  /// Where the second tap of a double tap landed, in the overlay's own
+  /// coordinates. `onDoubleTap` carries no position, so `onDoubleTapDown`
+  /// records it a fraction of a second earlier.
+  Offset? _lastDoubleTapAt;
 
   /// Whether the banner's own dwell timer is currently up. Distinct from
   /// [ZapBannerState.outlivesTimer]: a plain cursor move (a channel number,
@@ -1065,27 +1173,39 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     _playingSub = widget.controls.stream.playing.listen((_) {
       if (mounted) setState(() {});
       _scheduleHide();
+      _scheduleMiniHide();
     });
     _tracksSub = widget.controls.stream.tracks.listen((_) => _refresh());
     _trackSub = widget.controls.stream.track.listen((_) => _refresh());
     _paramsSub = widget.controls.stream.videoParams.listen((_) => _refresh());
-    _clockTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) {
-        // The native long date is a string for *today*, so a session left
-        // running across midnight has to re-ask; this tick is the only place
-        // that reliably notices. A no-op on every other tick and platform.
-        unawaited(refreshClockFormatIfStale());
-        _refresh();
-      },
-    );
+    _clockTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      // The native long date is a string for *today*, so a session left
+      // running across midnight has to re-ask; this tick is the only place
+      // that reliably notices. A no-op on every other tick and platform.
+      unawaited(refreshClockFormatIfStale());
+      _refresh();
+    });
     _scheduleHide();
+    if (widget.miniPlayer) _scheduleMiniHide();
     if (widget.zap != null) _armZapBanner();
   }
 
   @override
   void didUpdateWidget(EmbeddedPlayerControls oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.miniPlayer != oldWidget.miniPlayer) {
+      _miniHideTimer?.cancel();
+      _miniHideTimer = null;
+      if (widget.miniPlayer) {
+        _miniBarVisible = true;
+        _scheduleMiniHide();
+      }
+    }
+    if (widget.pinnedChrome && !oldWidget.pinnedChrome) {
+      _show(keep: true);
+    } else if (!widget.pinnedChrome && oldWidget.pinnedChrome) {
+      _scheduleHide();
+    }
     final zap = widget.zap;
     // Keyed on `revision`, not identity: `LiveZapController.bannerRevision` is
     // bumped on every cursor move/digit/message (`_notify`), so a held key
@@ -1200,6 +1320,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   void _scheduleHide() {
     _hideTimer?.cancel();
+    // Reconnecting pins the chrome: a hidden bar during a stalled stream leaves
+    // no visible way back or out, which is exactly the state the user must not
+    // be stuck in.
+    if (widget.pinnedChrome) {
+      if (!_visible && mounted) setState(() => _visible = true);
+      return;
+    }
     // `_menuOpen` matters because `_playingSub` calls this on *every* `playing`
     // transition, including the buffering→playing edge a live stream produces
     // routinely — so an open track/subtitle/speed menu would otherwise have
@@ -1284,9 +1411,43 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     _show();
   }
 
+  /// Left half goes back/previous, right half forward/next.
+  ///
+  /// Only the *action* is a preference (Settings → "Double tap on the
+  /// picture"): a film watcher expects a seek, someone zapping expects the next
+  /// channel. `previousNext` is the default because it is the only one with
+  /// something to do on live as well as on titles. **Touch only** — on a pointer
+  /// platform the same double click means "toggle fullscreen", which is what
+  /// Windows users of this overlay have always had.
+  void _handleSurfaceDoubleTap(Offset? local) {
+    final width = context.size?.width ?? MediaQuery.sizeOf(context).width;
+    final forward = (local?.dx ?? 0) >= width / 2;
+    // Live always steps the channel, whatever the setting says: seeking a live
+    // stream is not a thing, and leaving the preference in force there made a
+    // double tap do nothing at all once "Seek" was chosen.
+    final action = widget.isLive
+        ? DoubleTapAction.previousNext
+        : doubleTapAction.value;
+    switch (action) {
+      case DoubleTapAction.seek:
+        if (widget.isLive) return;
+        final step = Duration(seconds: seekStepSeconds.value);
+        final position = widget.controls.state.position;
+        final target = forward ? position + step : position - step;
+        unawaited(
+          widget.controls.seek(target < Duration.zero ? Duration.zero : target),
+        );
+      case DoubleTapAction.previousNext:
+        if (!widget.canStepEntry) return;
+        final callback = forward ? widget.onNextEntry : widget.onPreviousEntry;
+        callback?.call();
+    }
+  }
+
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _miniHideTimer?.cancel();
     _clockTimer?.cancel();
     _zapTimer?.cancel();
     _quickListScroll.dispose();
@@ -1316,6 +1477,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   }
 
   Widget _buildOverlay(BuildContext context) {
+    // Mini-player: the video is the whole window; a single compact bar is the
+    // only chrome. No tap-to-reveal, no auto-hide, no menus.
+    if (widget.miniPlayer) return _miniOverlay();
     return MouseRegion(
       cursor: _visible ? SystemMouseCursors.basic : SystemMouseCursors.none,
       onHover: (_) => _show(),
@@ -1336,10 +1500,17 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               // (tap-outside-to-dismiss), then — on touch only — hides visible
               // chrome, else reveals it. See [_handleSurfaceTap].
               onTap: _handleSurfaceTap,
-              // No double-tap recognizer under touch: there is no fullscreen to
-              // toggle on iOS, and without one in the arena the show/hide tap
-              // resolves immediately instead of after kDoubleTapTimeout.
-              onDoubleTap: widget.touch ? null : widget.onToggleFullscreen,
+              // Touch: the halves act (seek or step) — the position comes from
+              // `onDoubleTapDown`, since `onDoubleTap` carries none. Pointer:
+              // double click stays "toggle fullscreen", which is what Windows
+              // users of this overlay have always had (and asked to keep); the
+              // setting is a touch gesture.
+              onDoubleTapDown: widget.touch
+                  ? (details) => _lastDoubleTapAt = details.localPosition
+                  : null,
+              onDoubleTap: widget.touch
+                  ? () => _handleSurfaceDoubleTap(_lastDoubleTapAt)
+                  : widget.onToggleFullscreen,
             ),
           ),
           // The pointer path keeps its two independently-`Positioned` bars and
@@ -1364,7 +1535,127 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     );
   }
 
-  /// The touch chrome: top bar, a flexible band, bottom bar — top to bottom in
+  /// Picture-in-picture overlay (Windows embedded surface): a background drag
+  /// layer that moves the frameless window through the runner
+  /// (`beginWindowDrag`) and a compact bar that fades out while playing so the
+  /// floating window is just video. Hover or a tap brings it back; while paused
+  /// it stays visible.
+  Widget _miniOverlay() => MouseRegion(
+    onHover: (_) => _revealMiniBar(),
+    child: Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _revealMiniBar,
+            onPanStart: (_) => _beginWindowDrag(),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: IgnorePointer(
+            ignoring: !_miniBarVisible,
+            child: AnimatedOpacity(
+              opacity: _miniBarVisible ? 1 : 0,
+              duration: const Duration(milliseconds: 180),
+              child: Listener(
+                onPointerDown: (_) => _revealMiniBar(),
+                child: _miniBar(),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  void _beginWindowDrag() => unawaited(
+    const MethodChannel(
+      'iptvs/native_hdr_player',
+    ).invokeMethod<void>('beginWindowDrag'),
+  );
+
+  Widget _miniBar() {
+    final playing = widget.controls.state.playing;
+    return GestureDetector(
+      onPanStart: (_) => _beginWindowDrag(),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.transparent, Colors.black.withValues(alpha: 0.72)],
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(6, 10, 6, 6),
+        child: Row(
+          children: [
+            _button(
+              playing ? Icons.pause : Icons.play_arrow,
+              playing ? 'Pause' : 'Play',
+              () => unawaited(widget.onPlayPause()),
+            ),
+            if (widget.canStepEntry) ...[
+              _button(
+                Icons.skip_previous,
+                'Previous',
+                widget.onPreviousEntry!,
+                semanticsLabel: 'Previous',
+              ),
+              _button(
+                Icons.skip_next,
+                'Next',
+                widget.onNextEntry!,
+                semanticsLabel: 'Next',
+              ),
+            ],
+            StreamBuilder<double>(
+              stream: widget.controls.stream.volume,
+              initialData: widget.controls.state.volume,
+              builder: (context, snapshot) {
+                final volume = (snapshot.data ?? 0).clamp(0.0, 100.0);
+                return _button(
+                  volume == 0 ? Icons.volume_off : Icons.volume_up,
+                  'Mute',
+                  () => unawaited(
+                    playbackAudioSession.toggleMute(widget.controls.setVolume),
+                  ),
+                );
+              },
+            ),
+            const Spacer(),
+            if (widget.onToggleMiniPlayer case final restore?)
+              // The **destination**, not the current mode: returning from PiP
+              // lands in fullscreen when that is where PiP was entered from,
+              // and in a normal window otherwise. An expand glyph that promised
+              // fullscreen while delivering a window (and the reverse) is
+              // exactly what was reported.
+              _button(
+                widget.miniReturnFullscreen
+                    ? Icons.fullscreen
+                    : Icons.fullscreen_exit,
+                'Back to player',
+                restore,
+                semanticsLabel: widget.miniReturnFullscreen
+                    ? 'Back to player, fullscreen'
+                    : 'Back to player',
+              ),
+            if (widget.onCloseApp case final close?)
+              _button(
+                Icons.close,
+                'Close',
+                close,
+                semanticsLabel: 'Close application',
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The touch chrome: top bar, a flexible band, bottom bar - top to bottom in
   /// one column.
   ///
   /// The band exists to hold the info panel. Placing the panel at a hard-coded
@@ -1669,7 +1960,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // Drawn only when the route wired both callbacks
                 // ([canStepEntry]) — absent, never disabled, so a surface with
                 // no list to walk shows no affordance it cannot honour.
-                if (widget.canStepEntry) ...[
+                if (widget.canStepEntry &&
+                    playerControlsPrefs.value.shows(
+                      PlayerControl.previousNext,
+                    )) ...[
                   _button(
                     Icons.skip_previous,
                     // The keyboard binding differs by mode (PgUp/PgDown vs
@@ -1687,7 +1981,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                     semanticsLabel: 'Next',
                   ),
                 ],
-                if (!widget.isLive) ...[
+                if (!widget.isLive &&
+                    playerControlsPrefs.value.shows(PlayerControl.seek10)) ...[
                   _button(
                     _seekIcon(forward: false),
                     'Back ${seekStepSeconds.value} seconds',
@@ -1741,7 +2036,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // (see [didUpdateWidget]), and the list's own Back closes it.
                 if (widget.isLive &&
                     widget.zapEnabled &&
-                    widget.onOpenQuickList != null)
+                    widget.onOpenQuickList != null &&
+                    playerControlsPrefs.value.shows(PlayerControl.quickList))
                   _button(
                     Icons.format_list_bulleted,
                     // The desktop overlays bind `G` (Windows' key ring, the
@@ -1784,7 +2080,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // different size again from Android's. Here it is an ordinary
                 // member of this row and takes the row's geometry, so all three
                 // overlays draw one star in one place at one size.
-                if (widget.canFavorite)
+                if (widget.canFavorite &&
+                    playerControlsPrefs.value.shows(PlayerControl.favorite))
                   _button(
                     widget.favorite
                         ? Icons.star_rounded
@@ -1801,7 +2098,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // predicate as Android's `showSubtitleButton`, iOS's
                 // `PlayerChromeState.showSubtitleButton` and the Windows
                 // overlay's `!subtitle_tracks.empty()`.
-                if (_subtitleTracks().isNotEmpty) _subtitleMenu(),
+                if (_subtitleTracks().isNotEmpty &&
+                    playerControlsPrefs.value.shows(PlayerControl.subtitles))
+                  _subtitleMenu(),
                 if (!widget.isLive) _speedMenu(),
                 // The *current* mode as the button's text, matching all four
                 // native overlays (Android `TextControlButton`, iOS
@@ -1809,24 +2108,42 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // `text_button`). Dart owns the mode sequence, so an icon
                 // here made the only surface that knows the answer the only
                 // one not showing it — with four modes the user cycled blind.
-                _textButton(
-                  widget.aspectLabel,
-                  'Cycle aspect ratio',
-                  () => unawaited(widget.onCycleAspect()),
-                  semanticsLabel: 'Aspect ratio, ${widget.aspectLabel}',
-                ),
-                _button(Icons.info_outline, 'Stream information', () {
-                  setState(() => _showInfo = !_showInfo);
-                  _show(keep: _showInfo);
-                }),
+                if (playerControlsPrefs.value.shows(PlayerControl.aspect))
+                  _textButton(
+                    widget.aspectLabel,
+                    'Cycle aspect ratio',
+                    () => unawaited(widget.onCycleAspect()),
+                    semanticsLabel: 'Aspect ratio, ${widget.aspectLabel}',
+                  ),
+                if (playerControlsPrefs.value.shows(PlayerControl.info))
+                  _button(Icons.info_outline, 'Stream information', () {
+                    setState(() => _showInfo = !_showInfo);
+                    _show(keep: _showInfo);
+                  }),
                 // The iOS route is already fullscreen and media_kit's
                 // `toggleFullscreen` would push a second `Video` route above
                 // the one PlayerScreen owns — the native controller has no
                 // fullscreen button either.
+                // Windows picture-in-picture: the window shrinks to the
+                // frameless always-on-top mini-player. Absent on surfaces that
+                // did not wire the callback (every non-Windows platform).
+                // A text chip, matching the native GDI bar: the Material PiP
+                // glyphs are not worth a font-subset dependency for a label
+                // this short.
+                if (widget.onToggleMiniPlayer case final enterMini?
+                    when playerControlsPrefs.value.shows(PlayerControl.pip))
+                  _textButton(
+                    'PiP',
+                    'Picture in picture (P)',
+                    enterMini,
+                    semanticsLabel: 'Picture in picture',
+                  ),
                 if (!widget.touch)
                   _button(
-                    Icons.fullscreen,
-                    'Fullscreen (F)',
+                    widget.fullscreen
+                        ? Icons.fullscreen_exit
+                        : Icons.fullscreen,
+                    widget.fullscreen ? 'Leave fullscreen (F)' : 'Fullscreen (F)',
                     widget.onToggleFullscreen,
                   ),
               ];
@@ -1907,58 +2224,71 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// tracks the value live — the surrounding overlay doesn't listen to volume
   /// (it would rebuild every control on each drag tick), so without this the
   /// slider read a stale `state.volume` and appeared frozen.
-  Widget _volumeControls(
-    BuildContext context, {
-    bool showSlider = true,
-  }) => StreamBuilder<double>(
-    stream: widget.controls.stream.volume,
-    initialData: widget.controls.state.volume,
-    builder: (context, snapshot) {
-      final volume = (snapshot.data ?? 0).clamp(0.0, 100.0);
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _button(
-            volume == 0 ? Icons.volume_off : Icons.volume_up,
-            'Mute',
-            () => unawaited(
-              playbackAudioSession.toggleMute(widget.controls.setVolume),
-            ),
-          ),
-          if (showSlider)
-            SizedBox(
-              width: 150,
-              child: SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackHeight: 4,
-                  activeTrackColor: AppColors.accent,
-                  inactiveTrackColor: AppColors.line,
-                  thumbColor: AppColors.accent,
-                  thumbShape: const RoundSliderThumbShape(
-                    enabledThumbRadius: 7,
-                  ),
-                  overlayShape: const RoundSliderOverlayShape(
-                    overlayRadius: 14,
-                  ),
-                ),
-                // media_kit volume is 0–100; Slider's default max is 1.0 and it
-                // asserts value <= max, so the range must be explicit.
-                child: Slider(
-                  max: 100,
-                  value: volume,
-                  semanticFormatterCallback: (value) => '${value.round()}%',
-                  onChanged: (value) {
-                    _show(keep: true);
-                    unawaited(widget.controls.setVolume(value));
-                  },
-                  onChangeEnd: (_) => _scheduleHide(),
+  Widget _volumeControls(BuildContext context, {bool showSlider = true}) {
+    final prefs = playerControlsPrefs.value;
+    final mute = prefs.shows(PlayerControl.mute);
+    final slider = showSlider && prefs.shows(PlayerControl.volume);
+    // Both off: draw nothing at all rather than an empty Row, which would keep
+    // the transport's spacing for a control that is not there.
+    if (!mute && !slider) return const SizedBox.shrink();
+    return StreamBuilder<double>(
+      stream: widget.controls.stream.volume,
+      initialData: widget.controls.state.volume,
+      builder: (context, snapshot) {
+        final volume = (snapshot.data ?? 0).clamp(0.0, 100.0);
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (mute)
+              _button(
+                volume == 0 ? Icons.volume_off : Icons.volume_up,
+                'Mute',
+                () => unawaited(
+                  playbackAudioSession.toggleMute(widget.controls.setVolume),
                 ),
               ),
-            ),
-        ],
-      );
-    },
-  );
+            if (slider)
+              SizedBox(
+                width: 150,
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 4,
+                    activeTrackColor: AppColors.accent,
+                    inactiveTrackColor: AppColors.line,
+                    thumbColor: AppColors.accent,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 7,
+                    ),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 14,
+                    ),
+                  ),
+                  // media_kit volume is 0–100; Slider's default max is 1.0 and it
+                  // asserts value <= max, so the range must be explicit.
+                  child: Slider(
+                    max: 100,
+                    value: volume,
+                    semanticFormatterCallback: (value) => '${value.round()}%',
+                    onChanged: (value) {
+                      _show(keep: true);
+                      // Through the session, so the level is remembered across
+                      // restarts (a direct engine write was invisible to it).
+                      unawaited(
+                        playbackAudioSession.setLevel(
+                          widget.controls.setVolume,
+                          value,
+                        ),
+                      );
+                    },
+                    onChangeEnd: (_) => _scheduleHide(),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 
   /// The transport glyph for the current seek step.
   ///
@@ -2247,11 +2577,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // countdown is off — the mode must stay answerable while
                 // nothing else is on screen.
                 if (random) ...[
-                  const Icon(
-                    Icons.shuffle,
-                    size: 14,
-                    color: AppColors.accent,
-                  ),
+                  const Icon(Icons.shuffle, size: 14, color: AppColors.accent),
                   if (hasCountdown) const SizedBox(width: 6),
                 ],
                 if (hasCountdown) ...[
@@ -2312,6 +2638,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
             borderRadius: BorderRadius.circular(8),
             child: CachedNetworkImage(
               imageUrl: logo,
+              // Shared cache + direct-then-proxy fetcher: see
+              // [artworkCacheManager].
+              cacheManager: artworkCacheManager,
               width: 28,
               height: 28,
               // Contain, matching the live list's `_Logo` and the EPG grid's
@@ -2444,7 +2773,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     if (offsetIndex < 0) return;
     final extent = _quickListRowExtent;
     final position = _quickListScroll.position;
-    final target = (offsetIndex * extent) - (position.viewportDimension - extent) / 2;
+    final target =
+        (offsetIndex * extent) - (position.viewportDimension - extent) / 2;
     final max = position.maxScrollExtent;
     _quickListScroll.jumpTo(target < 0 ? 0 : (target > max ? max : target));
   }
@@ -2480,56 +2810,56 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           behavior: HitTestBehavior.opaque,
           onTap: () => widget.onQuickListCommand?.call('zap:close'),
           child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: AppColors.panel.withValues(alpha: 0.96),
-            borderRadius: BorderRadius.circular(AppRadius.tile),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              IgnorePointer(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-                child: Row(
-                  children: [
-                    Icon(
-                      switch (state.mode) {
-                        ZapQuickListMode.categories => Icons.folder_rounded,
-                        ZapQuickListMode.channels => Icons.live_tv_rounded,
-                        ZapQuickListMode.schedule => Icons.schedule_rounded,
-                      },
-                      size: 18,
-                      color: AppColors.accent,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        state.heading,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.textHi,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
+            decoration: BoxDecoration(
+              color: AppColors.panel.withValues(alpha: 0.96),
+              borderRadius: BorderRadius.circular(AppRadius.tile),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                IgnorePointer(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                    child: Row(
+                      children: [
+                        Icon(
+                          switch (state.mode) {
+                            ZapQuickListMode.categories => Icons.folder_rounded,
+                            ZapQuickListMode.channels => Icons.live_tv_rounded,
+                            ZapQuickListMode.schedule => Icons.schedule_rounded,
+                          },
+                          size: 18,
+                          color: AppColors.accent,
                         ),
-                      ),
-                    ),
-                    if (state.total > 0)
-                      Text(
-                        '${state.selectedIndex + 1}/${state.total}',
-                        maxLines: 1,
-                        style: const TextStyle(
-                          color: AppColors.textLo,
-                          fontSize: 12,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            state.heading,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textHi,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
                         ),
-                      ),
-                  ],
+                        if (state.total > 0)
+                          Text(
+                            '${state.selectedIndex + 1}/${state.total}',
+                            maxLines: 1,
+                            style: const TextStyle(
+                              color: AppColors.textLo,
+                              fontSize: 12,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-                ),
-              ),
-              Expanded(child: _quickListBody(state)),
-            ],
-          ),
+                Expanded(child: _quickListBody(state)),
+              ],
+            ),
           ),
         ),
       ),
@@ -2638,9 +2968,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: row.selected
-                              ? Colors.white
-                              : AppColors.textHi,
+                          color: row.selected ? Colors.white : AppColors.textHi,
                           fontSize: 14,
                           fontWeight: row.selected
                               ? FontWeight.w700

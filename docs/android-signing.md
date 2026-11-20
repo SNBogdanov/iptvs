@@ -124,6 +124,40 @@ between Play and GitHub-direct installations.
   configured expected SHA-256 fingerprint before uploading it.
 - Private keystores, passwords, and `key.properties` files are never committed.
 
+### Local parallel build (installation next to the official app)
+
+`android/keystore.properties` + the keystore it names are **local, gitignored**
+files (the same shape Tremotesf uses). When the four CI variables above are
+absent, Gradle uses that local key for a release build instead of failing, so a
+build can be installed alongside the official app; it is a test key and must
+never sign a published artifact. CI has no such file and keeps the env-only
+rule. The `parallel` flavor adds `.parallel` to the application id:
+
+```bash
+flutter build apk --release --flavor parallel
+# -> build/app/outputs/flutter-apk/app-parallel-release.apk
+```
+
+The resulting package is `com.gchofficial.iptvs.player.parallel`, independent of
+the Play/direct identities, so installing it never overwrites them.
+
+#### Local Android toolchain on this machine
+
+`flutter doctor` does not find the SDK by itself here; the working environment
+(the one the parallel build was verified with) is:
+
+```powershell
+$env:ANDROID_HOME      = 'C:\Users\SERGEYBO\Documents\Projects\_tools\android-sdk'
+$env:ANDROID_USER_HOME = 'C:\Users\SERGEYBO\Documents\Projects\_tools\android-user-home'
+$env:JAVA_HOME         = 'C:\Users\SERGEYBO\Documents\Projects\_tools\jdk21\jdk-21.0.13+9'
+```
+
+`ANDROID_USER_HOME` matters because this shell runs as `LOCAL SERVICE`: without
+it, sdkmanager tries `C:\Users\SERGEYBO\.config\.android` (not writable) and
+fails with a misleading "failed to download source lists". JDK 21 is used
+because newer JDKs trip Gradle's "newer than known valid Java version". AGP
+then installs NDK r28c and platforms 35/36 on demand.
+
 Required Gradle environment variables:
 
 ```text

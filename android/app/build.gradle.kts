@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // Kotlin support is now supplied by Flutter's built-in Kotlin (AGP 9+); the
@@ -21,13 +23,33 @@ val releaseTaskRequested = gradle.startParameter.taskNames.any {
 val missingReleaseSigningValues = releaseSigningEnvironment
     .filterValues { it.isNullOrBlank() }
     .keys
-if (releaseTaskRequested && missingReleaseSigningValues.isNotEmpty()) {
+val releaseSigningConfigured = missingReleaseSigningValues.isEmpty()
+
+/**
+ * Optional local key for parallel/test installs, in the shape Tremotesf uses
+ * (`android/keystore.properties` + a gitignored keystore). It is only consulted
+ * when the CI environment variables are absent; CI keeps the env-only rule, and
+ * a key from this file must never be used for a published build.
+ */
+val localKeystoreProperties = rootProject.file("keystore.properties")
+    .takeIf { it.isFile }
+    ?.let { file ->
+        Properties().apply {
+            file.inputStream().use { load(it) }
+        }
+    }
+    ?.takeIf { properties ->
+        listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+            .all { !properties.getProperty(it).isNullOrBlank() }
+    }
+val localSigningConfigured = localKeystoreProperties != null
+
+if (releaseTaskRequested && !releaseSigningConfigured && !localSigningConfigured) {
     throw GradleException(
         "Release signing is not configured. Missing environment variables: " +
             missingReleaseSigningValues.sorted().joinToString(", "),
     )
 }
-val releaseSigningConfigured = missingReleaseSigningValues.isEmpty()
 
 android {
     namespace = "com.gchofficial.iptvs"
@@ -75,6 +97,12 @@ android {
         create("googlePlay") {
             dimension = "distribution"
         }
+        // Installs alongside the official app (own application id and, locally,
+        // the test key): `flutter build apk --release --flavor parallel`.
+        create("parallel") {
+            dimension = "distribution"
+            applicationIdSuffix = ".parallel"
+        }
     }
 
     signingConfigs {
@@ -92,6 +120,14 @@ android {
                 storePassword = releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEYSTORE_PASSWORD")
                 keyAlias = releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEY_ALIAS")
                 keyPassword = releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEY_PASSWORD")
+            }
+        } else if (localSigningConfigured) {
+            create("release") {
+                val local = localKeystoreProperties!!
+                storeFile = rootProject.file(local.getProperty("storeFile"))
+                storePassword = local.getProperty("storePassword")
+                keyAlias = local.getProperty("keyAlias")
+                keyPassword = local.getProperty("keyPassword")
             }
         }
     }

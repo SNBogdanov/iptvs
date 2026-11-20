@@ -1269,6 +1269,10 @@ void main() {
         await tester.tap(find.text('Two'), warnIfMissed: false);
         await tester.pump();
         expect(sent, isEmpty);
+        // The surface now owns a double-tap recognizer (the two halves act on
+        // it in touch mode), and its 300 ms window is a timer the test binding
+        // refuses to leave pending. Let it expire.
+        await tester.pump(const Duration(milliseconds: 400));
       });
     });
   });

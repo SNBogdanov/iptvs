@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
@@ -30,6 +31,7 @@ import '../player/aspect_mode.dart' show aspectModeIndexOf;
 import '../player/buffer_preset.dart';
 import '../player/channel_dwell.dart';
 import '../player/live_zap_controller.dart';
+import '../player/zap_quick_list.dart';
 import '../player/player_screen.dart';
 import '../player/vod_step_session.dart';
 import '../player/tray.dart'
@@ -927,6 +929,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           onEnrichError: _showSnack,
         ),
     };
+    for (final controller in _mediaControllers.values) {
+      controller.scrollController.addListener(
+        () => _maybeAutoLoadMedia(controller.kind),
+      );
+    }
     _globalFavorites = GlobalFavoritesController(
       db: widget.repo.db,
       store: widget.store,
@@ -1259,6 +1266,36 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       unawaited(controller.load(forceRefresh: forceRefresh));
     }
     unawaited(_loadFavorites(kind));
+  }
+
+  /// Android/pointer infinite scroll: when the last visible card is close, the
+  /// next window is revealed (and the next provider page fetched, when the tab
+  /// is provider-paged) without waiting for the "Next page" button. The button
+  /// stays as a keyboard/D-pad fallback, but a finger never has to find it.
+  void _maybeAutoLoadMedia(ContentKind kind) {
+    if (!mounted) return;
+    if (!_mediaAutoLoadScheduled.add(kind)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _mediaAutoLoadScheduled.remove(kind);
+      if (mounted) _runAutoLoadMedia(kind);
+    });
+  }
+
+  void _runAutoLoadMedia(ContentKind kind) {
+    final controller = _media(kind);
+    final snap = controller.snapshot;
+    if (snap == null || controller.loading || controller.loadingMore) return;
+    final scroll = controller.scrollController;
+    if (!scroll.hasClients || scroll.position.extentAfter > 400) return;
+    final visibleCount = _visibleMedia(kind).length;
+    if (controller.shownCountFloor >= visibleCount && !snap.hasMore) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - (_mediaAutoLoadAt[kind] ?? 0) < 500) return;
+    _mediaAutoLoadAt[kind] = now;
+    setState(() {
+      _mediaDisplayPages[kind] = (_mediaDisplayPages[kind] ?? 1) + 1;
+    });
+    if (snap.hasMore) unawaited(controller.loadMore());
   }
 
   /// One "Load more" press: the next screenful.
@@ -1831,6 +1868,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// sort change, so a new arrangement starts at the top.
   final Map<ContentKind, int> _mediaDisplayPages = {};
 
+  /// Last automatic scroll-page request per tab. A scroll listener fires many
+  /// times per gesture; without a small cooldown one flick would reveal several
+  /// windows at once.
+  final Map<ContentKind, int> _mediaAutoLoadAt = {};
+
+  /// A load scheduled for the end of this frame. Scroll listeners fire during
+  /// layout; calling `setState` there threw "setState during build" and showed
+  /// Flutter's red error box while switching from Live to Movies.
+  final Set<ContentKind> _mediaAutoLoadScheduled = {};
+
   /// Focus nodes for each VOD tab's "Next page" control — see
   /// [MediaTabView.loadMoreFocusNode]. Owned by the screen because the control
   /// moves to a new index on every press, so a node created inside the view
@@ -2191,6 +2238,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }) async {
     final range = _zapRangeFor(channel, explicit: explicit);
     final random = await const AppSettingsStore().randomZapping();
+    // A handset scrolls the in-player channel list with a finger, so it gets
+    // the whole range; a TV/desktop surface walks the cursor and keeps the
+    // 40-row window (`LiveZapController.windowRows`). The cap only guards
+    // against a pathological category — a real touch scroll never needs more
+    // than a few thousand rows in one payload.
+    final touchList = (Platform.isAndroid && !isTelevision) || Platform.isIOS;
+    final windowRows = touchList
+        ? math.min(range.entries.length, 4000)
+        : kZapWindowRows;
     return LiveZapController(
         entries: range.entries,
         initialIndex: range.index,
@@ -2200,6 +2256,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         catalog: _ChannelListZapCatalog(this),
         random: random,
       )
+      ..windowRows = windowRows
       ..onChannelChanged = (entry) {
         // Keeps the toolbar's "last channel" target and the post-playback
         // selection restore pointed at the channel the session is really on.
@@ -3059,6 +3116,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         'library',
         'open ${item.kind.name} source=${widget.repo.source.name} title=${item.title} id=${item.id}',
       );
+      // "Play movies immediately": skip the details sheet and hand the
+      // catalogue row straight to playback. `_playMedia` resolves the stream
+      // itself and still honours the saved resume position; the details fetch
+      // is only there to enrich the sheet.
+      if (item.kind == ContentKind.movie &&
+          await const AppSettingsStore().movieQuickPlay()) {
+        await _playMedia(item, siblings: _movieSiblings(item));
+        return;
+      }
       final detailed = await widget.repo.mediaDetails(item);
       if (!mounted) return;
       _replaceMediaItem(_sameSortPosition(detailed, item));
@@ -3356,7 +3422,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (category != null) b.write(' in ${category.title}');
     }
     if (_media(kind).hideWatched) b.write(' · watched hidden');
-    if (snap != null && snap.totalPages > 1) {
+    // Pages are only worth naming where the user has to *ask* for the next one
+    // (the "Next page" card on TV/desktop). On a touch surface the list is
+    // infinite-scroll — the next window loads itself — so a "pages 1/34" readout
+    // is noise about machinery the user never touches.
+    final infiniteScroll =
+        (Platform.isAndroid && !isTelevision) || Platform.isIOS;
+    if (!infiniteScroll && snap != null && snap.totalPages > 1) {
       b.write(' · pages ${snap.loadedPages}/${snap.totalPages}');
     }
     if (snap?.syncedAt != null) {
@@ -4029,6 +4101,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onOpenMedia: _openMedia,
             onLoadMore: () => _mediaLoadMore(_tab),
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
+            // Phones/tablets auto-load on scroll; the button only flashed
+            // under the finger. TV keeps it as the D-pad fallback.
+            autoLoadMore: (Platform.isAndroid && !isTelevision) || Platform.isIOS,
             resumeProgress: _media(_tab).resumeProgress,
             continueWatching: _media(_tab).continueWatching,
             onResume: (item) =>

@@ -18,8 +18,25 @@
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
+#include <dwmapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <windowsx.h>
+
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "ole32.lib")
+
+// Windows 11 per-window border colour (SDK 10.0.22000+). Defined locally so an
+// older SDK still compiles; the call simply no-ops on older Windows.
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_COLOR_NONE
+#define DWMWA_COLOR_NONE 0xFFFFFFFE
+#endif
+#ifndef DWMWA_COLOR_DEFAULT
+#define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
+#endif
 
 #include "flutter/generated_plugin_registrant.h"
 #include "player_back_policy.h"
@@ -74,6 +91,9 @@ bool ApplyFramePlacement(HWND hwnd, const RECT& wanted, bool maximized);
 constexpr UINT kNativeVideoSurfaceInputMessage = WM_APP + 0x4D;
 constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
+// Asks the root window to begin a captured mini-player drag (posted by the
+// native video surface; the embedded surface calls `beginWindowDrag`).
+constexpr UINT kMiniDragStartMessage = WM_APP + 0x50;
 constexpr UINT_PTR kNativeControlsHideTimer = 0x5031;
 constexpr UINT_PTR kNativeVideoResyncTimer = 0x5032;
 constexpr UINT_PTR kNativeZapBannerTimer = 0x5033;
@@ -113,6 +133,9 @@ constexpr int kNativeBottomControlsHeightVod = 116;
 // Live with an EPG snapshot gets a taller bar: a programme row (title + progress
 // + next) sits where the VOD scrubber would be.
 constexpr int kNativeBottomControlsHeightLiveEpg = 150;
+// Picture-in-picture / mini-player chrome: one compact transport row, no top
+// bar and no scrubber (see ComputeBottomLayout's mini branch).
+constexpr int kNativeBottomControlsHeightMini = 64;
 // The live EPG strip's own height, from its top edge to the bottom of the
 // "Next ·" line. The one number both the bottom bar and the zap banner lay
 // their copy of the strip out against (DrawLiveEpgStrip).
@@ -201,6 +224,11 @@ int NativeScale(int px) { return MulDiv(px, NativeControlsDpi(), 96); }
 // Mini-player mode (see SetNativeWindowMiniPlayer): dragging the video moves
 // the whole window.
 bool g_native_window_mini = false;
+// Where the mini-player returns to: true when it was entered from fullscreen.
+// The restore button draws the *destination* (expand for fullscreen, collapse
+// for a normal window), because a glyph that promises a mode the press does not
+// deliver is exactly the confusion this pairing exists to avoid.
+bool g_native_mini_return_fullscreen = false;
 POINT g_last_video_mouse{-1, -1};
 POINT g_last_controls_mouse{-1, -1};
 int g_native_menu_scroll_offset = 0;
@@ -253,6 +281,13 @@ enum class NativeFocusItem {
   kAspect,
   kInfo,
   kFullscreen,
+  // Switches the top-level window into the always-on-top mini-player. Drawn in
+  // the ordinary chrome only; the mini bar swaps it for kRestore/kClose.
+  kMiniPlayer,
+  // Mini-player chrome only: restore the previous windowed/fullscreen mode, and
+  // close the app through the same close-to-tray policy as the X button.
+  kRestore,
+  kClose,
   kGoLive,
   // The quick-list opener: the pointer/keyboard way into a panel that
   // otherwise only a remote's Left or `G` could reach.
@@ -1358,6 +1393,54 @@ void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
   DeleteObject(icon_font);
 }
 
+// "Leave fullscreen" / "return to a normal window", drawn as four corner
+// brackets pointing **inward**.
+//
+// Segoe MDL2 has no such glyph: its pair is `E740` FullScreen (four brackets
+// outward) and `E73F` BackToWindow (two arrows pointing at each other). The two
+// surfaces then disagreed — the shared Flutter overlay draws Material's
+// `fullscreen_exit`, which is four brackets inward — so the same state looked
+// like two different actions depending on which chrome was up. Drawn rather than
+// set in a font, in the same button box and colours `DrawIconButton` uses.
+void DrawFullscreenExitButton(HDC hdc, const RECT &rect, bool active = false,
+                              int radius = kNativeButtonRadius) {
+  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+  const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
+  FillRoundRectAA(hdc, rect, NativeScale(radius), bg);
+
+  const int cx = (rect.left + rect.right) / 2;
+  const int cy = (rect.top + rect.bottom) / 2;
+  const int s = NativeScale(8);   // half the icon's box
+  const int a = NativeScale(5);   // arm length
+  const int t = std::max(2, NativeScale(2)); // stroke
+  HPEN pen = CreatePen(PS_SOLID, t, fg);
+  if (pen == nullptr) return;
+  HGDIOBJ old_pen = SelectObject(hdc, pen);
+  // Vertex nearest the centre, arms running out toward the edges: the corner
+  // "points in", which is what distinguishes it from the enter glyph.
+  const POINT top_left[3] = {{cx - s + a, cy - s + a},
+                             {cx - s, cy - s + a},
+                             {cx - s, cy - s}};
+  const POINT top_right[3] = {{cx + s - a, cy - s + a},
+                              {cx + s, cy - s + a},
+                              {cx + s, cy - s}};
+  const POINT bottom_left[3] = {{cx - s + a, cy + s - a},
+                                {cx - s, cy + s - a},
+                                {cx - s, cy + s}};
+  const POINT bottom_right[3] = {{cx + s - a, cy + s - a},
+                                 {cx + s, cy + s - a},
+                                 {cx + s, cy + s}};
+  for (const auto *corner : {top_left, top_right, bottom_left, bottom_right}) {
+    // The middle point is the vertex; both arms leave it.
+    MoveToEx(hdc, corner[0].x, corner[0].y, nullptr);
+    LineTo(hdc, corner[1].x, corner[1].y);
+    MoveToEx(hdc, corner[1].x, corner[1].y, nullptr);
+    LineTo(hdc, corner[2].x, corner[2].y);
+  }
+  SelectObject(hdc, old_pen);
+  DeleteObject(pen);
+}
+
 // Width of a text chip sized to its own label, the way every other overlay
 // does it.
 //
@@ -1435,6 +1518,11 @@ bool ShowsDescription() {
 }
 
 int TopControlsHeight() {
+  // The mini-player has no title bar: the picture is the chrome, and the top
+  // band would eat a third of a ~360 px tall window.
+  if (g_native_window_mini) {
+    return 0;
+  }
   int height = kNativeTopControlsHeight;
   if (ShowsDescription()) {
     height += kNativeDescriptionBlockHeight;
@@ -1454,6 +1542,10 @@ bool HasLiveEpg() {
 }
 
 int BottomControlsHeight() {
+  // One compact transport row; no scrubber/EPG/identity in the mini-player.
+  if (g_native_window_mini) {
+    return NativeScale(kNativeBottomControlsHeightMini);
+  }
   if (g_native_control_state.is_live) {
     int height = HasLiveEpg() ? kNativeBottomControlsHeightLiveEpg
                               : kNativeBottomControlsHeightLive;
@@ -1521,6 +1613,13 @@ struct BottomLayout {
   RECT aspect;
   RECT info;
   RECT fullscreen;
+  // Picture-in-picture entry, left of the fullscreen button in the ordinary bar.
+  RECT mini;
+  // Mini-player bar (see the branch at the top of ComputeBottomLayout): no top
+  // bar, one row, and its own restore/close affordances.
+  bool is_mini = false;
+  RECT restore;
+  RECT close;
   bool has_go_live = false;
   RECT go_live; // live-only "jump to live edge" button
   bool has_favorite = false;
@@ -1536,13 +1635,41 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   l.bottom = BottomControlsRect(rect);
   const int by = l.bottom.top;
   const int right = MaxInt(0, static_cast<int>(rect.right));
+  const int kBtn = NativeScale(kNativeButtonWidth);
+  const int kBtnHeight = NativeScale(kNativeButtonHeight);
+  if (g_native_window_mini) {
+    // Compact row: transport on the left, window affordances on the right. The
+    // whole client area outside this bar drags the window (video surface
+    // WndProc), so the bar must not cover more than the controls need.
+    l.is_mini = true;
+    const int cy = by + BottomControlsHeight() / 2;
+    l.control_center_y = cy;
+    const int top = cy - kBtnHeight / 2;
+    const int bot = top + kBtnHeight;
+    int x = NativeScale(16);
+    l.play = RectFrom(x, top, x + kBtn, bot);
+    x += kBtn + NativeScale(8);
+    // Same gate as the full bar: a route with no step target draws no pair.
+    l.has_step = g_native_control_state.step_enabled;
+    if (l.has_step) {
+      l.step_previous = RectFrom(x, top, x + kBtn, bot);
+      x += kBtn + NativeScale(8);
+      l.step_next = RectFrom(x, top, x + kBtn, bot);
+      x += kBtn + NativeScale(8);
+    }
+    l.mute = RectFrom(x, top, x + kBtn, bot);
+    int rx = right - NativeScale(16);
+    l.close = RectFrom(rx - kBtn, top, rx, bot);
+    rx -= kBtn + NativeScale(8);
+    l.restore = RectFrom(rx - kBtn, top, rx, bot);
+    return l;
+  }
   const bool live = g_native_control_state.is_live;
   // Control row sits a fixed 40px above the bottom edge in every layout
   // (VOD = scrubber above; live-EPG = programme row above; bare live = single row).
   const int cy = by + (BottomControlsHeight() - NativeScale(40));
   l.control_center_y = cy;
-  const int kBtn = NativeScale(kNativeButtonWidth);
-  const int top = cy - NativeScale(kNativeButtonHeight) / 2;
+  const int top = cy - kBtnHeight / 2;
   const int bot = top + NativeScale(kNativeButtonHeight);
 
   int x = NativeScale(16);
@@ -1577,6 +1704,7 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
     rx -= w + NativeScale(8);
   };
   place(l.fullscreen, kBtn);
+  place(l.mini, kBtn);
   place(l.info, kBtn);
   // Sized to the label it is about to draw. `DrawTextButton` renders with
   // `DT_SINGLELINE` and no `DT_NOCLIP`, so a chip narrower than its text clips
@@ -1713,6 +1841,19 @@ int FocusRowOf(NativeFocusItem item) {
 
 std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   std::vector<NativeFocusItem> out;
+  // The mini bar has no Back/top bar and no settings cluster; its ring is just
+  // the row it draws, in visual order.
+  if (l.is_mini) {
+    out.push_back(NativeFocusItem::kPlay);
+    if (l.has_step) {
+      out.push_back(NativeFocusItem::kStepPrevious);
+      out.push_back(NativeFocusItem::kStepNext);
+    }
+    out.push_back(NativeFocusItem::kMute);
+    out.push_back(NativeFocusItem::kRestore);
+    out.push_back(NativeFocusItem::kClose);
+    return out;
+  }
   out.push_back(NativeFocusItem::kBack);
   if (l.has_scrubber) out.push_back(NativeFocusItem::kScrubber);
   out.push_back(NativeFocusItem::kPlay);
@@ -1736,6 +1877,7 @@ std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   if (l.has_subtitles) out.push_back(NativeFocusItem::kSubtitles);
   out.push_back(NativeFocusItem::kAspect);
   out.push_back(NativeFocusItem::kInfo);
+  out.push_back(NativeFocusItem::kMiniPlayer);
   out.push_back(NativeFocusItem::kFullscreen);
   return out;
 }
@@ -1780,6 +1922,17 @@ std::string CommandForFocusedItem(NativeFocusItem item) {
     return "info";
   case NativeFocusItem::kFullscreen:
     return "fullscreen";
+  case NativeFocusItem::kMiniPlayer:
+    return "miniPlayer";
+  // Restoring is the same toggle in the other direction; both land in Dart's
+  // `miniPlayer` command so `_isNativeMiniPlayer` stays the one owner of the
+  // state.
+  case NativeFocusItem::kRestore:
+    return "miniPlayer";
+  // Handled natively before it reaches the command channel: a post to WM_CLOSE
+  // runs the same close-to-tray policy as the window's X button.
+  case NativeFocusItem::kClose:
+    return "closeWindow";
   case NativeFocusItem::kQuickList:
     return QuickListToggleCommand();
   case NativeFocusItem::kGoLive:
@@ -2995,6 +3148,9 @@ void PaintQuickList(HDC hdc, uint32_t *pixels, int width, int height,
 // Flutter texture), so without this the two preferences had no effect on a movie
 // at all — the Flutter HUD is only built for the embedded surface.
 bool NativeHudShown() {
+  // The mini-player keeps its own chrome pinned; the persistent clock/time/name
+  // HUD would only cover the small picture.
+  if (g_native_window_mini) return false;
   if (g_native_controls_chrome_visible) return false;
   return g_native_control_state.show_clock ||
          (!g_native_control_state.is_live &&
@@ -3349,6 +3505,8 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
            focusables[g_native_focus_index] == item;
   };
 
+  // Mini-player: no top bar, no badges, no title - the picture is the chrome.
+  if (!l.is_mini) {
   // Anchor the title row to the ordinary 64 px band even when the bar has grown
   // for a description, so the back button, badges and title never move.
   const int top_cy = NativeScale(kNativeTopControlsHeight) / 2;
@@ -3431,7 +3589,9 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
         desc_font, RGB(200, 205, 216), kNativeDescriptionMaxLines);
     DeleteObject(desc_font);
   }
+  }  // !l.is_mini (top bar)
 
+  if (!l.is_mini) {
   DrawIconButton(
       paint_hdc, l.play,
       g_native_control_state.playing ? L"\xE769" : L"\xE768",
@@ -3546,9 +3706,21 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, l.info, L"\xE946",
                  is_focused(NativeFocusItem::kInfo) ||
                      g_native_control_state.info_open);
-  DrawIconButton(paint_hdc, l.fullscreen,
-                 g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740",
-                 is_focused(NativeFocusItem::kFullscreen));
+  // `E740` (four brackets outward) = "enter fullscreen"; the inward-bracket
+  // glyph is drawn, because MDL2's `E73F` is two arrows and the Flutter overlay
+  // shows four brackets — one state, one picture, on both surfaces.
+  if (g_native_control_state.fullscreen) {
+    DrawFullscreenExitButton(paint_hdc, l.fullscreen,
+                             is_focused(NativeFocusItem::kFullscreen));
+  } else {
+    DrawIconButton(paint_hdc, l.fullscreen, L"\xE740",
+                   is_focused(NativeFocusItem::kFullscreen));
+  }
+  // A text chip rather than an MDL2 glyph: the "Picture" codepoint is not in
+  // every installed Segoe MDL2 build (it renders as a placeholder box), and
+  // the label is clearer anyway. This is the `M`/`P` pointer counterpart.
+  DrawTextButton(paint_hdc, l.mini, L"PiP",
+                 is_focused(NativeFocusItem::kMiniPlayer));
   if (l.has_favorite) {
     // Dart owns the store: a click sends "favorite" back and Dart pushes the
     // new state via setControlState. The accent tints the **glyph**, not the
@@ -3576,6 +3748,37 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     DrawIconButton(paint_hdc, l.quick_list, L"\xE8FD",
                    is_focused(NativeFocusItem::kQuickList) ||
                        QuickListShown());
+  }
+  }  // !l.is_mini (full chrome)
+  else {
+    // Compact picture-in-picture bar: transport, mute, then restore and close.
+    DrawIconButton(
+        paint_hdc, l.play,
+        g_native_control_state.playing ? L"\xE769" : L"\xE768",
+        is_focused(NativeFocusItem::kPlay));
+    if (l.has_step) {
+      DrawIconButton(paint_hdc, l.step_previous, L"\xE892",
+                     is_focused(NativeFocusItem::kStepPrevious));
+      DrawIconButton(paint_hdc, l.step_next, L"\xE893",
+                     is_focused(NativeFocusItem::kStepNext));
+    }
+    DrawIconButton(paint_hdc, l.mute,
+                   g_native_control_state.volume <= 0 ? L"\xE74F" : L"\xE767",
+                   is_focused(NativeFocusItem::kMute));
+    // By **destination**: outward brackets when this PiP returns to fullscreen,
+    // inward brackets when it returns to a normal window. Same two pictures the
+    // full bar uses, so the pair never changes meaning between modes.
+    if (g_native_mini_return_fullscreen) {
+      DrawIconButton(paint_hdc, l.restore, L"\xE740",
+                     is_focused(NativeFocusItem::kRestore));
+    } else {
+      DrawFullscreenExitButton(paint_hdc, l.restore,
+                               is_focused(NativeFocusItem::kRestore));
+    }
+    // "Cancel" (X): every MDL2 build carries it, unlike ChromeClose. Posts
+    // WM_CLOSE, so the close-to-tray preference still owns what "close" means.
+    DrawIconButton(paint_hdc, l.close, L"\xE711",
+                   is_focused(NativeFocusItem::kClose));
   }
 
   PaintListMenu(paint_hdc, rect);
@@ -3702,6 +3905,27 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   if (!PointInRect(x, y, l.bottom)) {
     return "show";
   }
+  if (l.is_mini) {
+    if (PointInRect(x, y, l.play)) {
+      return "playPause";
+    }
+    if (l.has_step && PointInRect(x, y, l.step_previous)) {
+      return "zap:down";
+    }
+    if (l.has_step && PointInRect(x, y, l.step_next)) {
+      return "zap:up";
+    }
+    if (PointInRect(x, y, l.mute)) {
+      return "muteToggle";
+    }
+    if (PointInRect(x, y, l.restore)) {
+      return "miniPlayer";
+    }
+    if (PointInRect(x, y, l.close)) {
+      return "closeWindow";
+    }
+    return "show";
+  }
   if (PointInRect(x, y, l.play)) {
     return "playPause";
   }
@@ -3750,6 +3974,9 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   }
   if (PointInRect(x, y, l.fullscreen)) {
     return "fullscreen";
+  }
+  if (PointInRect(x, y, l.mini)) {
+    return "miniPlayer";
   }
   if (l.has_go_live && PointInRect(x, y, l.go_live)) {
     return "goLive";
@@ -3873,6 +4100,21 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
   case WM_PAINT: {
     const int control_kind =
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+    // The window's *current* mode, read at paint time. Every push and every
+    // transition tries to keep the cached flag right, but the bar is what the
+    // user sees: a stale `fullscreen` here drew the inward "leave" arrows on a
+    // windowed player (reported on VOD right after a Live/PiP session). The
+    // style of the **owner** window is the only authority — the overlay itself
+    // is a layered popup, so `GetAncestor(..., GA_ROOT)` would always read
+    // "fullscreen" — and it costs one call per paint.
+    HWND owner = NativeControlsOwner(hwnd);
+    if (g_native_window_mini) {
+      g_native_control_state.fullscreen = false;
+    } else if (owner) {
+      const LONG_PTR style = GetWindowLongPtr(owner, GWL_STYLE);
+      g_native_control_state.fullscreen =
+          (style & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW;
+    }
     PaintNativeControlBar(hwnd, control_kind);
     return 0;
   }
@@ -4161,14 +4403,14 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
     if (HWND parent = GetParent(hwnd)) {
       PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
     }
-    // Mini-player: dragging anywhere on the video moves the window (the
-    // classic manual-caption-drag trick; the frameless window has no title
-    // bar to grab). Controls live on a separate layered window and keep
-    // their own clicks.
+    // Mini-player: dragging anywhere on the video moves the window. Deliberately
+    // not a system HTCAPTION move loop: Windows' own edge snap rewrote the size
+    // of the frameless window the moment it reached a screen edge. The root
+    // window runs a small captured drag of its own (StartMiniPlayerDrag), which
+    // also means the work-area snap is ours alone.
     if (g_native_window_mini) {
       if (HWND root = GetAncestor(hwnd, GA_ROOT)) {
-        ReleaseCapture();
-        SendMessage(root, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        PostMessage(root, kMiniDragStartMessage, 0, 0);
         return 0;
       }
     }
@@ -4415,6 +4657,34 @@ void FlutterWindow::RestoreFromTray() {
   }
 }
 
+namespace {
+
+// Adds/removes this window's taskbar button. WS_EX_TOOLWINDOW alone keeps the
+// button from coming back, but an existing button survives the style change
+// until the shell is told — ITaskbarList is the direct, flicker-free way (a
+// hide/show cycle would trip the tray-hidden playback pause).
+void SetTaskbarTab(HWND hwnd, bool show) {
+  if (!hwnd) {
+    return;
+  }
+  ITaskbarList *taskbar = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&taskbar))) ||
+      taskbar == nullptr) {
+    return;
+  }
+  if (SUCCEEDED(taskbar->HrInit())) {
+    if (show) {
+      taskbar->AddTab(hwnd);
+    } else {
+      taskbar->DeleteTab(hwnd);
+    }
+  }
+  taskbar->Release();
+}
+
+}  // namespace
+
 void FlutterWindow::SetAlwaysOnTop(bool on) {
   HWND hwnd = GetHandle();
   if (!hwnd) {
@@ -4438,7 +4708,13 @@ flutter::EncodableMap FlutterWindow::CurrentWindowPlacement() {
   // run and ratchet it smaller. Physical pixels, matching SetWindowPos below.
   RECT frame;
   bool maximized;
-  if (has_tray_hidden_placement_ && !IsWindowVisible(hwnd)) {
+  if (native_window_mini_ && mini_restore_frame_valid_) {
+    // Quitting from PiP must record the **main** window, not the compact one:
+    // otherwise the next boot opens at the PiP position/size. The restore frame
+    // captured on entry (and the saved maximize state) is that main window.
+    frame = mini_restore_frame_;
+    maximized = mini_restore_maximized_;
+  } else if (has_tray_hidden_placement_ && !IsWindowVisible(hwnd)) {
     // A display sleep/wake can move a hidden HWND to the primary monitor. What
     // the user considers "the window's position" is the frame it had when it
     // was hidden, not where Windows parked it meanwhile, so record that frame
@@ -4621,6 +4897,193 @@ LRESULT FlutterWindow::HandleTrayCallback(LPARAM lparam) {
   }
 }
 
+namespace {
+
+// Keeps the mini-player at the aspect ratio it entered with. WM_SIZING is the
+// only place the proposed frame is visible before Windows commits it, so the
+// dragged edge(s) (`edge`) decide which dimension follows the other: a
+// top/bottom drag re-centres horizontally, a left/right drag re-anchors
+// vertically, and a corner keeps the opposite corner fixed.
+//
+// Edges that are currently snapped to the work area are hard constraints: a
+// snapped side stays glued while the opposite side is dragged, including the
+// corner cases. When both sides of an axis are glued (the window spans the
+// work area) that axis is fixed and the other follows the aspect ratio.
+void EnforceMiniAspect(HWND hwnd, RECT *rect, WPARAM edge, double aspect,
+                       bool snap_left, bool snap_right, bool snap_top,
+                       bool snap_bottom) {
+  if (rect == nullptr || aspect <= 0.0) {
+    return;
+  }
+  RECT frame{};
+  RECT client{};
+  if (!GetWindowRect(hwnd, &frame) || !GetClientRect(hwnd, &client)) {
+    return;
+  }
+  // The non-client delta is constant while dragging; deriving it from the live
+  // window avoids hardcoding WS_THICKFRAME's invisible border at each DPI.
+  int frame_w = (frame.right - frame.left) - client.right;
+  int frame_h = (frame.bottom - frame.top) - client.bottom;
+  if (frame_w < 0) frame_w = 0;
+  if (frame_h < 0) frame_h = 0;
+
+  int width = (rect->right - rect->left) - frame_w;
+  int height = (rect->bottom - rect->top) - frame_h;
+  if (width < 1) width = 1;
+  if (height < 1) height = 1;
+
+  RECT work{};
+  bool have_work = false;
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(MONITORINFO);
+  if (GetMonitorInfoW(MonitorFromRect(rect, MONITOR_DEFAULTTONEAREST),
+                      &monitor_info)) {
+    work = monitor_info.rcWork;
+    have_work = true;
+  }
+  const bool h_fixed = have_work && snap_left && snap_right;
+  const bool v_fixed = have_work && snap_top && snap_bottom;
+  if (h_fixed && v_fixed) {
+    rect->left = work.left;
+    rect->right = work.right;
+    rect->top = work.top;
+    rect->bottom = work.bottom;
+    return;
+  }
+
+  const bool vertical_drag = edge == WMSZ_TOP || edge == WMSZ_BOTTOM;
+  if (h_fixed) {
+    width = (work.right - work.left) - frame_w;
+    height = static_cast<int>(std::lround(width / aspect));
+  } else if (v_fixed) {
+    height = (work.bottom - work.top) - frame_h;
+    width = static_cast<int>(std::lround(height * aspect));
+  } else if (vertical_drag) {
+    width = static_cast<int>(std::lround(height * aspect));
+  } else {
+    height = static_cast<int>(std::lround(width / aspect));
+  }
+  // Floor keeps the compact bar usable and the picture visible. A snapped axis
+  // is already guaranteed by the work area and must not be overridden.
+  const int min_width = NativeScale(320);
+  const int min_height = NativeScale(180);
+  if (!h_fixed && width < min_width) {
+    width = min_width;
+    if (!v_fixed) height = static_cast<int>(std::lround(width / aspect));
+  }
+  if (!v_fixed && height < min_height) {
+    height = min_height;
+    if (!h_fixed) width = static_cast<int>(std::lround(height * aspect));
+  }
+
+  const int win_w = width + frame_w;
+  const int win_h = height + frame_h;
+
+  // Horizontal placement: glued side wins, then the dragged edge, and the
+  // opposite edge follows.
+  if (have_work && snap_left && snap_right) {
+    rect->left = work.left;
+    rect->right = work.right;
+  } else if (have_work && snap_left) {
+    rect->left = work.left;
+    rect->right = rect->left + win_w;
+  } else if (have_work && snap_right) {
+    rect->right = work.right;
+    rect->left = rect->right - win_w;
+  } else {
+    switch (edge) {
+      case WMSZ_LEFT:
+      case WMSZ_TOPLEFT:
+      case WMSZ_BOTTOMLEFT:
+        rect->left = rect->right - win_w;
+        break;
+      case WMSZ_RIGHT:
+      case WMSZ_TOPRIGHT:
+      case WMSZ_BOTTOMRIGHT:
+        rect->right = rect->left + win_w;
+        break;
+      default:
+        // Top/bottom drags keep the horizontal centre.
+        {
+          const int cx = (rect->left + rect->right) / 2;
+          rect->left = cx - win_w / 2;
+          rect->right = rect->left + win_w;
+        }
+        break;
+    }
+  }
+
+  // Vertical placement, the same rule: a glued edge wins, then the dragged one.
+  if (have_work && snap_top && snap_bottom) {
+    rect->top = work.top;
+    rect->bottom = work.bottom;
+  } else if (have_work && snap_top) {
+    rect->top = work.top;
+    rect->bottom = rect->top + win_h;
+  } else if (have_work && snap_bottom) {
+    rect->bottom = work.bottom;
+    rect->top = rect->bottom - win_h;
+  } else if (edge == WMSZ_TOP || edge == WMSZ_TOPLEFT ||
+             edge == WMSZ_TOPRIGHT) {
+    rect->top = rect->bottom - win_h;
+  } else {
+    rect->bottom = rect->top + win_h;
+  }
+}
+
+// Snaps the mini-player frame to the monitor work area and reports which edges
+// are glued. Called on WM_EXITSIZEMOVE, so dragging away from an edge unsnaps
+// it on the next gesture; resizing then keeps whatever is currently glued (see
+// EnforceMiniAspect).
+void SnapMiniWindowToWorkArea(RECT *rect, bool *snap_left, bool *snap_right,
+                              bool *snap_top, bool *snap_bottom) {
+  *snap_left = false;
+  *snap_right = false;
+  *snap_top = false;
+  *snap_bottom = false;
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(MONITORINFO);
+  if (!GetMonitorInfoW(MonitorFromRect(rect, MONITOR_DEFAULTTONEAREST),
+                       &monitor_info)) {
+    return;
+  }
+  const RECT &work = monitor_info.rcWork;
+  const int threshold = NativeScale(14);
+  *snap_left = std::abs(rect->left - work.left) <= threshold;
+  *snap_right = std::abs(rect->right - work.right) <= threshold;
+  *snap_top = std::abs(rect->top - work.top) <= threshold;
+  *snap_bottom = std::abs(rect->bottom - work.bottom) <= threshold;
+  if (*snap_left) rect->left = work.left;
+  if (*snap_right) rect->right = work.right;
+  if (*snap_top) rect->top = work.top;
+  if (*snap_bottom) rect->bottom = work.bottom;
+}
+
+// Snaps the current frame and records the glued edges. Used both when a resize
+// gesture ends and at the end of the custom mini-player drag.
+void ApplyMiniWorkAreaSnap(HWND hwnd, bool *snap_left, bool *snap_right,
+                           bool *snap_top, bool *snap_bottom) {
+  RECT frame{};
+  if (!GetWindowRect(hwnd, &frame)) {
+    return;
+  }
+  bool left = false;
+  bool right = false;
+  bool top = false;
+  bool bottom = false;
+  SnapMiniWindowToWorkArea(&frame, &left, &right, &top, &bottom);
+  *snap_left = left;
+  *snap_right = right;
+  *snap_top = top;
+  *snap_bottom = bottom;
+  if (left || right || top || bottom) {
+    SetWindowPos(hwnd, nullptr, frame.left, frame.top, frame.right - frame.left,
+                 frame.bottom - frame.top, SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+}
+
+}  // namespace
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
@@ -4630,6 +5093,132 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   // otherwise fall through to the surface teardown below and close outright.
   if (message == kTrayCallbackMessage) {
     return HandleTrayCallback(lparam);
+  }
+  // Custom mini-player drag: capture lives on the root window, so these are the
+  // only mouse messages while it lasts. Moving the window ourselves keeps
+  // Windows' own edge snap (which resized the frameless window) out of it.
+  if (mini_dragging_) {
+    if (message == WM_MOUSEMOVE) {
+      POINT point{};
+      RECT frame{};
+      if (GetCursorPos(&point) && GetWindowRect(hwnd, &frame)) {
+        const int width = frame.right - frame.left;
+        const int height = frame.bottom - frame.top;
+        int left = point.x - mini_drag_offset_.x;
+        int top = point.y - mini_drag_offset_.y;
+        MONITORINFO monitor_info{};
+        monitor_info.cbSize = sizeof(MONITORINFO);
+        if (GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST),
+                            &monitor_info)) {
+          const RECT &work = monitor_info.rcWork;
+          const RECT &monitor = monitor_info.rcMonitor;
+          const int threshold = NativeScale(14);
+          // Multi-monitor: an edge shared with another monitor is not a screen
+          // boundary. Probe just outside each side of this monitor's *monitor*
+          // rect (not the work rect - taskbars/gaps differ per side); if a
+          // neighbour is there, the frame must be free to cross instead of
+          // snapping or clamping to that edge.
+          const int probe_x = std::clamp(static_cast<int>(left) + width / 2,
+                                         static_cast<int>(monitor.left) + 1,
+                                         static_cast<int>(monitor.right) - 2);
+          const int probe_y = std::clamp(static_cast<int>(top) + height / 2,
+                                         static_cast<int>(monitor.top) + 1,
+                                         static_cast<int>(monitor.bottom) - 2);
+          const auto monitor_at = [](int x, int y) {
+            return MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONULL) !=
+                   nullptr;
+          };
+          const bool neighbour_left = monitor_at(monitor.left - 2, probe_y);
+          const bool neighbour_right = monitor_at(monitor.right + 2, probe_y);
+          const bool neighbour_top = monitor_at(probe_x, monitor.top - 2);
+          const bool neighbour_bottom = monitor_at(probe_x, monitor.bottom + 2);
+
+          const int max_left = std::max(static_cast<int>(work.left),
+                                        static_cast<int>(work.right) - width);
+          const int max_top = std::max(static_cast<int>(work.top),
+                                       static_cast<int>(work.bottom) - height);
+          // When crossing onto a neighbour we still keep the frame on the
+          // virtual desktop, so it can never be lost in the void between
+          // displays of different sizes.
+          const int virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+          const int virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+          const int virtual_right =
+              virtual_left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+          const int virtual_bottom =
+              virtual_top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+          // Snap when *approaching* an edge from inside. Crossing a shared
+          // (neighbour) edge is allowed once the frame is pushed past it.
+          // The grab offset is re-anchored only when a real edge clamps the
+          // frame: re-anchoring on every snap made the window impossible to
+          // pull away (each mouse move re-created the same 1-2 px gap), while
+          // never re-anchoring after a clamp makes the cursor travel the whole
+          // overshoot before the window follows.
+          bool anchored_x = false;
+          bool anchored_y = false;
+          if (left < static_cast<int>(work.left)) {
+            if (!neighbour_left) {
+              left = work.left;
+              anchored_x = true;
+            }
+          } else if (left <= static_cast<int>(work.left) + threshold) {
+            left = work.left;
+          }
+          if (left > max_left) {
+            if (!neighbour_right) {
+              left = max_left;
+              anchored_x = true;
+            }
+          } else if (left >= max_left - threshold) {
+            left = max_left;
+          }
+          if (top < static_cast<int>(work.top)) {
+            if (!neighbour_top) {
+              top = work.top;
+              anchored_y = true;
+            }
+          } else if (top <= static_cast<int>(work.top) + threshold) {
+            top = work.top;
+          }
+          if (top > max_top) {
+            if (!neighbour_bottom) {
+              top = max_top;
+              anchored_y = true;
+            }
+          } else if (top >= max_top - threshold) {
+            top = max_top;
+          }
+          // Even on a shared edge the frame must stay on the virtual desktop.
+          left = std::clamp(left, virtual_left,
+                            std::max(virtual_left, virtual_right - width));
+          top = std::clamp(top, virtual_top,
+                           std::max(virtual_top, virtual_bottom - height));
+          if (anchored_x) mini_drag_offset_.x = point.x - left;
+          if (anchored_y) mini_drag_offset_.y = point.y - top;
+        }
+        SetWindowPos(hwnd, nullptr, left, top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+      return 0;
+    }
+    if (message == WM_LBUTTONUP) {
+      mini_dragging_ = false;
+      ReleaseCapture();
+      if (native_window_mini_) {
+        ApplyMiniWorkAreaSnap(hwnd, &mini_snap_left_, &mini_snap_right_,
+                              &mini_snap_top_, &mini_snap_bottom_);
+        NotifyMiniPlacement();
+      }
+      return 0;
+    }
+    if (message == WM_CAPTURECHANGED || message == WM_CANCELMODE ||
+        (message == WM_KEYDOWN && wparam == VK_ESCAPE)) {
+      mini_dragging_ = false;
+      if (GetCapture() == hwnd) {
+        ReleaseCapture();
+      }
+      return 0;
+    }
   }
   // Mirror every *actual* top-level visibility transition to Dart, whichever
   // path caused it. HideToTray/RestoreFromTray send their own `trayHidden`/
@@ -4904,6 +5493,13 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                 static_cast<int>(std::distance(focusables.begin(), play));
           }
         }
+        // The mini-player's close button runs the ordinary close path, so
+        // close-to-tray still decides whether this hides or quits. Native, not a
+        // Dart command: the policy lives in this window.
+        if (command == "closeWindow") {
+          PostMessage(hwnd, WM_CLOSE, 0, 0);
+          return 0;
+        }
         ApplyOverlayOwnedCommand(native_controls_overlay_, hwnd, command);
         if (command.rfind("menu:", 0) == 0 || command == "info") {
           InvalidateNativeControls();
@@ -4954,6 +5550,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case 'm':
       command = "miniPlayer";
       break;
+    // `P` is the same toggle on every surface: on the embedded (Flutter)
+    // surface Dart binds it, here it is the native HUD's key.
+    case 'P':
+    case 'p':
+      command = "miniPlayer";
+      break;
     // Both page keys are normally claimed far above, by `DecideZapKey`, which
     // returns before this switch is ever reached. These two cases are the
     // legacy routing and they are **inert**: `zapDown`/`zapUp` are not the
@@ -4996,6 +5598,77 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   switch (message) {
   case WM_FONTCHANGE:
     flutter_controller_->engine()->ReloadSystemFonts();
+    break;
+  case WM_SIZING:
+    if (native_window_mini_) {
+      EnforceMiniAspect(hwnd, reinterpret_cast<RECT *>(lparam), wparam,
+                        mini_aspect_, mini_snap_left_, mini_snap_right_,
+                        mini_snap_top_, mini_snap_bottom_);
+      return TRUE;
+    }
+    break;
+  case WM_DPICHANGED:
+    // Monitors with different scaling: the base handler would apply Windows'
+    // suggested rect verbatim, which changes the PiP window's aspect. Keep the
+    // aspect captured on entry, re-centre vertically on the suggestion, and
+    // keep the frame inside that monitor's work area.
+    if (native_window_mini_) {
+      RECT suggested = *reinterpret_cast<RECT *>(lparam);
+      const int width = suggested.right - suggested.left;
+      const int height =
+          static_cast<int>(std::lround(width / mini_aspect_));
+      const int center_y = (suggested.top + suggested.bottom) / 2;
+      suggested.top = center_y - height / 2;
+      suggested.bottom = suggested.top + height;
+      MONITORINFO monitor_info{};
+      monitor_info.cbSize = sizeof(MONITORINFO);
+      if (GetMonitorInfoW(MonitorFromRect(&suggested, MONITOR_DEFAULTTONEAREST),
+                          &monitor_info)) {
+        const RECT &work = monitor_info.rcWork;
+        const int win_width = suggested.right - suggested.left;
+        const int win_height = suggested.bottom - suggested.top;
+        if (win_width <= work.right - work.left) {
+          suggested.left = std::clamp<LONG>(suggested.left, work.left,
+                                            work.right - win_width);
+        } else {
+          suggested.left = work.left;
+        }
+        if (win_height <= work.bottom - work.top) {
+          suggested.top = std::clamp<LONG>(suggested.top, work.top,
+                                           work.bottom - win_height);
+        } else {
+          suggested.top = work.top;
+        }
+        suggested.right = suggested.left + win_width;
+        suggested.bottom = suggested.top + win_height;
+      }
+      SetWindowPos(hwnd, nullptr, suggested.left, suggested.top,
+                   suggested.right - suggested.left,
+                   suggested.bottom - suggested.top,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+      ApplyMiniWorkAreaSnap(hwnd, &mini_snap_left_, &mini_snap_right_,
+                            &mini_snap_top_, &mini_snap_bottom_);
+      return 0;
+    }
+    break;
+  case WM_EXITSIZEMOVE:
+    // Snapping is applied when the gesture ends, not on every WM_MOVING: moving
+    // the drag rectangle under Windows' modal move loop mid-gesture turned the
+    // rest of the drag into a resize on some setups. The glued edges are still
+    // recorded here, so WM_SIZING can keep them pinned afterwards.
+    if (native_window_mini_) {
+      ApplyMiniWorkAreaSnap(hwnd, &mini_snap_left_, &mini_snap_right_,
+                            &mini_snap_top_, &mini_snap_bottom_);
+      NotifyMiniPlacement();
+    } else if (tray_channel_) {
+      // A window move/resize just ended: hand the frame to Dart so the
+      // remembered placement follows the user even if the app later exits
+      // through a path that never reaches the lifecycle observer.
+      tray_channel_->InvokeMethod(
+          "windowPlacementChanged",
+          std::make_unique<flutter::EncodableValue>(
+              CurrentWindowPlacement()));
+    }
     break;
   case WM_MOVE:
     ResizeNativeControls();
@@ -5046,6 +5719,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       return 0;
     }
     break;
+  case kMiniDragStartMessage:
+    StartMiniPlayerDrag();
+    return 0;
   case kNativeVideoSurfaceInputMessage:
     if (GetTickCount64() < native_ignore_input_until_) {
       return 0;
@@ -5056,6 +5732,11 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   case kNativeControlCommandMessage: {
     std::unique_ptr<std::string> command(
         reinterpret_cast<std::string *>(wparam));
+    // Same close-to-tray-policy close as the keyboard ring's Close button.
+    if (*command == "closeWindow") {
+      PostMessage(hwnd, WM_CLOSE, 0, 0);
+      return 0;
+    }
     const bool pauses_playback =
         *command == "playPause" && g_native_control_state.playing;
     const bool fullscreen_toggle = *command == "fullscreen";
@@ -5671,8 +6352,12 @@ void FlutterWindow::UpdateNativeControlState(
   }
   g_native_control_state.playing =
       EncodableBoolArg(args, "playing", g_native_control_state.playing);
-  g_native_control_state.fullscreen =
-      EncodableBoolArg(args, "fullscreen", native_window_fullscreen_);
+  // **The window owns this on Windows, not Dart.** The glyph drawn in the bar is
+  // `fullscreen ? "leave" : "enter"`, so a cached flag that disagrees with the
+  // real style shows the wrong button — reported as VOD showing the inward
+  // arrows while Live showed "Full", which is what made PiP confusing. Read it
+  // back from the window here and after every mode transition.
+  SyncFullscreenCache();
   g_native_control_state.position_ms = EncodableDoubleArg(
       args, "positionMs", g_native_control_state.position_ms);
   g_native_control_state.duration_ms = EncodableDoubleArg(
@@ -5956,6 +6641,21 @@ void FlutterWindow::ResetZapBanner() {
   native_controls_region_dirty_ = true;
 }
 
+void FlutterWindow::SyncFullscreenCache() {
+  HWND hwnd = GetHandle();
+  if (!hwnd) return;
+  // The mini-player's `WS_POPUP` restyle has no `WS_OVERLAPPEDWINDOW`, so it
+  // must not be read as fullscreen — otherwise every push while in PiP latched
+  // "fullscreen" and the restored window kept drawing the "leave fullscreen"
+  // arrows.
+  const bool mini = g_native_window_mini;
+  const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+  const bool full =
+      !mini && (style & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW;
+  native_window_fullscreen_ = full;
+  g_native_control_state.fullscreen = full;
+}
+
 void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
   HWND hwnd = GetHandle();
   if (!hwnd) {
@@ -5987,7 +6687,7 @@ void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
     // of no-oping silently: Dart toggles on the cached value, so a stale false
     // would make the button keep re-entering (and never exiting) a window that
     // is already fullscreen.
-    native_window_fullscreen_ = fullscreen;
+    SyncFullscreenCache();
     return;
   }
 
@@ -6037,6 +6737,9 @@ void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
     }
     native_window_fullscreen_ = false;
   }
+  // After the style round-trip, re-read the truth so the bar's glyph is right
+  // for the mode we just entered.
+  SyncFullscreenCache();
   ResizeNativeVideoSurface();
   ScheduleNativeVideoRendererResync();
   RecreateNativeControls();
@@ -6057,6 +6760,18 @@ void FlutterWindow::SetNativeWindowMiniPlayer(bool mini) {
   if (!hwnd || native_window_mini_ == mini) {
     return;
   }
+  if (mini) {
+    // Capture the mode before leaving fullscreen: that call clears the flag.
+    // Derived from the window style rather than the cached flag, for the same
+    // reason `SetNativeWindowFullscreen` derives it — a fullscreen the runner
+    // never initiated (the embedded surface's F) leaves the cache false, and
+    // then leaving PiP would restore a windowed frame instead of fullscreen.
+    const LONG_PTR style_now = GetWindowLongPtr(hwnd, GWL_STYLE);
+    mini_return_fullscreen_ =
+        (style_now & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW;
+    native_window_fullscreen_ = mini_return_fullscreen_;
+    g_native_mini_return_fullscreen = mini_return_fullscreen_;
+  }
   if (mini && native_window_fullscreen_) {
     SetNativeWindowFullscreen(false);
   }
@@ -6066,6 +6781,19 @@ void FlutterWindow::SetNativeWindowMiniPlayer(bool mini) {
     native_windowed_ex_style_ = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
     native_windowed_placement_.length = sizeof(WINDOWPLACEMENT);
     GetWindowPlacement(hwnd, &native_windowed_placement_);
+    // Capture the *frame* as well as the placement: SetWindowPlacement alone
+    // came back with a correctly-labelled but still compact window, so the
+    // restore path re-applies this rect explicitly. A maximized window is
+    // restored to its normal frame **first** and that frame is captured: its
+    // `rcNormalPosition` is in workspace coordinates and, on a secondary
+    // monitor, could fail the monitor check in `ApplyFramePlacement` (the
+    // fallback then re-created the "maximized at PiP size" bug).
+    mini_restore_maximized_ = IsZoomed(hwnd) != FALSE;
+    if (mini_restore_maximized_) {
+      ShowWindow(hwnd, SW_RESTORE);
+    }
+    mini_restore_frame_valid_ =
+        GetWindowRect(hwnd, &mini_restore_frame_) != FALSE;
 
     HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO monitor_info{};
@@ -6077,37 +6805,262 @@ void FlutterWindow::SetNativeWindowMiniPlayer(bool mini) {
     int width = (work.right - work.left) / 4;
     if (width < 384) width = 384;
     if (width > 640) width = 640;
-    const int height = width * 9 / 16;
+    int height = width * 9 / 16;
     const int margin = 16;
+    int left = work.right - width - margin;
+    int top = work.bottom - height - margin;
+    // Re-entering PiP returns to the frame the user left it at (Dart keeps it
+    // in the keychain and passes it on `setMiniPlayer`).
+    if (mini_has_pending_frame_) {
+      RECT target = mini_pending_frame_;
+      mini_has_pending_frame_ = false;
+      MONITORINFO saved_info{};
+      saved_info.cbSize = sizeof(MONITORINFO);
+      if (GetMonitorInfoW(
+              MonitorFromRect(&target, MONITOR_DEFAULTTONEAREST),
+              &saved_info)) {
+        const RECT &saved_work = saved_info.rcWork;
+        width = std::min(static_cast<int>(target.right - target.left),
+                         static_cast<int>(saved_work.right - saved_work.left));
+        height = std::min(static_cast<int>(target.bottom - target.top),
+                          static_cast<int>(saved_work.bottom - saved_work.top));
+        left = std::clamp<int>(target.left, saved_work.left,
+                               saved_work.right - width);
+        top = std::clamp<int>(target.top, saved_work.top,
+                              saved_work.bottom - height);
+      }
+    }
 
     // Frameless but resizable (WS_THICKFRAME keeps the sizing borders).
     SetWindowLongPtr(hwnd, GWL_STYLE,
-                     (native_windowed_style_ & ~WS_OVERLAPPEDWINDOW) |
+                     (native_windowed_style_ &
+                      ~(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE | WS_MINIMIZE)) |
                          WS_POPUP | WS_THICKFRAME);
-    SetWindowPos(hwnd, HWND_TOPMOST, work.right - width - margin,
-                 work.bottom - height - margin, width, height,
+    // PiP lives in the tray only: tool-window ex-style keeps it off the
+    // taskbar and out of Alt+Tab, and DeleteTab drops the button that already
+    // exists. Restored with the other windowed styles on exit.
+    SetWindowLongPtr(hwnd, GWL_EXSTYLE,
+                     (native_windowed_ex_style_ | WS_EX_TOOLWINDOW) &
+                         ~WS_EX_APPWINDOW);
+    // No caption to draw, but Windows 11 still paints its accent-coloured
+    // 1 px (and slightly thicker on top) DWM border, which reads as a leftover
+    // title strip and invites dragging the window by it. Remove it while the
+    // mini-player is up and restore the default border on exit.
+    const COLORREF no_border = DWMWA_COLOR_NONE;
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &no_border,
+                          sizeof(no_border));
+    // Windows 10 has no border-colour attribute; disabling DWM's non-client
+    // rendering is the equivalent that removes the accent frame there.
+    DWMNCRENDERINGPOLICY nc_policy = DWMNCRP_DISABLED;
+    DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &nc_policy,
+                          sizeof(nc_policy));
+    SetWindowPos(hwnd, HWND_TOPMOST, left, top, width, height,
                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    GetWindowRect(hwnd, &mini_applied_frame_);
+    SetTaskbarTab(hwnd, false);
     native_window_mini_ = true;
     g_native_window_mini = true;
+    // Fresh dock position: no edge is glued until the user drags it there.
+    mini_snap_left_ = false;
+    mini_snap_right_ = false;
+    mini_snap_top_ = false;
+    mini_snap_bottom_ = false;
+    // The aspect the user is looking at: WM_SIZING keeps this ratio while the
+    // compact window is resized.
+    RECT client{};
+    if (GetClientRect(hwnd, &client) && client.right > 0 &&
+        client.bottom > 0) {
+      mini_aspect_ =
+          static_cast<double>(client.right) / static_cast<double>(client.bottom);
+    }
+    NotifyMiniPlacement();
+    // PiP stays clean: the compact bar auto-hides under the usual timer and
+    // comes back on mouse movement over the video. Paused playback keeps it
+    // up (the timer logic already re-shows it), so the exit affordance is
+    // always one move away. The previous pin state is restored on exit.
+    mini_prev_pinned_ = native_controls_pinned_;
+    native_controls_pinned_ = !g_native_control_state.playing;
+    // Menus/info belong to the full bars; a small window has nowhere to put
+    // them and no button to reopen them.
+    g_native_control_state.open_menu = NativeMenuKind::kNone;
+    g_native_control_state.info_open = false;
   } else {
+    const bool restore_fullscreen = mini_return_fullscreen_;
+    mini_return_fullscreen_ = false;
     SetWindowLongPtr(hwnd, GWL_STYLE, native_windowed_style_);
     SetWindowLongPtr(hwnd, GWL_EXSTYLE, native_windowed_ex_style_);
+    const COLORREF default_border = DWMWA_COLOR_DEFAULT;
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &default_border,
+                          sizeof(default_border));
+    DWMNCRENDERINGPOLICY nc_policy = DWMNCRP_USEWINDOWSTYLE;
+    DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &nc_policy,
+                          sizeof(nc_policy));
     SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER |
                      SWP_FRAMECHANGED);
-    SetWindowPlacement(hwnd, &native_windowed_placement_);
+    SetTaskbarTab(hwnd, true);
+    // SetWindowPlacement after a style round-trip came back with a
+    // correctly-labelled but still compact window ("maximized" at PiP size), so
+    // restore the captured frame explicitly; the placement call is the fallback
+    // for the rare case the frame was not captured or its monitor is gone.
+    bool restored = false;
+    if (mini_restore_frame_valid_) {
+      // A capture that equals the PiP frame is not a main-window frame; it
+      // would restore the compact size. Fall through to the placement path.
+      // Compared with a few pixels of slack: the frame `GetWindowRect` reports
+      // and the one captured after `SetWindowPos` can differ by DWM rounding.
+      const bool same_as_pip =
+          abs((mini_restore_frame_.right - mini_restore_frame_.left) -
+              (mini_applied_frame_.right - mini_applied_frame_.left)) <= 4 &&
+          abs((mini_restore_frame_.bottom - mini_restore_frame_.top) -
+              (mini_applied_frame_.bottom - mini_applied_frame_.top)) <= 4;
+      if (!same_as_pip) {
+        restored = ApplyFramePlacement(hwnd, mini_restore_frame_,
+                                       mini_restore_maximized_);
+      }
+      mini_restore_frame_valid_ = false;
+    }
+    if (!restored) {
+      // `SetWindowPlacement` alone is the call that left a "maximized at PiP
+      // size" window after a style round-trip. Apply the placement's normal
+      // rect explicitly and then the show command; this is only reached when
+      // the captured frame was unusable or its monitor is gone.
+      const RECT normal = native_windowed_placement_.rcNormalPosition;
+      const int normal_width = normal.right - normal.left;
+      const int normal_height = normal.bottom - normal.top;
+      // ...and it can itself be the PiP frame: once a restore has landed at the
+      // compact size (or a PiP-sized window was what the user entered from),
+      // the next restore would faithfully reproduce it — the reported "coming
+      // back from PiP gives a PiP-sized window again". A tiny frame is not a
+      // main window, so fall back to the work area instead of trusting it.
+      const bool normal_is_pip =
+          normal_width <= 700 &&
+          abs(normal_width -
+              (mini_applied_frame_.right - mini_applied_frame_.left)) <= 4 &&
+          abs(normal_height -
+              (mini_applied_frame_.bottom - mini_applied_frame_.top)) <= 4;
+      if (normal_is_pip) {
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO info{};
+        info.cbSize = sizeof(MONITORINFO);
+        if (GetMonitorInfo(monitor, &info)) {
+          const RECT &work = info.rcWork;
+          const int width = (work.right - work.left) * 7 / 10;
+          const int height = (work.bottom - work.top) * 7 / 10;
+          const int left = work.left + ((work.right - work.left) - width) / 2;
+          const int top = work.top + ((work.bottom - work.top) - height) / 2;
+          SetWindowPos(hwnd, nullptr, left, top, width, height,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+          restored = true;
+        }
+      }
+      if (!restored) {
+        SetWindowPos(hwnd, nullptr, normal.left, normal.top, normal_width,
+                     normal_height, SWP_NOZORDER | SWP_NOACTIVATE);
+        if (native_windowed_placement_.showCmd == SW_SHOWMAXIMIZED) {
+          ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        } else if (native_windowed_placement_.showCmd == SW_SHOWNORMAL) {
+          ShowWindow(hwnd, SW_RESTORE);
+        }
+      }
+    }
     native_window_mini_ = false;
     g_native_window_mini = false;
+    mini_snap_left_ = false;
+    mini_snap_right_ = false;
+    mini_snap_top_ = false;
+    mini_snap_bottom_ = false;
+    native_controls_pinned_ = mini_prev_pinned_;
+    // Returning to a fullscreen player has to re-enter fullscreen, not merely
+    // restore the windowed rectangle the fullscreen capture saved.
+    if (restore_fullscreen) {
+      SetNativeWindowFullscreen(true);
+    }
   }
-  ResizeNativeVideoSurface();
-  ScheduleNativeVideoRendererResync();
-  RecreateNativeControls();
-  ShowNativeControls(true);
-  if (native_controls_pinned_ || !g_native_control_state.playing) {
-    KillTimer(hwnd, kNativeControlsHideTimer);
+  // Authoritative mode, because the mini-player can also be left by entering
+  // fullscreen (F) rather than by the toggle; Dart's cached flag would otherwise
+  // ask for the wrong direction on the next press.
+  if (native_hdr_channel_) {
+    native_hdr_channel_->InvokeMethod(
+        "miniPlayerChanged",
+        std::make_unique<flutter::EncodableValue>(native_window_mini_));
+    // Entering PiP from fullscreen leaves fullscreen *natively* (above), and
+    // nothing used to tell Dart: its cached flag stayed true, so the GDI bar
+    // drew "leave fullscreen" on a windowed player and the next fullscreen
+    // press asked for a direction that was already taken. Report the
+    // authoritative flag alongside the mini one.
+    native_hdr_channel_->InvokeMethod(
+        "fullscreenChanged",
+        std::make_unique<flutter::EncodableValue>(native_window_fullscreen_));
+  }
+  // The GDI controls overlay belongs to the native HWND surface. The embedded
+  // (media_kit texture) path has its own Flutter overlay, so creating a native
+  // one here would paint a second, state-less bar on top of it.
+  if (native_video_surface_) {
+    ResizeNativeVideoSurface();
+    ScheduleNativeVideoRendererResync();
+    RecreateNativeControls();
+    ShowNativeControls(true);
+    if (native_controls_pinned_ || !g_native_control_state.playing) {
+      KillTimer(hwnd, kNativeControlsHideTimer);
+    } else {
+      ScheduleNativeControlsHide();
+    }
   } else {
-    ScheduleNativeControlsHide();
+    DestroyNativeControls();
   }
+  // Either direction changes the style (`WS_POPUP` in, overlapped back out), so
+  // the cached fullscreen state is re-read here rather than trusted: a push that
+  // arrived while still mini would otherwise leave `fullscreen = true` on a
+  // restored window, drawing "leave fullscreen" for the rest of the session.
+  SyncFullscreenCache();
+}
+
+// Starts the mini-player's own drag: capture the mouse on the root window,
+// remember where inside the frame it was pressed, and let MessageHandler's
+// mini_dragging_ branch move the frame on WM_MOUSEMOVE. Avoids the system
+// caption move loop, whose Aero Snap resized this frameless window at the
+// screen edges.
+// Hands the current PiP frame to Dart, which owns the keychain. Sent on entry
+// and after every drag/resize gesture, so a quit from PiP still has the latest
+// frame even though the process never reaches a normal window save.
+void FlutterWindow::NotifyMiniPlacement() {
+  if (!native_hdr_channel_ || !native_window_mini_) {
+    return;
+  }
+  HWND hwnd = GetHandle();
+  RECT frame{};
+  if (!hwnd || !GetWindowRect(hwnd, &frame)) {
+    return;
+  }
+  flutter::EncodableMap args;
+  args[flutter::EncodableValue("x")] =
+      flutter::EncodableValue(static_cast<int64_t>(frame.left));
+  args[flutter::EncodableValue("y")] =
+      flutter::EncodableValue(static_cast<int64_t>(frame.top));
+  args[flutter::EncodableValue("width")] =
+      flutter::EncodableValue(static_cast<int64_t>(frame.right - frame.left));
+  args[flutter::EncodableValue("height")] =
+      flutter::EncodableValue(static_cast<int64_t>(frame.bottom - frame.top));
+  native_hdr_channel_->InvokeMethod(
+      "miniPlacementChanged",
+      std::make_unique<flutter::EncodableValue>(args));
+}
+
+void FlutterWindow::StartMiniPlayerDrag() {
+  HWND hwnd = GetHandle();
+  if (!hwnd || !native_window_mini_ || mini_dragging_) {
+    return;
+  }
+  POINT point{};
+  RECT frame{};
+  if (!GetCursorPos(&point) || !GetWindowRect(hwnd, &frame)) {
+    return;
+  }
+  mini_drag_offset_.x = point.x - frame.left;
+  mini_drag_offset_.y = point.y - frame.top;
+  mini_dragging_ = true;
+  SetCapture(hwnd);
 }
 
 void FlutterWindow::RegisterClockChannel() {
@@ -6142,6 +7095,13 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
           SetNativeVideoSurfaceInsets(
               EncodableIntArg(call.arguments(), "topInset", 0),
               EncodableIntArg(call.arguments(), "bottomInset", 0));
+          // A new session must not inherit the previous route's chrome: every
+          // field here is pushed by Dart *after* the surface exists, and until
+          // that first push the overlay would otherwise paint the last film's
+          // title, synopsis and scrubber over a live channel (reported exactly
+          // like that, with the live banner mixed into VOD controls).
+          g_native_control_state = NativeControlState{};
+          native_controls_region_dirty_ = true;
           HWND surface = CreateNativeVideoSurface();
           if (!surface) {
             result->Error("surface_unavailable",
@@ -6155,6 +7115,11 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "destroySurface") {
           ResetZapBanner();
+          // Nothing of this route may outlive it: a hidden overlay window that
+          // keeps its state shows the old film's chrome the moment any later
+          // push repaints it.
+          g_native_control_state = NativeControlState{};
+          native_controls_region_dirty_ = true;
           DestroyNativeControls();
           if (native_video_surface_) {
             ShowWindow(native_video_surface_, SW_HIDE);
@@ -6203,6 +7168,12 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "prepareExit") {
           ResetZapBanner();
+          // The route is leaving: blank the state with it. `prepareExit` hides
+          // the overlay rather than destroying the surface, so a later push from
+          // *another* route (a live zap banner, say) could repaint this one's
+          // title, synopsis and scrubber over the new picture.
+          g_native_control_state = NativeControlState{};
+          native_controls_region_dirty_ = true;
           SetNativeWindowFullscreen(false);
           SetNativeWindowMiniPlayer(false);
           DestroyNativeControls();
@@ -6307,11 +7278,24 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
         if (call.method_name() == "setMiniPlayer") {
           bool mini = false;
           const auto *args = call.arguments();
+          mini_has_pending_frame_ = false;
           if (args && std::holds_alternative<bool>(*args)) {
             mini = std::get<bool>(*args);
           } else if (args &&
                      std::holds_alternative<flutter::EncodableMap>(*args)) {
             mini = EncodableBoolArg(args, "mini", mini);
+            // Optional remembered PiP frame from Dart (`x,y,width,height`).
+            if (mini && EncodableHasKey(args, "width") &&
+                EncodableHasKey(args, "height")) {
+              const int x = EncodableIntArg(args, "x", 0);
+              const int y = EncodableIntArg(args, "y", 0);
+              const int width = EncodableIntArg(args, "width", 0);
+              const int height = EncodableIntArg(args, "height", 0);
+              if (width >= 160 && height >= 90) {
+                mini_pending_frame_ = RECT{x, y, x + width, y + height};
+                mini_has_pending_frame_ = true;
+              }
+            }
           }
           SetNativeWindowMiniPlayer(mini);
           result->Success(flutter::EncodableValue(native_window_mini_));
@@ -6339,6 +7323,22 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
             close_to_tray = std::get<bool>(*args);
           }
           close_to_tray_ = close_to_tray;
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "closeWindow") {
+          // The embedded (Flutter) mini bar's Close: the ordinary close path,
+          // so `close_to_tray_` still decides between hide and quit.
+          PostMessage(GetHandle(), WM_CLOSE, 0, 0);
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "beginWindowDrag") {
+          // The embedded mini-player has no native video surface to start the
+          // drag from, so Flutter asks here when its drag layer is pressed.
+          StartMiniPlayerDrag();
           result->Success(flutter::EncodableValue(true));
           return;
         }

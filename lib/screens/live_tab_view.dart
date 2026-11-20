@@ -10,6 +10,7 @@ import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/artwork_cache.dart';
 import '../widgets/image_utils.dart';
 import '../widgets/source_error_view.dart';
 import 'live_focus_coordinator.dart';
@@ -1083,6 +1084,9 @@ class _LivePreviewPanel extends StatelessWidget {
                       LayoutBuilder(
                         builder: (context, constraints) => CachedNetworkImage(
                           imageUrl: cleanImageUrl(channel.logo)!,
+                          // Shared cache + direct-then-proxy fetcher: see
+                          // [artworkCacheManager].
+                          cacheManager: artworkCacheManager,
                           // `contain`, not `cover`: a channel logo is artwork of
                           // arbitrary aspect, and the row's own tile
                           // ([_Logo]) already draws it contained. `cover` here

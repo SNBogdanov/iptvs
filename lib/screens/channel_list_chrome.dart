@@ -234,22 +234,24 @@ class ChannelToolbar extends StatelessWidget {
     if (controls.isEmpty) return null;
     if (controls.length == 1) return controls.single;
     if (narrow) {
-      final hasSecondRow = sortControl != null || actionControl != null;
+      // **The action rides beside the category picker**, never on a row of its
+      // own: on a phone that was one 40 px icon under a full-width dropdown —
+      // reported as "the EPG icon looks lonely on its line". The sort control,
+      // which needs real width, keeps the row below.
+      final header = <Widget>[
+        if (categoryControl != null) Expanded(child: categoryControl!),
+        if (categoryControl != null && actionControl != null)
+          const SizedBox(width: 8),
+        ?actionControl,
+      ];
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          ?categoryControl,
-          if (categoryControl != null && hasSecondRow)
-            const SizedBox(height: 8),
-          if (hasSecondRow)
-            Row(
-              children: [
-                if (sortControl != null) Expanded(child: sortControl!),
-                if (sortControl != null && actionControl != null)
-                  const SizedBox(width: 8),
-                ?actionControl,
-              ],
-            ),
+          if (header.isNotEmpty) Row(children: header),
+          if (sortControl != null) ...[
+            if (header.isNotEmpty) const SizedBox(height: 8),
+            sortControl!,
+          ],
         ],
       );
     }
@@ -359,13 +361,20 @@ class ChannelCategoryDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The selected id is restored before the categories arrive, and a provider
+    // may also drop a category between sessions. `DropdownButton` asserts when
+    // its value has no matching item (the transient red error screen), so a
+    // value that is not in *this* list is shown as "All" until it appears.
+    final selected = value != null && categories.any((c) => c.id == value)
+        ? value
+        : null;
     return _DropdownFrame(
       builder: (focusNode) => DropdownButton<String?>(
         focusNode: focusNode,
         focusColor: Colors.transparent,
         isDense: true,
         isExpanded: true,
-        value: value,
+        value: selected,
         dropdownColor: AppColors.panelHi,
         borderRadius: BorderRadius.circular(AppRadius.control),
         icon: const Icon(Icons.expand_more, color: AppColors.textLo),
@@ -409,13 +418,20 @@ class MediaCategoryDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The selected id is restored before the categories arrive, and a provider
+    // may also drop a category between sessions. `DropdownButton` asserts when
+    // its value has no matching item (the transient red error screen), so a
+    // value that is not in *this* list is shown as "All" until it appears.
+    final selected = value != null && categories.any((c) => c.id == value)
+        ? value
+        : null;
     return _DropdownFrame(
       builder: (focusNode) => DropdownButton<String?>(
         focusNode: focusNode,
         focusColor: Colors.transparent,
         isDense: true,
         isExpanded: true,
-        value: value,
+        value: selected,
         dropdownColor: AppColors.panelHi,
         borderRadius: BorderRadius.circular(AppRadius.control),
         icon: const Icon(Icons.expand_more, color: AppColors.textLo),

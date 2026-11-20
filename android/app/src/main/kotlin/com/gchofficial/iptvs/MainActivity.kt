@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.Signature
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,6 +20,10 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.ref.WeakReference
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.ProxySelector
+import java.net.URI
 import java.security.MessageDigest
 
 @UnstableApi
@@ -40,6 +45,66 @@ class MainActivity : FlutterActivity() {
      * what kind of device this is.
      */
     private fun isTelevision(): Boolean = isTelevisionDevice(this)
+
+    /**
+     * The system HTTP proxy, for Dart's HttpClient (which ignores it natively).
+     *
+     * Checked in three ways because OEMs disagree: the active network's
+     * LinkProperties (the modern source), the JVM proxy properties some builds
+     * mirror, and finally the default ProxySelector. Null means "direct".
+     */
+    private fun systemProxy(): Map<String, Any>? {
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val network = cm?.activeNetwork
+            if (cm != null && network != null) {
+                val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    cm.getLinkProperties(network)?.httpProxy
+                } else {
+                    @Suppress("DEPRECATION")
+                    cm.getDefaultProxy()
+                }
+                val host = info?.host
+                val port = info?.port ?: -1
+                if (!host.isNullOrBlank() && port > 0) {
+                    return mapOf(
+                        "host" to host,
+                        "port" to port,
+                        "type" to "HTTP",
+                        // The per-network bypass list (`xl=*.site,37.1.194.25`
+                        // in the field). Dart must honour it or it forces the
+                        // very hosts the user excluded through the proxy.
+                        "exclusions" to (info?.exclusionList ?: emptyList<String>()),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+        }
+        val propertyHost = System.getProperty("https.proxyHost")
+            ?: System.getProperty("http.proxyHost")
+        val propertyPort = (System.getProperty("https.proxyPort")
+            ?: System.getProperty("http.proxyPort"))?.toIntOrNull()
+        if (!propertyHost.isNullOrBlank() && propertyPort != null && propertyPort > 0) {
+            return mapOf("host" to propertyHost, "port" to propertyPort, "type" to "HTTP")
+        }
+        try {
+            val proxy = ProxySelector.getDefault()
+                ?.select(URI("https://example.com"))
+                ?.firstOrNull()
+            val address = proxy?.address()
+            if (proxy != null && proxy != Proxy.NO_PROXY &&
+                address is InetSocketAddress
+            ) {
+                return mapOf(
+                    "host" to address.hostString,
+                    "port" to address.port,
+                    "type" to if (proxy.type() == Proxy.Type.SOCKS) "SOCKS" else "HTTP",
+                )
+            }
+        } catch (_: Exception) {
+        }
+        return null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -202,6 +267,10 @@ class MainActivity : FlutterActivity() {
                             args["bufferPreset"] as? String,
                         )
                         putExtra(HdrPlayerActivity.EXTRA_ASPECT, args["aspect"] as? String)
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_STEP_ENABLED,
+                            args["stepEnabled"] as? Boolean ?: false,
+                        )
                         // Session-wide audio (see Dart PlaybackAudioSession): the
                         // Activity opens a fresh audio session, so the user's
                         // volume/mute must ride along or every channel change
@@ -210,6 +279,17 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_VOLUME,
                             ((args["volume"] as? Number)?.toFloat() ?: 1f)
                                 .coerceIn(0f, 1f),
+                        )
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_MUTED,
+                            args["muted"] as? Boolean
+                                ?: (((args["volume"] as? Number)?.toFloat()
+                                    ?: 1f) <= 0f),
+                        )
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_AUDIBLE_VOLUME,
+                            ((args["audibleVolume"] as? Number)?.toFloat()
+                                ?: 1f).coerceIn(0.1f, 1f),
                         )
                         // VOD resume point (ms), 0 = play from the top.
                         putExtra(
@@ -251,6 +331,26 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_SHOW_TIMES,
                             args["showPlaybackTimes"] as? Boolean ?: true,
                         )
+                        // Which optional controls the chrome draws (Settings →
+                        // "Player controls"), as a comma list of wire names.
+                        // Absent means "everything shown" — the same fail-open
+                        // rule as the two preferences above.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_HIDDEN_CONTROLS,
+                            args["hiddenControls"] as? String ?: "",
+                        )
+                        // What a double tap on the picture does. Absent reads as
+                        // the default (previous/next) on the Activity side.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_DOUBLE_TAP,
+                            args["doubleTap"] as? String ?: "",
+                        )
+                        // How far the ±seek buttons and a seek double tap move
+                        // a title (Settings → "VOD seek step"). Absent keeps the
+                        // Activity's own default of 10 s.
+                        (args["seekStepSeconds"] as? Number)?.toInt()?.let {
+                            putExtra(HdrPlayerActivity.EXTRA_SEEK_STEP, it)
+                        }
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }
@@ -325,6 +425,25 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                "setZapModes" -> {
+                    val args = call.arguments as? Map<*, *>
+                    if (args != null) {
+                        HdrPlayerActivity.instance?.get()?.applyZapModes(args)
+                    }
+                    result.success(true)
+                }
+
+                // The position the engine is at right now, for Dart's resume
+                // store: a VOD step swaps the stream inside the session and the
+                // outgoing title never sees `nativeClosed`.
+                "playerPosition" -> {
+                    val player = HdrPlayerActivity.instance?.get()
+                    result.success(
+                        player?.currentPlaybackPosition()
+                            ?: mapOf("positionMs" to 0L, "durationMs" to 0L),
+                    )
+                }
+
                 "setZapBanner" -> {
                     val args = call.arguments as? Map<*, *>
                     if (args != null) {
@@ -364,6 +483,11 @@ class MainActivity : FlutterActivity() {
         deviceChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision())
+                // Dart's `HttpClient` does not read Android's system proxy on
+                // its own, so image/API requests bypassed a user-configured
+                // proxy while native players honoured it. Dart installs an
+                // `HttpOverrides` from this answer at boot.
+                "proxy" -> result.success(systemProxy())
                 else -> result.notImplemented()
             }
         }
@@ -507,6 +631,20 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
+     * Reports an aspect choice made in the player's own overlay.
+     *
+     * Dart owns the label sequence every `zapTo` payload carries, so without
+     * this the next channel change re-sent the framing Dart last heard about —
+     * at launch — and the picture snapped back after every zap. Fire-and-forget:
+     * a missing handler just leaves `RESULT_ASPECT` as the only report, which is
+     * the behaviour before this call existed.
+     */
+    fun reportAspect(label: String) {
+        if (!::nativeHdrChannel.isInitialized) return
+        nativeHdrChannel.invokeMethod("nativeAspect", mapOf("label" to label))
+    }
+
+    /**
      * Fails closed unless [apk] is a cache-owned APK for this exact application
      * and is signed by the same certificate as the installed build. Dart has
      * already verified the signed release-manifest digest; this native check
@@ -581,6 +719,9 @@ class MainActivity : FlutterActivity() {
                 }
                 data?.takeIf { it.hasExtra(HdrPlayerActivity.RESULT_VOLUME) }?.let {
                     put("volume", it.getFloatExtra(HdrPlayerActivity.RESULT_VOLUME, 1f))
+                }
+                data?.takeIf { it.hasExtra(HdrPlayerActivity.RESULT_MUTED) }?.let {
+                    put("muted", it.getBooleanExtra(HdrPlayerActivity.RESULT_MUTED, false))
                 }
             }
             nativeHdrChannel.invokeMethod("nativeClosed", if (map.isEmpty()) null else map)

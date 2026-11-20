@@ -16,6 +16,7 @@ import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/artwork_cache.dart';
 import '../widgets/image_utils.dart';
 import '../widgets/routed_focus_node.dart';
 import '../widgets/source_error_view.dart';
@@ -257,6 +258,11 @@ class MediaTabView extends StatelessWidget {
   final VoidCallback onLoadMore;
   final VoidCallback onRetry;
 
+  /// Touch phones load the next window automatically as the list scrolls, so
+  /// the "Next page" control would only flash under the finger. TV/desktop keep
+  /// it: their focus walk can stop on the last visible row without scrolling.
+  final bool autoLoadMore;
+
   /// Watched fraction per in-progress item id, published by
   /// [MediaTabController.resumeProgress]; empty means nothing is in progress.
   /// Reaches both the grid's poster cards and the narrow-layout list rows, so a
@@ -304,6 +310,7 @@ class MediaTabView extends StatelessWidget {
     required this.onOpenMedia,
     required this.onLoadMore,
     required this.onRetry,
+    this.autoLoadMore = false,
     this.resumeProgress = const {},
     this.continueWatching = const [],
     required this.onResume,
@@ -372,7 +379,7 @@ class MediaTabView extends StatelessWidget {
   }) {
     final box = availableHeight < 0 ? 0.0 : availableHeight;
     if (!useGrid) {
-      // A list row is the 58x84 thumbnail plus its 12px padding on each side
+      // A list row is the 84-tall thumbnail plus its 12px padding on each side
       // (see `_MediaListTile`) and there is no separator between rows.
       const rowExtent = 84.0 + 24.0;
       final rows = ((box - rowExtent / 2) / rowExtent).floor() + 1;
@@ -535,7 +542,8 @@ class MediaTabView extends StatelessWidget {
         );
         final hasMoreToShow =
             shown.length < visible.length || (snapshot?.hasMore == true);
-        final showLoadMore = !showingSearch && (loadingMore || hasMoreToShow);
+        final showLoadMore =
+            !showingSearch && !autoLoadMore && (loadingMore || hasMoreToShow);
         final hasLastVisible =
             lastPlayedId != null &&
             shown.any((media) => media.id == lastPlayedId);
@@ -1349,6 +1357,8 @@ class _Thumb extends StatelessWidget {
       borderRadius: BorderRadius.circular(8),
       child: CachedNetworkImage(
         imageUrl: image,
+        // Shared cache + direct-then-proxy fetcher: see [artworkCacheManager].
+        cacheManager: artworkCacheManager,
         width: width,
         height: height,
         fit: BoxFit.cover,
@@ -1370,6 +1380,12 @@ class _Thumb extends StatelessWidget {
 }
 
 class _MediaListTile extends StatelessWidget {
+  /// Height of the row's artwork — fixed, because the paging math counts rows
+  /// by `rowExtent = 84 + 24` (see [MediaTabView]'s cell estimate). The width
+  /// derives from it and the card shape, so Portrait stays a 2:3 poster and
+  /// Landscape becomes a 16:9 band.
+  static const double thumbHeight = 84;
+
   final MediaItem item;
   final bool favorite;
   final int position;
@@ -1379,8 +1395,8 @@ class _MediaListTile extends StatelessWidget {
   final VoidCallback onTap;
 
   /// See [_MediaGridTile.progress]. On this layout the bar rides the bottom of
-  /// the 58x84 thumb rather than the card, because the row's height is set by
-  /// the text block beside it and a full-width bar under the row would need a
+  /// the thumb rather than the card, because the row's height is set by the
+  /// text block beside it and a full-width bar under the row would need a
   /// height this row does not have.
   final double? progress;
 
@@ -1424,10 +1440,25 @@ class _MediaListTile extends StatelessWidget {
             // bar sits on the artwork's clipped edge instead of hanging a pixel
             // outside the rounded corner.
             ClipRRect(
+              key: const ValueKey('media.list.thumb'),
               borderRadius: BorderRadius.circular(6),
               child: Stack(
                 children: [
-                  _Poster(item: item, width: 58, height: 84),
+                  // Settings → "VOD and series card shape" reaches this row too.
+                  // A phone never gets the poster grid above (it needs a
+                  // ≥600 × 500 dp window), so these 84-tall thumbs *are* the
+                  // cards there — without this the preference did nothing at all
+                  // on a handset. Only the width follows the shape: the height is
+                  // what the paging math counts rows by (`rowExtent = 84 + 24`).
+                  ListenableBuilder(
+                    listenable: vodCardOrientation,
+                    builder: (context, _) => _Poster(
+                      item: item,
+                      width: _MediaListTile.thumbHeight *
+                          vodCardOrientation.value.aspectRatio,
+                      height: _MediaListTile.thumbHeight,
+                    ),
+                  ),
                   if (progress != null)
                     Positioned(
                       left: 0,
@@ -1974,6 +2005,8 @@ class _Poster extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           child: CachedNetworkImage(
             imageUrl: poster,
+            // Shared cache + direct-then-proxy fetcher: see [artworkCacheManager].
+            cacheManager: artworkCacheManager,
             width: renderedWidth,
             height: renderedHeight,
             fit: BoxFit.cover,

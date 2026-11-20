@@ -1120,6 +1120,22 @@ void main() {
       expect(controller.quickList.selectedIndex, 2);
     });
 
+    test('a touch surface gets the whole range, not a window', () {
+      // The phone's in-player list is a real scrollable list, so a 40-row
+      // window cut around the cursor made it stop dead at the window's edge —
+      // "the channel list hits a wall". `channel_list_screen` widens the
+      // window for a handset; this pins what that field does.
+      final controller = _controller(initialIndex: 1)..windowRows = 1000;
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+
+      final state = controller.quickList;
+      expect(state.total, 3);
+      expect(state.windowStart, 0);
+      expect(state.rows.length, 3);
+      expect(state.selectedInWindow, 1);
+    });
+
     test('the dedicated channel keys move the cursor in list order', () {
       final controller = _controller(initialIndex: 0);
       addTearDown(controller.dispose);

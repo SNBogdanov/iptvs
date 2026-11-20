@@ -10,6 +10,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/app_database.dart';
+import '../data/app_settings_store.dart';
 import '../data/diagnostics_log.dart';
 import 'aspect_mode.dart';
 import 'auto_switch.dart';
@@ -25,7 +26,9 @@ import 'live_zap_controller.dart';
 import 'vod_step_session.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
+import 'double_tap_action.dart';
 import 'player_chrome_prefs.dart';
+import 'player_controls_prefs.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
 import 'playback_audio_session.dart';
@@ -1343,12 +1346,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     // forever. This is why `AutoSwitch` is its own notifier rather than a field
     // of the zap controller; the two must not share an update path.
     zap.autoSwitch.addListener(_onAutoSwitchChanged);
+    unawaited(_pushZapModes());
   }
 
   /// The countdown moved. Repaint, and tell the natives — nothing else.
   void _onAutoSwitchChanged() {
     if (!mounted) return;
     setState(() {});
+    unawaited(_pushZapModes());
     unawaited(_pushZapBanner());
     unawaited(_pushQuickList());
   }
@@ -1369,6 +1374,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // accessors above, so a rebuild is how it follows the cursor.
     setState(() {});
     _zapBannerAtMs = DateTime.now().millisecondsSinceEpoch;
+    unawaited(_pushZapModes());
     unawaited(_pushZapBanner());
     unawaited(_pushQuickList());
   }
@@ -1462,6 +1468,25 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// chrome. Fire-and-forget and failure-tolerant: until the Kotlin/C++ halves
   /// land (Phase 2/4) this method simply isn't implemented natively, and a
   /// banner that doesn't draw must never break playback.
+  /// Pushes the two live zap modes to a native overlay that draws checkmarks
+  /// for them (Android's overflow menu). Separate from [setZapBanner] so the
+  /// menu updates without showing the banner.
+  Future<void> _pushZapModes() async {
+    final zap = _zap;
+    if (zap == null) return;
+    if (!(_separateEngineOwnsPlayback || _usesWindowsNativeSurface)) return;
+    try {
+      await _nativeHdrPlayer.invokeMethod<void>('setZapModes', {
+        'random': zap.random,
+        'autoSwitch': zap.autoSwitch.enabled,
+      });
+    } on MissingPluginException {
+      // Older native build: no menu state to update.
+    } catch (error) {
+      _logPlayback('zap modes push failed: ${_redactPlayback('$error')}');
+    }
+  }
+
   Future<void> _pushZapBanner() async {
     final zap = _zap;
     if (zap == null) return;
@@ -1477,7 +1502,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       await _nativeHdrPlayer.invokeMethod<void>(
         'setZapBanner',
-        zap.bannerPayload(),
+        {
+          ...zap.bannerPayload(),
+          // The overlay keys its 3 s auto-hide on this stamp. Unrelated pushes
+          // (the auto-switch countdown ticks once a second) repeat the same
+          // value, so they refresh the banner without restarting its timer -
+          // otherwise the channel name sat over the picture forever.
+          'atMs': _zapBannerAtMs,
+        },
       );
     } on MissingPluginException {
       // Native half not implemented on this platform/build — expected.
@@ -1586,6 +1618,30 @@ class _PlayerScreenState extends State<PlayerScreen>
       _logPlayback('zap unsupported by native player (zapTo not implemented)');
     } catch (error) {
       _logPlayback('zap apply failed: ${_redactPlayback('$error')}');
+    }
+  }
+
+  /// Swaps the URL on Android's Activity for a **VOD step**, where there is no
+  /// `ZapEntry` (no channel fields: title/EPG/favorite all belong to the old
+  /// concept). The native `applyZap` only needs the locator and presentation,
+  /// so the same `zapTo` method carries both a live zap and a film step.
+  Future<void> _invokeNativeReload(StreamInfo stream, String title) async {
+    try {
+      await _nativeHdrPlayer.invokeMethod<Map<Object?, Object?>>('zapTo', {
+        'url': stream.url,
+        'headers': stream.headers,
+        'title': title,
+        'sourceName': _sourceName,
+        'isLive': stream.isLive,
+        'bufferPreset': _bufferPreset.storageName,
+        'aspect': kAspectModes[_aspectModeIndex].label,
+        'canFavorite': false,
+        'isFavorite': false,
+      });
+    } on MissingPluginException {
+      _logPlayback('vod step unsupported by native player (zapTo missing)');
+    } catch (error) {
+      _logPlayback('vod step apply failed: ${_redactPlayback('$error')}');
     }
   }
 
@@ -1788,6 +1844,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       _steppingVod = false;
       return;
     }
+    // Remember where the *outgoing* title was before the stream is swapped:
+    // the native Activity only reports its position on exit, so without this
+    // the item being left behind kept whatever it had from an earlier session
+    // (or nothing at all) — reported as "the position is not remembered when I
+    // press Next".
+    await _persistPlaybackPosition();
+    if (!mounted) {
+      _steppingVod = false;
+      return;
+    }
     _vodIndex = target;
     _vodTitle = item.title;
     _steppingVod = false;
@@ -1844,14 +1910,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_separateEngineOwnsPlayback && !_usesLinuxNativeSurface) {
       // Android's Activity / iOS's presented controller own the engine; they
       // stop, rebuild if the headers or preset changed, and reload.
-      if (entry == null) {
-        // A VOD step on a platform whose native surface only understands
-        // `zapTo`. Say so rather than reopening the Dart engine behind the
-        // Activity, which would put two engines on one stream.
+      if (entry != null) {
+        await _invokeNativeZapTo(stream, entry);
+      } else if (Platform.isAndroid) {
+        // A film/episode step: no channel fields, but `applyZap` is generic
+        // enough and the Activity keeps playing the new locator in place.
+        await _invokeNativeReload(stream, title);
+      } else {
+        // iOS's presented controller has no generic reload; reopening the Dart
+        // engine behind it would put two engines on one stream.
         _logPlayback('warn vod step on a separate native engine is not wired');
         return;
       }
-      await _invokeNativeZapTo(stream, entry);
     } else if (_linuxNativeSession != null) {
       final session = _linuxNativeSession!;
       await _applyLinuxLiveStreamLavfOption(session, stream.url);
@@ -2088,6 +2158,22 @@ class _PlayerScreenState extends State<PlayerScreen>
             // docs/ios.md "Known parity gaps" — every AVPlayer open is a fresh
             // resolve, and an `IosSharedEngine` analogue is a deferred idea).
             if (Platform.isAndroid) 'adoptShared': widget.adoptNativePreview,
+            // Whether the native overlay should draw the previous/next pair:
+            // live zapping and VOD stepping both, decided by the route.
+            'stepEnabled': _canStepEntry,
+            // Android starts a fresh audio session per Activity; hand it the
+            // persisted level/mute or every channel change would come back
+            // loud. 0..1, matching the native player's own volume scale.
+            if (Platform.isAndroid) ...{
+              'volume': (playbackAudioSession.applied / 100).clamp(0.0, 1.0),
+              'muted': playbackAudioSession.muted,
+              // Audible level kept separately so unmuting restores it instead
+              // of 100% after a muted session.
+              'audibleVolume': (playbackAudioSession.volume / 100).clamp(
+                0.1,
+                1.0,
+              ),
+            },
             'resumeMs': widget.playback?.resumeFrom?.inMilliseconds ?? 0,
             'canFavorite': _canFavorite,
             'isFavorite': _favorite,
@@ -2115,6 +2201,14 @@ class _PlayerScreenState extends State<PlayerScreen>
             'showClock': showPlayerClock.value,
             'showPlaybackTimes': showPlaybackTimes.value,
             'seekStepSeconds': seekStepSeconds.value,
+            // Which optional controls to draw, as the comma list of wire names
+            // `PlayerControl.storageName` defines. Read once at launch, like the
+            // two chrome preferences above: Settings is unreachable while a
+            // player route is open, so a live listener would never fire.
+            'hiddenControls': playerControlsPrefs.value.wireValue,
+            // What a double tap on the picture does (Settings → "Double tap on
+            // the picture"). Same fail-open shape: absent reads as the default.
+            'doubleTap': doubleTapAction.value.storageValue,
             if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
               'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),
@@ -2135,6 +2229,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             ? 'native hdr player launched platform=$platformName'
             : 'native hdr player unavailable platform=$platformName',
       );
+      if (opened == true) {
+        // The native overlay now exists; seed its overflow-menu checkmarks.
+        unawaited(_pushZapModes());
+      }
       return opened == true;
     } on TimeoutException {
       _logPlayback('native hdr player timed out platform=$platformName');
@@ -2199,6 +2297,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     // the Dart state (and block the route pop) with a stale surface handle.
     _windowsNativeSurface = null;
     _isNativeFullscreen = false;
+    _embeddedWindowFullscreen = false;
+    _miniReturnFullscreen = false;
     _nativeControlsVisible = true;
   }
 
@@ -2210,7 +2310,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         {'fullscreen': fullscreen, 'pinControls': !_player.state.playing},
       );
       if (mounted) {
-        setState(() => _isNativeFullscreen = changed ?? fullscreen);
+        setState(() {
+          _isNativeFullscreen = changed ?? fullscreen;
+          // The native surface owns the window now; the embedded flag must not
+          // keep claiming fullscreen (see [_windowFullscreen]).
+          _embeddedWindowFullscreen = false;
+        });
       }
       await _syncNativeControlState();
       _showNativeControls(scheduleHide: _player.state.playing);
@@ -2247,6 +2352,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   ///
   /// Tracked in [_embeddedWindowFullscreen] because those two helpers are
   /// one-way calls with no state of their own.
+  /// Whether the window is fullscreen on **either** Windows path.
+  ///
+  /// Two flags exist because the two surfaces enter fullscreen by different
+  /// means: the native HWND through the runner's `setFullscreen` (which replies
+  /// authoritatively), the embedded surface through `EnterNativeFullscreen`
+  /// (a pure window call that never touches the native state). The overlay's
+  /// fullscreen button draws "leave" from this, so reading only one of them left
+  /// the "enter" glyph up while the window was already fullscreen.
+  bool get _windowFullscreen => _isNativeFullscreen || _embeddedWindowFullscreen;
+
   Future<void> _toggleFullscreenForCurrentSurface() async {
     // The native surface owns the GDI control overlay, so it alone may go
     // through `_toggleNativeFullscreen`.
@@ -2262,19 +2377,29 @@ class _PlayerScreenState extends State<PlayerScreen>
       // It then outlived the player route and sat over the channel list
       // eating input. `Utils.EnterNativeFullscreen` is the window half on its
       // own, with no controls and no route push.
-      await _setEmbeddedWindowFullscreen(!_embeddedWindowFullscreen);
+      //
+      // The *direction* comes from [_windowFullscreen], never from
+      // [_embeddedWindowFullscreen]: PiP restores fullscreen through the
+      // **native** path, so the embedded flag still reads false while the window
+      // is already fullscreen — asking to "enter" again did nothing and the
+      // button kept drawing the "leave" glyph ("exiting fullscreen leaves the
+      // second icon on screen").
+      await _setEmbeddedWindowFullscreen(!_windowFullscreen);
       return;
     }
     _embeddedSurfaceKey.currentState?.togglePlayerFullscreen();
   }
 
   Future<void> _setEmbeddedWindowFullscreen(bool fullscreen) async {
-    if (_embeddedWindowFullscreen == fullscreen) return;
+    if (_windowFullscreen == fullscreen) return;
     try {
       await (fullscreen
           ? defaultEnterNativeFullscreen()
           : defaultExitNativeFullscreen());
+      // The window is now this surface's to describe: the native flag cannot
+      // stay set, or [_windowFullscreen] would keep claiming fullscreen.
       _embeddedWindowFullscreen = fullscreen;
+      _isNativeFullscreen = false;
       if (mounted) setState(() {});
     } catch (error) {
       _logPlayback('window fullscreen failed: $error');
@@ -2286,21 +2411,92 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _embeddedWindowFullscreen = false;
 
   // Windows always-on-top mini-player: a compact frameless topmost window,
-  // draggable by its video area. Toggled with the M key; the native side owns
-  // the geometry and restores the previous placement on exit.
+  // draggable by its video area. Toggled with P (and M on the native surface);
+  // the native side owns the geometry and restores the previous placement on
+  // exit. The native HWND surface draws a GDI mini bar; the embedded surface
+  // draws the compact bar in Flutter instead (see PlayerVideoSurface).
   bool _isNativeMiniPlayer = false;
 
-  Future<void> _toggleNativeMiniPlayer() async {
-    if (!_usesWindowsNativeSurface) return;
+  /// Whether the mini-player was entered from fullscreen — i.e. whether its
+  /// restore button returns to fullscreen rather than to a normal window.
+  bool _miniReturnFullscreen = false;
+
+  /// The PiP frame the user left last time, or null on first use. Stored by the
+  /// runner's `miniPlacementChanged` in the same keychain the window placement
+  /// uses; `x,y,width,height` in physical frame pixels.
+  Future<Map<String, int>?> _savedMiniPlacement() async {
     try {
+      final raw = await const AppSettingsStore().miniPlayerPlacement();
+      if (raw == null) return null;
+      final parts = raw.split(',');
+      if (parts.length != 4) return null;
+      final values = parts.map(int.tryParse).toList();
+      if (values.any((v) => v == null)) return null;
+      final width = values[2]!;
+      final height = values[3]!;
+      if (width < 160 || height < 90) return null;
+      return {
+        'x': values[0]!,
+        'y': values[1]!,
+        'width': width,
+        'height': height,
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _recordMiniPlacement(Object? args) async {
+    if (args is! Map) return;
+    final x = args['x'];
+    final y = args['y'];
+    final width = args['width'];
+    final height = args['height'];
+    if (x is! int || y is! int || width is! int || height is! int) return;
+    if (width < 160 || height < 90) return;
+    try {
+      await const AppSettingsStore().setMiniPlayerPlacement(
+        '$x,$y,$width,$height',
+      );
+    } catch (error) {
+      _logPlayback('mini placement store failed: $error');
+    }
+  }
+
+  Future<void> _toggleNativeMiniPlayer() async {
+    // Windows only, but both surfaces: the window restyle is the runner's, and
+    // the embedded surface draws its own compact bar in Flutter while the
+    // native HWND surface gets the GDI one.
+    if (!Platform.isWindows) return;
+    try {
+      final entering = !_isNativeMiniPlayer;
+      final placement = entering ? await _savedMiniPlacement() : null;
+      if (entering) {
+        // Remember where this PiP returns to, so its restore button can draw
+        // the destination rather than a generic (and misleading) arrow.
+        _miniReturnFullscreen = _windowFullscreen;
+      }
       final mini = await _nativeHdrPlayer.invokeMethod<bool>('setMiniPlayer', {
-        'mini': !_isNativeMiniPlayer,
+        'mini': entering,
+        ...?placement,
       });
-      _isNativeMiniPlayer = mini ?? !_isNativeMiniPlayer;
+      if (!mounted) return;
+      setState(() => _isNativeMiniPlayer = mini ?? !_isNativeMiniPlayer);
       _logPlayback('native mini-player=$_isNativeMiniPlayer');
       await _syncNativeControlState();
     } catch (error) {
       _logPlayback('native mini-player failed: $error');
+    }
+  }
+
+  /// The embedded PiP bar's Close: native close path, so the close-to-tray
+  /// preference still owns whether this hides or quits.
+  Future<void> _closeWindow() async {
+    if (!Platform.isWindows) return;
+    try {
+      await _nativeHdrPlayer.invokeMethod<void>('closeWindow');
+    } catch (error) {
+      _logPlayback('close window failed: ${_redactPlayback('$error')}');
     }
   }
 
@@ -2315,15 +2511,51 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else if (call.method == 'nativeControl') {
       final command = call.arguments?.toString();
       if (command != null) await _handleNativeControlCommand(command);
+    } else if (call.method == 'miniPlayerChanged') {
+      // Authoritative mini-player state: entering fullscreen (F) leaves the
+      // mini window natively, without going through the toggle below.
+      final mini = call.arguments == true;
+      if (mini != _isNativeMiniPlayer) {
+        setState(() => _isNativeMiniPlayer = mini);
+      }
+    } else if (call.method == 'fullscreenChanged') {
+      // Same authority for fullscreen: entering PiP leaves fullscreen natively,
+      // and without this Dart kept believing it was still fullscreen — the GDI
+      // bar then drew "leave fullscreen" on a windowed player and the next
+      // press asked for a direction that was already taken.
+      final full = call.arguments == true;
+      if (full != _isNativeFullscreen) {
+        setState(() {
+          _isNativeFullscreen = full;
+          _embeddedWindowFullscreen = false;
+        });
+      }
+    } else if (call.method == 'miniPlacementChanged') {
+      // PiP frame after entry / each drag / each resize: persisted so the next
+      // visit reopens exactly there, including after an app quit from PiP.
+      await _recordMiniPlacement(call.arguments);
     } else if (call.method == 'nativeZap') {
       // The inbound half of the zap wire contract. The native surface names a
-      // *command*, never a channel — it holds no list and no cursor (see
+      // *command*, never a channel - it holds no list and no cursor (see
       // `live_zap_controller.dart`), so an unknown or malformed string is
       // simply dropped rather than guessed at.
       final args = call.arguments;
       final raw = args is Map ? args['command']?.toString() : null;
       final command = parseZapCommand(raw);
       if (command != null) _handleZapCommand(command);
+    } else if (call.method == 'nativeAspect') {
+      // Android's overlay cycles the aspect itself and used to report it only
+      // in RESULT_ASPECT on exit. Every zap payload carries the label from
+      // `_aspectModeIndex`, so a choice made in the player was reverted by the
+      // next channel change. Adopt the native label here and persist it, so
+      // both halves agree for the rest of the session.
+      final args = call.arguments;
+      final label = args is Map ? args['label']?.toString() : null;
+      final index = aspectModeIndexOf(label);
+      if (index >= 0 && index != _aspectModeIndex) {
+        _aspectModeIndex = index;
+        _persistAspectLabel(kAspectModes[index].label);
+      }
     } else if (call.method == 'resolveAgain') {
       // Inbound re-resolve for a native watchdog that owns playback out of
       // process (iOS's presented controller): Stalker `create_link` URLs carry
@@ -2386,6 +2618,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (favorite is bool && favorite != _favorite) {
           _favorite = favorite;
           await _writeFavorite(favorite);
+        }
+        // The level/mute the user left the native player in. Android reports
+        // the audible level and the mute flag separately, so a muted session
+        // keeps the level unmuting should restore.
+        final nativeVolume = args['volume'];
+        if (nativeVolume is num) {
+          final muted = args['muted'];
+          playbackAudioSession.recordReported(
+            level: nativeVolume.toDouble() * 100,
+            muted: muted is bool ? muted : nativeVolume <= 0,
+          );
         }
         // The aspect the user left the native overlay in. Persisted the same
         // way a change made on this side is, so the two surfaces cannot end up
@@ -3317,6 +3560,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     _liveSynced = true; // a reconnect reopens at the live edge
     if (!_reconnecting) {
       _reconnecting = true;
+      // The zap mask stays up until the new stream produces a frame; a channel
+      // that never does would keep the whole playback surface black - and,
+      // with it, every control, including the mini bar. Reconnect means "no
+      // frame yet", not "hide the chrome": drop the mask so the pinned controls
+      // (and Back) are reachable.
+      if (_zapBlackout) {
+        _zapBlackoutTimer?.cancel();
+        _zapBlackoutTimer = null;
+        setState(() => _zapBlackout = false);
+      }
       _onReconnectingChanged();
     }
     _logPlayback('live reconnect attempt=$_reconnectAttempt force=$force');
@@ -3503,7 +3756,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   Map<String, Object?> _presentationControlState() => {
     'title': _title,
     if (_sourceName != null) 'sourceName': _sourceName,
-    if (_vodDescription != null) 'description': _vodDescription,
+    // Always sent, empty included: the Windows GDI top bar keeps whatever this
+    // key last said, so a live route that *omits* it can leave the previous
+    // film's synopsis under a live channel's title. Empty is the explicit
+    // "nothing to draw" (the block is gated on `!is_live` too).
+    'description': _vodDescription ?? '',
     ..._epgPayload(),
     'isLive': _isLive,
     'liveSynced': _liveSynced,
@@ -3999,6 +4256,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       canFavorite: _canFavorite,
       favorite: _favorite,
       liveSynced: _liveSynced,
+      fullscreen: _windowFullscreen,
+      miniReturnFullscreen: _miniReturnFullscreen,
       zap: _zapBannerState(),
       quickList: _quickListState(),
       zapEnabled: _zapEnabled,
@@ -4012,6 +4271,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       onPlayPause: _togglePlayback,
       onGoLive: _goToLive,
       onCycleAspect: _cycleNativeAspect,
+      // The compact bar is Flutter-drawn only where the video is Flutter too;
+      // the native surface keeps its GDI bar (and this subtree isn't mounted
+      // there).
+      miniPlayer: _isNativeMiniPlayer && !_usesWindowsNativeSurface,
+      onToggleMiniPlayer: Platform.isWindows
+          ? () => unawaited(_toggleNativeMiniPlayer())
+          : null,
+      onCloseApp: Platform.isWindows ? () => unawaited(_closeWindow()) : null,
+      pinnedChrome: _reconnecting,
     );
   }
 
@@ -4360,8 +4628,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (playback == null || _isLive) return;
     // Android's Activity and iOS's presented controller both own the position
     // and report it back through `nativeClosed`; this `_player` is idle, so
-    // reading its (zero) position here would overwrite the real one.
+    // reading its (zero) position here would overwrite the real one. Android
+    // can still be *asked* (see [_persistNativeAndroidPosition]) — which is what
+    // a VOD step needs, because the outgoing title never sees `nativeClosed`.
     if ((Platform.isAndroid || Platform.isIOS) && _nativePlaybackLaunched) {
+      if (Platform.isAndroid) await _persistNativeAndroidPosition(playback);
       return;
     }
     // A VOD step moves the route onto a sibling the launch context never named,
@@ -4397,6 +4668,47 @@ class _PlayerScreenState extends State<PlayerScreen>
       position: position,
       duration: duration > Duration.zero ? duration : position,
       completed: completed,
+    );
+  }
+
+  /// The position an **Android** session is at, read from the Activity.
+  ///
+  /// The Activity owns playback there and reports its position only on exit
+  /// (`nativeClosed`), so anything that swaps the stream *inside* the session —
+  /// a VOD Previous/Next step — used to lose the outgoing title's resume point
+  /// entirely ("the position is not remembered when I press Next"). This asks
+  /// the Activity instead: its `uiState.positionMs` is the same value the
+  /// scrubber draws, updated by the progress ticker.
+  ///
+  /// Silent about failure on purpose: a missing handler (older build) or an
+  /// Activity that is already finishing means "nothing to save", not an error
+  /// the user should see mid-step.
+  Future<void> _persistNativeAndroidPosition(PlaybackContext playback) async {
+    Map<String, Object?>? map;
+    try {
+      map = await _nativeHdrPlayer.invokeMapMethod<String, Object?>(
+        'playerPosition',
+      );
+    } on MissingPluginException {
+      return;
+    } catch (error) {
+      _logPlayback('native position read failed: ${_redactPlayback('$error')}');
+      return;
+    }
+    final positionMs = (map?['positionMs'] as num?)?.toInt() ?? 0;
+    final durationMs = (map?['durationMs'] as num?)?.toInt() ?? 0;
+    if (durationMs <= 0) return;
+    // The cursor, not the launch item: a step has already moved it.
+    final itemId = _currentVodItem?.id ?? playback.itemId;
+    final kind = _currentVodItem?.kind ?? playback.kind;
+    final duration = Duration(milliseconds: durationMs);
+    _recordLearnedMediaDuration(duration);
+    await playback.db.savePlaybackPosition(
+      playback.sourceId,
+      kind,
+      itemId,
+      position: Duration(milliseconds: positionMs),
+      duration: duration,
     );
   }
 
@@ -4578,6 +4890,19 @@ class _PlayerScreenState extends State<PlayerScreen>
           // — which owns the entry and the quick-list mode — is their only
           // route. What this surface adds is the *chip* and the confirm keys.
           const SingleActivator(LogicalKeyboardKey.escape): () {
+            // In the mini-player Escape restores the full player instead of
+            // tearing the route down under a window that would stay tiny.
+            if (_isNativeMiniPlayer) {
+              unawaited(_toggleNativeMiniPlayer());
+              return;
+            }
+            // Reconnecting pins the chrome (so the exit is visible); Escape
+            // itself must leave in one press rather than peeling rungs that
+            // the pin immediately re-raises.
+            if (_reconnecting) {
+              _back();
+              return;
+            }
             if (_handleZapInput(const ZapCommand(ZapCommandKind.back))) return;
             // Deliberately **no** `_handlePlaybackInput()` here, unlike every
             // other binding: Escape is the peel key, and revealing the chrome
@@ -4702,6 +5027,15 @@ class _PlayerScreenState extends State<PlayerScreen>
               return;
             }
             _embeddedSurfaceKey.currentState?.toggleMute();
+          },
+          // `P`: picture-in-picture on every Windows surface. `M` stays mute
+          // on the embedded one, where it always meant that; the native
+          // surface also answers P in the runner's key ring.
+          const SingleActivator(LogicalKeyboardKey.keyP): () {
+            _handlePlaybackInput();
+            if (Platform.isWindows) {
+              unawaited(_toggleNativeMiniPlayer());
+            }
           },
           // Ctrl+R: random zapping — a zap picks a random channel instead of
           // the next one. Toggled in-session and persisted through the

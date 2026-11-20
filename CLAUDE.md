@@ -345,10 +345,16 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
    height. The grid **listens** (`ListenableBuilder` on the notifier) rather than reading once: the
    tile is toggled from the Settings route pushed *over* the media tab, so nothing there rebuilds on
    its own. The Continue Watching rail stays 16:9 in both modes (its thumbnails are video frames,
-   already landscape) and the narrow list thumb stays 2:3 (sized to the text beside it) — neither is
-   a card. Pinned by `test/vod_card_orientation_test.dart`, the shape group in
+   already landscape). The narrow **list** thumbnail — what a phone shows instead of the grid,
+   since the grid needs a >=600 x 500 dp window — follows the preference too, and **only in width**:
+   its height is fixed at 84 (the paging math counts rows by `84 + 24`), so Landscape widens it
+   to a 16:9 band rather than shrinking it to 33 px beside the text. Pinned by
+   `test/vod_card_orientation_test.dart`, the shape group in
    `test/media_grid_metrics_test.dart`, and the both-shapes sweep in `test/layout_overflow_test.dart`;
-   detail: docs/player.md "VOD/series card shape". Dates come from `MediaItem.year`, a
+   detail: docs/player.md "VOD/series card shape". **The pages readout is only where pages are
+   asked for**: `Showing 1 234 movies · pages 1/34` names the machinery behind the "Next page" card,
+   which TV/desktop users press; a touch surface infinite-scrolls instead, so that suffix is dropped
+   there. Dates come from `MediaItem.year`, a
    provider-supplied **`String?`** holding ISO `2026-09-29`, dotted/slashed `29.09.2026`, a bare
    `2026`, or something unparseable — so `releaseSortKey` normalises shape into one integer
    (`yyyyMMdd`) and **an unparseable row sorts last in both directions**, never as year 1: "unknown"
@@ -469,7 +475,16 @@ dragging a name sort or reading as ancient is worse than admitting the provider 
   `logImageFailure` (`image` diagnostics scope, redacted, throttled): call sites deliberately render
   the *same* widget for `placeholder` and `errorWidget`, so a screen of fallbacks is otherwise
   indistinguishable from one still loading — which is exactly why a real "no artwork until restart"
-  report left nothing in the exported log.
+  report left nothing in the exported log. **Every `CachedNetworkImage` passes
+  `cacheManager: artworkCacheManager`** (`lib/widgets/artwork_cache.dart`): it is the default cache
+  key with a `FileService` behind it that fetches artwork **direct first and through the configured
+  proxy only if that fails** (a LAN poster must not be sent through a phone's Wi-Fi proxy, and a
+  filtered CDN must still load), while API traffic follows the proxy setting outright. The proxy
+  itself is `lib/data/proxy_config.dart` (System/Custom/Off, resolved per platform, bypass list
+  honoured); detail: docs/sources.md "The HTTP proxy". **A LAN address is always `DIRECT`** —
+  dotless names, `.local`, `localhost` and the private IPv4/IPv6 ranges never reach the proxy
+  (`ProxyEndpoint.isLocalHost`): a proxy closes a request for `http://transmission/...`, which is
+  exactly the "Connection closed before full header was received" failure the panel reported.
 - **`lib/theme.dart` carries the design tokens, the breakpoints, and the motion helper.**
   **The wide/narrow choice goes through `isWideLayout(size)`, never a bare width comparison** — a
   television is the two-pane layout whatever its logical width says. Logical width is physical
@@ -1232,6 +1247,31 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   overlay cannot disagree, with the hand-rolled English `Sat 8 Aug · 16:02` as the fail-closed
   fallback everywhere else.
   See docs/player.md "Player chrome preferences" and "The clock badge's regional format".
+- **Which optional player buttons exist is a second, larger device-wide preference.** Settings →
+  "Player controls" (`lib/player/player_controls_prefs.dart`) toggles ten of them — previous/next,
+  back/forward 10 s, mute, volume bar, channel list, favorite, subtitles, aspect, PiP, stream info —
+  stored as a comma list of **hidden** wire names (`PlayerControl.storageName`), so absence means
+  "everything shown" and an untouched install is unchanged. Unknown names are dropped on decode
+  (forward compatibility), and play/pause is deliberately not a toggle: it is the one control whose
+  absence leaves nothing to press and holds the overlay's initial focus. The shared Flutter overlay
+  reads the notifier at build time; Android receives one `hiddenControls` string on the open Intent
+  (`EXTRA_HIDDEN_CONTROLS`) into `PlayerUiState.shows…` flags that gate `PlayerControls.kt`. Pinned by
+  `test/player_controls_prefs_test.dart`; detail: docs/player.md "Player controls: which buttons the
+  chrome draws".
+- **A double tap on the picture acts on the half it lands in**: left = back/previous, right =
+  forward/next. Only the action is a device-wide preference (Settings → "Double tap on the picture",
+  `lib/player/double_tap_action.dart`): **Previous / Next** (default — the only one that does
+  something on live as well as on titles) or **Seek** (titles only, and it moves by the **VOD seek
+  step**, the same amount the ±`N` buttons move: `EXTRA_SEEK_STEP` →
+  `PlayerUiState.seekStepSeconds`). It reuses `zap:up`/
+  `zap:down`, so VOD steps an entry and live steps a channel; the Android Activity reads
+  `EXTRA_DOUBLE_TAP` and the shared Flutter overlay answers touch through `onDoubleTapDown` +
+  `onDoubleTap`. **Windows keeps its old double click — toggle fullscreen** (the Flutter overlay
+  passes a pointer double tap to `onToggleFullscreen`, and the GDI overlay has no double-click
+  action at all): the desktop gesture was in use, and the setting is a touch gesture. Watching the
+  half means the single tap now waits out the double-tap window before toggling the chrome — the
+  standard cost of the gesture. Pinned by `test/double_tap_action_test.dart`; detail: docs/player.md
+  "Double tap on the picture".
 - **The VOD description block lives in the Windows GDI top bar, under the title** (docs/player.md
   "The VOD description block"). Shown only for a non-live route with a synopsis, only while the
   chrome is up. `NativeControlState.description` rides every `setControlState`; `ShowsDescription()`

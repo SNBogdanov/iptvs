@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:media_kit/media_kit.dart';
+
+import '../data/app_settings_store.dart';
 
 /// Writes a 0–100 volume to whatever is actually making sound — a media_kit
 /// [Player], or the `EmbeddedControls` seam a surface drives.
@@ -43,6 +47,48 @@ typedef VolumeWriter = Future<void> Function(double volume);
 /// `player_screen.dart` and `player_overlay.dart` need it, and the latter is
 /// imported by the former — declaring it there would be a cycle.
 class PlaybackAudioSession {
+  PlaybackAudioSession({AppSettingsStore? store})
+    : _store = store ?? const AppSettingsStore();
+
+  final AppSettingsStore _store;
+  Timer? _persistTimer;
+
+  /// Persistence starts only after [load] has read the keychain. A gesture that
+  /// raced boot would otherwise write the in-memory defaults over the stored
+  /// values before they were read.
+  bool _persistEnabled = false;
+
+  /// Restores the device-wide audio state. Called once from `main`.
+  ///
+  /// A keychain failure keeps the in-memory defaults (100 / unmuted), which is
+  /// exactly what an untouched install should sound like.
+  Future<void> load() async {
+    try {
+      final rawVolume = await _store.playbackVolume();
+      final rawMuted = await _store.playbackMuted();
+      final parsed = double.tryParse(rawVolume ?? '');
+      if (parsed != null) {
+        volume = parsed.clamp(0.0, 100.0);
+      }
+      muted = rawMuted == 'true';
+    } catch (_) {
+      // Keep the defaults.
+    }
+    _persistEnabled = true;
+  }
+
+  /// Debounced write: dragging a slider emits many levels, and the keychain is
+  /// not free. The last value of a gesture is the one that matters.
+  void _persistSoon() {
+    if (!_persistEnabled) return;
+    _persistTimer?.cancel();
+    _persistTimer = Timer(const Duration(milliseconds: 250), () {
+      // Fire-and-forget: a failing keychain must not break playback.
+      unawaited(_store.setPlaybackVolume(volume.toStringAsFixed(1)));
+      unawaited(_store.setPlaybackMuted(muted ? 'true' : 'false'));
+    });
+  }
+
   /// The user's audible volume, 0–100. 0 is only reached through [muted].
   double volume = 100;
 
@@ -70,6 +116,17 @@ class PlaybackAudioSession {
       volume = actual;
       muted = false;
     }
+    _persistSoon();
+  }
+
+  /// A state the **native** player reported when it closed (Android's
+  /// `RESULT_VOLUME`/`RESULT_MUTED`). Unlike [record], the level is kept even
+  /// while muted: the native player reports the audible level and the mute flag
+  /// separately, so unmuting restores the level the user had rather than 100.
+  void recordReported({required double level, required bool muted}) {
+    volume = level.clamp(0.0, 100.0);
+    this.muted = muted;
+    _persistSoon();
   }
 
   /// The gesture a mute button, the `M` key and a native overlay's mute control
@@ -88,6 +145,9 @@ class PlaybackAudioSession {
   Future<bool> toggleMute(VolumeWriter write) async {
     muted = !muted;
     await applyTo(write);
+    // A mute gesture is a user choice like a level change; without this a
+    // muted session came back audible after a restart.
+    _persistSoon();
     return muted;
   }
 

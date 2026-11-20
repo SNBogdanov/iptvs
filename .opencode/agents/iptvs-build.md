@@ -1,16 +1,31 @@
 ---
 description: "Сборка iptvs (Flutter: Windows/Android/Linux): pub get, analyze, test и release-артефакт. Use when building the iptvs app."
 mode: subagent
-permission:
-  edit: deny
-  bash:
-    "*": allow
-    "*git push*": deny
-    "*git commit*": deny
-  task: { "*": deny }
-  todowrite: deny
-  webfetch: deny
-  websearch: deny
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: shell
+    resource: "*"
+    effect: allow
+  - action: shell
+    resource: "*git push*"
+    effect: deny
+  - action: shell
+    resource: "*git commit*"
+    effect: deny
+  - action: subagent
+    resource: "*"
+    effect: deny
+  - action: todowrite
+    resource: "*"
+    effect: deny
+  - action: webfetch
+    resource: "*"
+    effect: deny
+  - action: websearch
+    resource: "*"
+    effect: deny
 ---
 
 Ты — сборщик приложения iptvs (`C:\Users\SERGEYBO\Documents\Projects\iptvs`).

@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
@@ -228,6 +229,7 @@ private fun speedOptionLabel(value: Float): String =
 fun QuickListPanel(
     state: PlayerUiState,
     onActivateRow: (QuickListRow) -> Unit,
+    onClose: (() -> Unit)? = null,
 ) {
     val list = state.quickList
     val listState = rememberLazyListState()
@@ -261,7 +263,7 @@ fun QuickListPanel(
                 .clip(RoundedCornerShape(PlayerDimens.MenuCorner))
                 .background(PlayerColors.Panel),
         ) {
-            QuickListHeader(list)
+            QuickListHeader(list, onClose)
             when {
                 list.rows.isEmpty() && list.loading -> Box(
                     Modifier.fillMaxWidth().weight(1f),
@@ -307,7 +309,7 @@ fun QuickListPanel(
 }
 
 @Composable
-private fun QuickListHeader(list: QuickListState) {
+private fun QuickListHeader(list: QuickListState, onClose: (() -> Unit)? = null) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -342,6 +344,19 @@ private fun QuickListHeader(list: QuickListState) {
                 fontFamily = InterFontFamily,
                 fontSize = 12.sp,
                 maxLines = 1,
+            )
+        }
+        // A touch surface has no Back key to peel this panel off, and the
+        // system Back *gesture* means swiping the OS bar into view first —
+        // reported as "there is no back button, I have to call up the system
+        // menu". Null on a TV: there the command row would be a new focus stop
+        // for a panel that Back already closes.
+        if (onClose != null) {
+            Spacer(Modifier.width(4.dp))
+            IconControlButton(
+                icon = Icons.Filled.Close,
+                contentDescription = "Close channel list",
+                onClick = onClose,
             )
         }
     }

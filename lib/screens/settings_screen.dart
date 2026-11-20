@@ -4,9 +4,12 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/proxy_config.dart';
 import '../data/vod_card_orientation.dart';
+import '../player/double_tap_action.dart';
 import '../player/next_video_policy.dart';
 import '../player/player_chrome_prefs.dart';
+import '../player/player_controls_prefs.dart';
 import '../player/seek_step.dart';
 import '../player/tray.dart';
 import '../player/window_placement.dart';
@@ -37,8 +40,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool? _showChannelName;
   VodCardOrientation? _cards;
   bool? _autoPlayNext;
+  bool? _movieQuickPlay;
   NextVideoPlayedBehavior? _nextBehavior;
   int? _seekStep;
+  ProxyConfig? _proxy;
+  DoubleTapAction? _doubleTap;
 
   @override
   void initState() {
@@ -58,8 +64,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await widget.store.rawVodCardOrientation(),
     );
     final autoPlayNext = await widget.store.autoPlayNextVideo();
+    final movieQuickPlay = await widget.store.movieQuickPlay();
     final nextBehavior = await widget.store.nextVideoPlayedBehavior();
     final seekStep = await widget.store.seekStepSeconds();
+    final proxyRaw = await widget.store.rawProxyConfig();
+    final doubleTap = DoubleTapAction.parse(
+      await widget.store.rawDoubleTapAction(),
+    );
     if (mounted) {
       setState(() {
         _closeToTray = closeToTray;
@@ -71,8 +82,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _showChannelName = showChannelName;
         _cards = cards;
         _autoPlayNext = autoPlayNext;
+        _movieQuickPlay = movieQuickPlay;
         _nextBehavior = nextBehavior;
         _seekStep = seekStep;
+        _doubleTap = doubleTap;
+        _proxy = ProxyConfig(
+          mode: ProxyMode.parse(proxyRaw?['mode']),
+          host: proxyRaw?['host'] ?? '',
+          port: int.tryParse(proxyRaw?['port'] ?? '') ?? 0,
+        );
       });
     }
   }
@@ -82,6 +100,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _closeToTray = next);
     await widget.store.setCloseToTray(next);
     await applyCloseToTray(next);
+  }
+
+  Future<void> _toggleMovieQuickPlay() async {
+    final next = !(_movieQuickPlay ?? false);
+    setState(() => _movieQuickPlay = next);
+    await widget.store.setMovieQuickPlay(next);
   }
 
   Future<void> _toggleRandomZapping() async {
@@ -119,9 +143,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// stop for a remote to reach, and the tile's trailing label already prints
   /// which one is current.
   Future<void> _cycleCardOrientation() async {
-    final next = otherVodCardOrientation(
-      _cards ?? VodCardOrientation.portrait,
-    );
+    final next = otherVodCardOrientation(_cards ?? VodCardOrientation.portrait);
     setState(() => _cards = next);
     // Publishes through the notifier the grid listens to, so the cards behind
     // this route redraw straight away instead of on some later rebuild.
@@ -157,6 +179,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final next = !(_autoPlayNext ?? false);
     setState(() => _autoPlayNext = next);
     await widget.store.setAutoPlayNextVideo(next);
+  }
+
+  /// Cycles System → Custom → Off. A cycle rather than a picker for the same
+  /// reason as the other three-way tiles: one focus stop, trailing label prints
+  /// the current choice.
+  Future<void> _cycleProxyMode() async {
+    final current = _proxy ?? const ProxyConfig();
+    final next = current.copyWith(mode: current.mode.next);
+    setState(() => _proxy = next);
+    await setProxyConfig(next, store: widget.store);
+  }
+
+  /// Opens the host/port editor. Saving a usable address also switches the mode
+  /// to Custom: typing a server and leaving the mode on System would look like
+  /// the address was ignored, which is exactly the confusion this setting
+  /// exists to avoid.
+  Future<void> _editProxyServer() async {
+    final current = _proxy ?? const ProxyConfig();
+    final edited = await showDialog<ProxyConfig>(
+      context: context,
+      builder: (context) => _ProxyServerDialog(initial: current),
+    );
+    if (edited == null) return;
+    final value = edited.host.trim().isEmpty || edited.port <= 0
+        ? current.copyWith(host: edited.host, port: edited.port)
+        : edited.copyWith(mode: ProxyMode.custom);
+    setState(() => _proxy = value);
+    await setProxyConfig(value, store: widget.store);
   }
 
   /// Two policies, so this cycles rather than opening a picker — the same
@@ -233,10 +283,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
               title: 'VOD and series card shape',
               subtitle:
                   'Portrait shows whole 2:3 posters; landscape crops them to a '
-                  '16:9 band and fits far more titles on screen. The Continue '
-                  'watching thumbnails stay landscape either way.',
+                  '16:9 band and fits far more titles on screen. Applies to the '
+                  'poster grid and to the list row artwork a phone shows '
+                  'instead. The Continue watching thumbnails stay landscape '
+                  'either way.',
               trailing: (_cards ?? VodCardOrientation.portrait).label,
               onTap: _cycleCardOrientation,
+            ),
+            _SettingTile(
+              icon: Icons.play_circle_outline,
+              title: 'Play movies immediately',
+              subtitle:
+                  'Selecting a movie starts playback instead of opening its '
+                  'details sheet with a Play button. A saved resume point is '
+                  'still used. Series keep their details sheet.',
+              trailing: (_movieQuickPlay ?? false) ? 'On' : 'Off',
+              onTap: _toggleMovieQuickPlay,
             ),
             _SettingTile(
               icon: Icons.skip_next_outlined,
@@ -255,17 +317,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'What auto-play does with a title you have seen before: '
                   'resume a partly-watched one and skip a finished one, or '
                   'always start it over. Applies only while auto-play is on.',
-              trailing: (_nextBehavior ?? NextVideoPlayedBehavior.resumeOrSkip)
-                  .label,
+              trailing:
+                  (_nextBehavior ?? NextVideoPlayedBehavior.resumeOrSkip).label,
               onTap: _cycleNextBehavior,
             ),
             _SettingTile(
               icon: Icons.schedule_outlined,
               title: 'Clock in the player',
               subtitle:
-                  'Show the wall clock in the player\'s top bar, on every '
-                  'surface. Hides the badge while the controls are up; nothing '
-                  'draws a clock over the picture itself.',
+                  'Show the wall clock: in the player\'s top bar while the '
+                  'controls are up, and top-right over the picture once they '
+                  'fade, on every surface.',
               trailing: (_showClock ?? true) ? 'On' : 'Off',
               onTap: _toggleShowClock,
             ),
@@ -273,9 +335,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               icon: Icons.timelapse_outlined,
               title: 'Playback time in the player',
               subtitle:
-                  'Show how far into a film or episode you are, beside the '
-                  'progress bar. Live channels have no progress bar, so this '
-                  'changes nothing there.',
+                  'Show how far into a film or episode you are: in the control '
+                  'row beside the progress bar, and bottom-right over the '
+                  'picture once the controls fade. Live channels have no '
+                  'progress bar, so this changes nothing there.',
               trailing: (_showPlaybackTimes ?? true) ? 'On' : 'Off',
               onTap: _toggleShowPlaybackTimes,
             ),
@@ -299,9 +362,173 @@ class _SettingsScreenState extends State<SettingsScreen> {
               trailing: (_showChannelName ?? true) ? 'On' : 'Off',
               onTap: _toggleShowChannelName,
             ),
+            _SettingTile(
+              icon: Icons.vpn_lock_outlined,
+              title: 'Proxy',
+              subtitle:
+                  'System follows this device\'s own proxy (the Wi-Fi network on '
+                  'a phone, Internet options on Windows). Custom uses the server '
+                  'below, Off connects directly. Artwork always tries a direct '
+                  'connection first and only falls back to this proxy.',
+              trailing: (_proxy ?? const ProxyConfig()).mode.label,
+              onTap: _cycleProxyMode,
+            ),
+            _SettingTile(
+              icon: Icons.dns_outlined,
+              title: 'Proxy server',
+              subtitle:
+                  'Host and port for Custom mode, for example 192.168.1.4 and '
+                  '8888. Saving an address also switches the mode above to '
+                  'Custom. The bypass list stays whatever the system proxy '
+                  'declares.',
+              trailing: _proxyServerLabel(),
+              onTap: _editProxyServer,
+            ),
+            _SettingTile(
+              icon: Icons.tune,
+              title: 'Player controls',
+              subtitle:
+                  'Choose which buttons the player shows over the picture. '
+                  'Play/pause always stays.',
+              trailing: playerControlsPrefs.value.hidden.isEmpty
+                  ? 'All'
+                  : '${PlayerControl.values.length - playerControlsPrefs.value.hidden.length}'
+                        ' of ${PlayerControl.values.length}',
+              onTap: _openPlayerControls,
+            ),
+            _SettingTile(
+              icon: Icons.touch_app_outlined,
+              title: 'Double tap on the picture',
+              subtitle:
+                  'Double tap the left half for back / previous, the right half '
+                  'for forward / next. **Live channels always step** — this '
+                  'choice is for films and episodes: Previous/Next steps to the '
+                  'neighbouring title, Seek moves by the VOD seek step below.',
+              trailing:
+                  (_doubleTap ?? DoubleTapAction.previousNext).label,
+              onTap: _cycleDoubleTap,
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Future<void> _cycleDoubleTap() async {
+    final current = _doubleTap ?? DoubleTapAction.previousNext;
+    final next = current.other;
+    setState(() => _doubleTap = next);
+    await setDoubleTapAction(next, store: widget.store);
+  }
+
+  Future<void> _openPlayerControls() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const PlayerControlsScreen()),
+    );
+    // The tile's trailing count reads the notifier directly, so only a rebuild
+    // of this route is needed after the sub-screen pops.
+    if (mounted) setState(() {});
+  }
+
+  String _proxyServerLabel() {
+    final proxy = _proxy ?? const ProxyConfig();
+    if (proxy.host.trim().isEmpty || proxy.port <= 0) return '—';
+    return '${proxy.host.trim()}:${proxy.port}';
+  }
+}
+
+/// Host/port editor for the Custom proxy mode.
+///
+/// Two text fields rather than a single `host:port` string: a phone keyboard is
+/// the common case, and parsing a colon out of typed input is a failure mode
+/// with no upside — the port field can be numeric and clamped there.
+class _ProxyServerDialog extends StatefulWidget {
+  final ProxyConfig initial;
+
+  const _ProxyServerDialog({required this.initial});
+
+  @override
+  State<_ProxyServerDialog> createState() => _ProxyServerDialogState();
+}
+
+class _ProxyServerDialogState extends State<_ProxyServerDialog> {
+  late final TextEditingController _host = TextEditingController(
+    text: widget.initial.host,
+  );
+  late final TextEditingController _port = TextEditingController(
+    text: widget.initial.port > 0 ? '${widget.initial.port}' : '',
+  );
+  String? _error;
+
+  @override
+  void dispose() {
+    _host.dispose();
+    _port.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final host = _host.text.trim();
+    final port = int.tryParse(_port.text.trim());
+    if (host.isEmpty && _port.text.trim().isEmpty) {
+      // Clearing both is how a user removes an address they no longer need;
+      // it is not an error.
+      Navigator.of(context).pop(widget.initial.copyWith(host: '', port: 0));
+      return;
+    }
+    if (host.isEmpty) {
+      setState(() => _error = 'Enter a host name or IP address.');
+      return;
+    }
+    if (port == null || port <= 0 || port > 65535) {
+      setState(() => _error = 'The port must be a number from 1 to 65535.');
+      return;
+    }
+    Navigator.of(context).pop(widget.initial.copyWith(host: host, port: port));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Proxy server'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _host,
+            autofocus: true,
+            keyboardType: TextInputType.url,
+            textInputAction: TextInputAction.next,
+            decoration: const InputDecoration(
+              labelText: 'Host',
+              hintText: '192.168.1.4',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _port,
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _save(),
+            decoration: const InputDecoration(
+              labelText: 'Port',
+              hintText: '8888',
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Text(_error!, style: const TextStyle(color: AppColors.accent)),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _save, child: const Text('Save')),
+      ],
     );
   }
 }
@@ -355,14 +582,130 @@ class _SettingTile extends StatelessWidget {
             Text(
               trailing,
               style: TextStyle(
-                color: trailing == 'On'
-                    ? AppColors.accent
-                    : AppColors.textLo,
+                color: trailing == 'On' ? AppColors.accent : AppColors.textLo,
                 fontWeight: FontWeight.w600,
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Which optional controls the player's chrome draws.
+///
+/// A route of its own rather than ten more rows in Settings: the parent list is
+/// already long, and this is one coherent question ("what does the player look
+/// like") asked because the overlay felt cluttered. Every row is a plain
+/// toggle — the trailing "On"/"Off" is the state and the tap is the only
+/// action, the same one-focus-stop rule the rest of Settings uses.
+class PlayerControlsScreen extends StatelessWidget {
+  const PlayerControlsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Player controls')),
+      body: SafeArea(
+        top: false,
+        child: ListenableBuilder(
+          listenable: playerControlsPrefs,
+          builder: (context, _) {
+            final prefs = playerControlsPrefs.value;
+            Widget tile(PlayerControl control) => _SettingTile(
+              icon: _iconFor(control),
+              title: control.label,
+              subtitle: _subtitleFor(control),
+              trailing: prefs.shows(control) ? 'On' : 'Off',
+              onTap: () => unawaited(
+                setPlayerControlVisible(control, !prefs.shows(control)),
+              ),
+            );
+            return ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              children: [
+                const _GroupLabel('Transport'),
+                for (final control in const [
+                  PlayerControl.previousNext,
+                  PlayerControl.seek10,
+                  PlayerControl.mute,
+                  PlayerControl.volume,
+                ])
+                  tile(control),
+                const _GroupLabel('Buttons'),
+                for (final control in const [
+                  PlayerControl.quickList,
+                  PlayerControl.favorite,
+                  PlayerControl.subtitles,
+                  PlayerControl.aspect,
+                  PlayerControl.pip,
+                  PlayerControl.info,
+                ])
+                  tile(control),
+                const Padding(
+                  padding: EdgeInsets.only(top: 14),
+                  child: Text(
+                    'Play/pause is always shown: it is the one control whose '
+                    'absence would leave nothing to press.',
+                    style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  static IconData _iconFor(PlayerControl control) => switch (control) {
+    PlayerControl.previousNext => Icons.skip_next_outlined,
+    PlayerControl.seek10 => Icons.replay_10_outlined,
+    PlayerControl.mute => Icons.volume_off_outlined,
+    PlayerControl.volume => Icons.linear_scale,
+    PlayerControl.quickList => Icons.format_list_bulleted,
+    PlayerControl.favorite => Icons.star_outline_rounded,
+    PlayerControl.subtitles => Icons.closed_caption_outlined,
+    PlayerControl.aspect => Icons.aspect_ratio,
+    PlayerControl.pip => Icons.picture_in_picture_alt_outlined,
+    PlayerControl.info => Icons.info_outline,
+  };
+
+  static String _subtitleFor(PlayerControl control) => switch (control) {
+    PlayerControl.previousNext =>
+      'Step to the previous or next channel (or film) from the player.',
+    PlayerControl.seek10 =>
+      'The -10 s and +10 s buttons. Films and episodes only — live has no '
+          'position to seek.',
+    PlayerControl.mute => 'The mute button.',
+    PlayerControl.volume =>
+      'The volume slider beside mute. The phone\'s own volume keys keep '
+          'working either way.',
+    PlayerControl.quickList =>
+      'The channel-list button for a live session, where a controller exists.',
+    PlayerControl.favorite => 'The favorite star on a live channel.',
+    PlayerControl.subtitles =>
+      'The subtitle menu, when the stream carries a subtitle track.',
+    PlayerControl.aspect => 'The aspect-ratio chip.',
+    PlayerControl.pip =>
+      'The picture-in-picture button, where the device has it.',
+    PlayerControl.info => 'The stream-information button.',
+  };
+}
+
+class _GroupLabel extends StatelessWidget {
+  final String text;
+
+  const _GroupLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6, top: 2),
+      child: Text(
+        text,
+        style: const TextStyle(color: AppColors.textLo, fontSize: 12),
       ),
     );
   }
