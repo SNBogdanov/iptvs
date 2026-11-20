@@ -141,23 +141,23 @@ void main() {
   });
 
   group('tap ladder (parity with the native playerTapAction table)', () {
-    testWidgets('tap hides visible chrome, tap again shows it — on the first '
-        'frame, with no double-tap timeout to wait out', (tester) async {
+    testWidgets('tap hides visible chrome, tap again shows it', (tester) async {
       await pumpOverlay(tester, isLive: true);
       expect(find.byIcon(Icons.play_arrow), findsOneWidget);
 
-      // Rung: controlsVisible → hideControls. No `pump(350ms)` here: with the
-      // double-tap recognizer gone the tap resolves immediately, which is the
-      // whole reason it is dropped in touch mode.
+      // Rung: controlsVisible → hideControls. The surface now owns a
+      // double-tap recognizer (the two halves step or seek in touch mode), so a
+      // single tap resolves after its window — pump it out rather than asserting
+      // on the first frame.
       await tester.tapAt(exposedVideo(tester));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.byIcon(Icons.play_arrow), findsNothing);
       expect(find.byIcon(Icons.close), findsNothing);
 
       // Terminal rung: nothing left to peel → show (never exit; only the X
       // exits on iOS).
       await tester.tapAt(exposedVideo(tester));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.byIcon(Icons.play_arrow), findsOneWidget);
     });
 
@@ -170,8 +170,9 @@ void main() {
       await tester.pump();
       expect(find.text('Stream information'), findsOneWidget);
 
+      // Same double-tap window as above: the peel is a surface tap.
       await tester.tapAt(exposedVideo(tester));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       // Info closed …
       expect(find.text('Stream information'), findsNothing);
       // … and that press was consumed by the info rung, so the chrome is still
