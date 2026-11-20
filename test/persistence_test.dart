@@ -13,6 +13,7 @@ import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/secret_locator_vault.dart';
 import 'package:iptvs/data/source_identity_migration.dart';
+import 'package:iptvs/data/watch_state.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/sources/source_identity.dart';
@@ -1380,6 +1381,268 @@ void main() {
         );
         await db.close();
       });
+    });
+
+    group('watch state outbox (cloud delta)', () {
+      test('a position write queues one row, a completion replaces it', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 12),
+          duration: const Duration(minutes: 90),
+        );
+        var pending = await db.readWatchOutbox();
+        expect(pending.single.itemId, 'm1');
+        expect(pending.single.watched, isFalse);
+        expect(pending.single.positionMs, 12 * 60 * 1000);
+
+        // The same title finishing is still one row, carrying the final state:
+        // a title has one state, not a history of them.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 90),
+          duration: const Duration(minutes: 90),
+        );
+        pending = await db.readWatchOutbox();
+        expect(pending.single.itemId, 'm1');
+        expect(pending.single.watched, isTrue);
+        expect(pending.single.cleared, isFalse);
+        await db.close();
+      });
+
+      test('removing an entry queues a clear, not a silent absence', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 12),
+          duration: const Duration(minutes: 90),
+        );
+        await db.clearPlaybackPosition('src', ContentKind.movie, 'm1');
+        final pending = await db.readWatchOutbox();
+        expect(pending.single.cleared, isTrue);
+        expect(pending.single.watched, isFalse);
+        await db.close();
+      });
+
+      test('a sub-10-second write queues nothing', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(seconds: 4),
+          duration: const Duration(minutes: 90),
+        );
+        expect(await db.readWatchOutbox(), isEmpty);
+        await db.close();
+      });
+
+      test('live and season kinds are never queued', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.markWatched('src', ContentKind.live, 'ch1');
+        await db.markWatched('src', ContentKind.season, 's1');
+        expect(await db.readWatchOutbox(), isEmpty);
+        // The local marks themselves still land: only the cloud copy is
+        // restricted to resumable kinds.
+        expect(await db.readWatchedIds('src', ContentKind.live), contains('ch1'));
+        await db.close();
+      });
+
+      test('a pulled state is applied without being queued back', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.applyWatchStates([
+          WatchState(
+            sourceId: 'src',
+            kind: ContentKind.movie,
+            itemId: 'm1',
+            positionMs: 90000,
+            durationMs: 5400000,
+          ),
+          WatchState(
+            sourceId: 'src',
+            kind: ContentKind.episode,
+            itemId: 'e1',
+            watched: true,
+          ),
+        ]);
+        expect(await db.readWatchOutbox(), isEmpty);
+        final position = await db.readPlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+        );
+        expect(position!.position, const Duration(seconds: 90));
+        expect(
+          await db.readWatchedIds('src', ContentKind.episode),
+          contains('e1'),
+        );
+
+        // A clear removes both halves.
+        await db.applyWatchStates([
+          WatchState(sourceId: 'src', kind: ContentKind.movie, itemId: 'm1'),
+          WatchState(sourceId: 'src', kind: ContentKind.episode, itemId: 'e1'),
+        ]);
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+          isNull,
+        );
+        expect(await db.readWatchedIds('src', ContentKind.episode), isEmpty);
+        await db.close();
+      });
+
+      test('the push snapshot comes from the catalogue by id', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.replaceMediaLibrary(
+          'src',
+          ContentKind.movie,
+          const [],
+          const [
+            MediaItem(
+              id: 'm1',
+              title: 'A film',
+              kind: ContentKind.movie,
+              year: '2026',
+              poster: 'https://cdn.example/p.jpg',
+              backdrop: 'https://cdn.example/w.jpg',
+            ),
+          ],
+        );
+        final meta = await db.readWatchMetadata([
+          WatchState(
+            sourceId: 'src',
+            kind: ContentKind.movie,
+            itemId: 'm1',
+            positionMs: 1000,
+          ),
+          // An id the catalogue no longer holds contributes nothing: the push
+          // sends no metadata and the server keeps whatever it stored.
+          WatchState(
+            sourceId: 'src',
+            kind: ContentKind.movie,
+            itemId: 'gone',
+            positionMs: 1000,
+          ),
+        ]);
+        expect(meta, hasLength(1));
+        final entry = meta.values.single;
+        expect(entry.title, 'A film');
+        expect(entry.year, '2026');
+        expect(entry.poster, 'https://cdn.example/p.jpg');
+        expect(entry.backdrop, 'https://cdn.example/w.jpg');
+        await db.close();
+      });
+
+      test('readWatchStates merges both tables, newest stamp winning', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 90),
+        );
+        await db.markWatched('src', ContentKind.movie, 'm2');
+        final states = await db.readWatchStates(['src', 'other']);
+        expect(states, hasLength(2));
+        final byId = {for (final s in states) s.itemId: s};
+        expect(byId['m1']!.positionMs, 3 * 60 * 1000);
+        expect(byId['m1']!.watched, isFalse);
+        expect(byId['m2']!.watched, isTrue);
+        await db.close();
+      });
+
+      test('delivered rows are cleared only when still unchanged', () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 90),
+        );
+        final sent = await db.readWatchOutbox();
+        // A newer position replaces the row while the push is in flight.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 4),
+          duration: const Duration(minutes: 90),
+        );
+        await db.clearWatchOutbox(sent);
+        final pending = await db.readWatchOutbox();
+        expect(pending.single.positionMs, 4 * 60 * 1000);
+        await db.close();
+      });
+    });
+
+    test('upgrading seeds the watch outbox with existing progress', () async {
+      // Same data-loss guard as the favorites seed: the first pull after the
+      // upgrade mirrors the profile, which has never heard of this history.
+      // Without the seed every resume point and watched mark of the
+      // cloud-managed sources would be deleted by a sync the user never asked
+      // for.
+      final path = dbPath();
+      await createReleasedDatabaseFixture(path, 12);
+      final db = await AppDatabase.openAt(path);
+
+      final pending = await db.readWatchOutbox();
+      final seeded = pending.where((e) => e.itemId == 'movie-1').single;
+      expect(seeded.kind, ContentKind.movie);
+      expect(seeded.positionMs, 60000);
+      expect(seeded.durationMs, 600000);
+      expect(seeded.watched, isFalse);
+      // The local row itself is untouched by the seeding.
+      expect(
+        (await db.readPlaybackPosition(
+          'released-source',
+          ContentKind.movie,
+          'movie-1',
+        ))!.position,
+        const Duration(seconds: 60),
+      );
+      await db.close();
+    });
+
+    test('a queued clear survives the watch-outbox branch re-running', () async {
+      // There is no onDowngrade: an older build re-stamps the version down and a
+      // newer one then re-runs every branch. `watch_outbox` already holds the
+      // clear, so OR IGNORE must not resurrect the in-progress row the seed
+      // would otherwise compute from a stale local row.
+      final path = dbPath();
+      final first = await AppDatabase.openAt(path);
+      await first.savePlaybackPosition(
+        'released-source',
+        ContentKind.movie,
+        'movie-1',
+        position: const Duration(minutes: 5),
+        duration: const Duration(minutes: 90),
+      );
+      await first.clearPlaybackPosition(
+        'released-source',
+        ContentKind.movie,
+        'movie-1',
+      );
+      expect((await first.readWatchOutbox()).single.cleared, isTrue);
+      await first.close();
+
+      final raw = await databaseFactoryFfi.openDatabase(path);
+      await raw.setVersion(15);
+      await raw.close();
+
+      final second = await AppDatabase.openAt(path);
+      expect(
+        (await second.readWatchOutbox()).single.cleared,
+        isTrue,
+        reason: 'a re-run must not turn a pending clear back into progress',
+      );
+      await second.close();
     });
 
     test('v10 database gains the playback_positions table on upgrade', () async {

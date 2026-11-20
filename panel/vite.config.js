@@ -19,11 +19,26 @@ export default defineConfig(({ mode }) => {
   // third-party origins. Applied to the built output only — the dev server
   // (with its inline HMR client + websocket) is intentionally left
   // unconstrained. `vite preview` serves the built output, so it carries it.
+  //
+  // `img-src` is the one directive that cannot be a fixed origin list: the
+  // History tab renders artwork URLs that come from the *data* (provider CDNs,
+  // and LAN hosts like http://transmission/MediaCover for the reference
+  // library), so it allows the two http(s) schemes and nothing else — no data:,
+  // no blob:, no javascript:. Scripts, styles, connections and frames stay
+  // locked to 'self' + the project's Supabase origin, which is where the
+  // meaningful attack surface is.
+  //
+  // `style-src 'self'` also means **no inline `style="..."` attributes**: the
+  // built panel strips them (the dev server has no CSP, so the difference shows
+  // up only in production). An element whose width rode in an inline style then
+  // falls back to `width: auto` — a History progress bar rendered full for every
+  // row, which is exactly what happened. Dynamic geometry uses a native
+  // `<progress value=… max=…>` (history.js) instead; keep it that way.
   const cspDirectives = [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self'",
-    "img-src 'self'",
+    "img-src 'self' https: http:",
     "font-src 'self'",
     `connect-src ${connectSrc}`,
     "base-uri 'self'",

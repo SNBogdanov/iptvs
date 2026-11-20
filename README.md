@@ -41,6 +41,17 @@ element can't.
   expose the same controls: play/pause, ±10s, scrubber/live EPG, go-to-live,
   audio/subtitle/speed menus, aspect cycle, favorite, resolution/HDR/FPS/clock
   badges, and an info panel.
+- **Your chrome, your buttons** — one player, one set of preferences: which optional
+  buttons are drawn (previous/next, ±seek, mute, volume bar, channel list, favorite,
+  subtitles, aspect, picture-in-picture, stream info), what a **double tap** on the
+  picture does (step to the next/previous title, or seek by the VOD step; live always
+  steps), and whether the clock and the position readout stay on screen while the
+  controls are hidden.
+- **HTTP proxy support** — follow the device's own proxy (Android Wi-Fi proxy with its
+  bypass list, Windows Internet options, or the `https_proxy` family), enter a custom
+  host and port, or turn it off. Local addresses always bypass it, and artwork **and
+  XMLTV guides** are fetched direct first so a LAN server is never sent through the
+  proxy.
 - **Optional web panel** — manage your sources from a browser as one or more **profiles**
   (separate setups on one account), and pull a profile onto each device by entering a short
   pairing code (or push a device's set back up), with **no login on the TV**. Off unless
@@ -110,6 +121,14 @@ optionally **push** its own set back up (newest change wins).
   the account, then picks which profile to sync (switchable any time). Profiles are
   created and renamed in the panel; the device just selects one. A single-profile account
   behaves exactly like before.
+
+- **Favorites and watch progress sync themselves** — a star, a resume point or a
+  finished-title mark travels to the profile's other devices without pressing anything.
+  Favorites go up as per-item adds/removes; VOD progress as a per-title delta sent on a
+  short delay (30 seconds, pushed a second later for each further update while something
+  plays) and flushed as soon as the player closes or the app is backgrounded. The row
+  carries the title, year and artwork, so the panel's **History** tab shows the same list
+  without the (unsynchronised) catalogue.
 
 - **Private by design** — sources are isolated per account by Postgres row-level security;
   the app and panel ship only the public anon/publishable key, and the `service_role` key is

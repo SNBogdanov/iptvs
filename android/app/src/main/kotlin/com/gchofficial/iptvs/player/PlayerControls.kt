@@ -414,10 +414,37 @@ private fun ControlsOverlay(
  */
 @Composable
 private fun PersistentHud(state: PlayerUiState, nowMillis: Long) {
-    if (!state.showClock && (state.isLive || !state.showPlaybackTimes)) return
+    // Mirrors the shared Flutter overlay's `_persistentHud`: clock top-right,
+    // VOD readout bottom-right, and the channel/title name top-left — the
+    // Settings preferences gate each one, and a session with all three off
+    // draws nothing at all.
+    val showName = state.showChannelName && state.title.isNotBlank()
+    if (!state.showClock &&
+        (state.isLive || !state.showPlaybackTimes) &&
+        !showName
+    ) {
+        return
+    }
     val edge = PlayerDimens.edgePadding(state.isTv)
     val outerVertical = PlayerDimens.edgeExtraVertical(state.isTv)
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+        if (showName) {
+            // Grouped like the Flutter overlay: the number (when the provider
+            // gave one) then the name, so a bare number is never read as a time.
+            val number = state.channelNumber
+            val label = if (number != null) {
+                "$number · ${state.channelName ?: state.title}"
+            } else {
+                state.title
+            }
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = edge, top = 18.dp + outerVertical),
+            ) {
+                Badge(label)
+            }
+        }
         if (state.showClock) {
             Box(
                 Modifier
@@ -480,15 +507,21 @@ private fun TopBar(
                         onClick = { onInteract(); callbacks.onBack() },
                     )
                     Spacer(Modifier.width(14.dp))
-                    Text(
-                        text = state.title,
-                        color = PlayerColors.TextHi,
-                        fontFamily = InterFontFamily,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f),
-                    )
+                    // Settings → "Channel name in the player". Off keeps the
+                    // back button and the badges; only the name goes.
+                    if (state.showChannelName) {
+                        Text(
+                            text = state.title,
+                            color = PlayerColors.TextHi,
+                            fontFamily = InterFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 // FlowRow so the badges wrap again on very narrow screens instead
@@ -518,15 +551,19 @@ private fun TopBar(
                     onClick = { onInteract(); callbacks.onBack() },
                 )
                 Spacer(Modifier.width(14.dp))
-                Text(
-                    text = state.title,
-                    color = PlayerColors.TextHi,
-                    fontFamily = InterFontFamily,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f),
-                )
+                if (state.showChannelName) {
+                    Text(
+                        text = state.title,
+                        color = PlayerColors.TextHi,
+                        fontFamily = InterFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
                 Spacer(Modifier.width(8.dp))
                 // Right-cluster badges: source, LIVE/resolution/HDR, fps, and (TV
                 // only) a date+time clock. The title takes the remaining width and

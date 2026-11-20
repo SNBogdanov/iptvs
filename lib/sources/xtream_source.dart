@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/load_token.dart';
 import '../data/diagnostics_log.dart';
+import '../data/direct_first_transport.dart';
 import '../data/net.dart';
 import 'epg_guides.dart';
 import 'epg_matching.dart';
@@ -194,6 +195,9 @@ class XtreamSource
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 15)
     ..autoUncompress = false;
+
+  /// Guides only: direct first, proxy on failure (see [DirectFirstTransport]).
+  late final DirectFirstTransport _guideTransport = DirectFirstTransport(_http);
   final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
   /// Categories are memoized for the same reason [ _mediaListCache] is, and it
   /// is load-bearing rather than an optimisation: `loadAll` (`MediaTabController`
@@ -646,7 +650,10 @@ class XtreamSource
   }
 
   @override
-  Future<void> dispose() async => _http.close(force: true);
+  Future<void> dispose() async {
+    _guideTransport.close();
+    _http.close(force: true);
+  }
 
   // ── http ──────────────────────────────────────────────────────────────
 
@@ -737,15 +744,21 @@ class XtreamSource
     File destination,
   ) async {
     final operation = HttpOperation(policy);
-    final bytes = await operation.readToFile(
-      await _open(uri, operation),
-      destination,
+    // Direct first, proxy on failure: a guide beside the panel is a LAN fetch.
+    final resp = await _guideTransport.run(
+      uri,
+      (client) => _open(uri, operation, client: client),
     );
+    final bytes = await operation.readToFile(resp, destination);
     DiagnosticsLog.instance.add('http:${policy.name}', 'body_bytes=$bytes');
   }
 
-  Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {
-    final req = await operation.wait(_http.getUrl(uri));
+  Future<HttpClientResponse> _open(
+    Uri uri,
+    HttpOperation operation, {
+    HttpClient? client,
+  }) async {
+    final req = await operation.wait((client ?? _http).getUrl(uri));
     final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {
       // Drain before throwing: an unread body never returns its socket to the

@@ -74,6 +74,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// this device isn't paired to a profile.
   CloudAutoSync? _cloudAutoSync;
 
+  /// Background watch-state sync (resume points / watched marks). Separate
+  /// instance because its rhythm is different: a 30-second ticket instead of a
+  /// 5-second debounce, plus the player's explicit "stopped watching" signal.
+  CloudAutoSync? _watchAutoSync;
+
   // Active profile info for the avatar — loaded after the main source load.
   // Local profile first (most-recently-selected), cloud profile as fallback.
   String? _profileName;
@@ -131,7 +136,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     // Already bound to this profile — nothing to do. This runs from
     // `_loadActive`, which also fires on every *source* change, so the common
     // case must be free.
-    if (_cloudAutoSync != null && _cloudAutoSyncProfileId == profileId) return;
+    if (_cloudAutoSync != null &&
+        _watchAutoSync != null &&
+        _cloudAutoSyncProfileId == profileId) {
+      return;
+    }
 
     if (_cloudAutoSync case final previous?) {
       // Send what the *previous* profile accumulated before letting go of it:
@@ -141,6 +150,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       await previous.dispose();
       _cloudAutoSync = null;
       _cloudAutoSyncProfileId = null;
+    }
+    if (_watchAutoSync case final previous?) {
+      await previous.flush();
+      await previous.dispose();
+      _watchAutoSync = null;
     }
 
     // Unpaired, or the device has no profile yet. Re-checked on every
@@ -154,7 +168,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       push: () => sync.pushFavoritesDelta(widget.store, profileId),
       changes: widget.db.favoritesChanged,
     );
+    // Watch state is pushed on a ticket, not a plain debounce: a playing title
+    // writes a position every 30 seconds, so a window that restarts on each
+    // write would never fire. See [CloudAutoSync.ticketExtend]. The player's
+    // stop/step/exit signal flushes it immediately; app teardown does the same.
+    _watchAutoSync = CloudAutoSync(
+      pull: () => sync.pullWatchState(widget.store, profileId),
+      push: () => sync.pushWatchDelta(widget.store, profileId),
+      changes: widget.db.watchChanged,
+      flushRequests: widget.db.watchSyncRequested,
+      debounce: const Duration(seconds: 30),
+      ticketExtend: const Duration(seconds: 1),
+      retryDelay: const Duration(seconds: 60),
+    );
     await _cloudAutoSync!.start();
+    await _watchAutoSync!.start();
   }
 
   @override
@@ -165,11 +193,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       unawaited(_cloudAutoSync?.flush() ?? Future<void>.value());
+      // A position sitting out its 30-second ticket would otherwise wait for
+      // the next launch — on Android a backgrounded app may never get another
+      // turn.
+      unawaited(_watchAutoSync?.flush() ?? Future<void>.value());
       return;
     }
     if (state != AppLifecycleState.resumed || !mounted) return;
-    // Another device may have changed favorites while this one was away.
+    // Another device may have changed favorites or progress while this one was
+    // away.
     unawaited(_cloudAutoSync?.pullNow() ?? Future<void>.value());
+    unawaited(_watchAutoSync?.pullNow() ?? Future<void>.value());
     WidgetsBinding.instance.addPostFrameCallback((_) => _resumePendingUpdate());
   }
 
@@ -211,6 +245,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     unawaited(_cloudAutoSync?.dispose() ?? Future<void>.value());
     _cloudAutoSync = null;
+    // Best-effort last send: the process may not outlive this widget, but if it
+    // does, the queued position must not wait for another launch. Disposing
+    // only after the flush keeps the push itself alive; `dispose` merely stops
+    // new triggers.
+    if (_watchAutoSync case final watch?) {
+      unawaited(watch.flush().whenComplete(watch.dispose));
+      _watchAutoSync = null;
+    }
     _cloudAutoSyncProfileId = null;
     for (final retired in _retiredSources) {
       unawaited(retired.dispose());

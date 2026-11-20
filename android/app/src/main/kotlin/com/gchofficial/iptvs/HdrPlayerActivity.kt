@@ -454,6 +454,8 @@ class HdrPlayerActivity : ComponentActivity() {
         // draws exactly the chrome it draws today, rather than losing a badge.
         uiState.showClock = intent.getBooleanExtra(EXTRA_SHOW_CLOCK, true)
         uiState.showPlaybackTimes = intent.getBooleanExtra(EXTRA_SHOW_TIMES, true)
+        uiState.showChannelName =
+            intent.getBooleanExtra(EXTRA_SHOW_CHANNEL_NAME, true)
         // Optional controls (Settings → "Player controls"). Fail open: an empty
         // or absent list shows everything, which is what every install drew
         // before the setting existed.
@@ -1704,6 +1706,12 @@ class HdrPlayerActivity : ComponentActivity() {
          */
         const val EXTRA_SHOW_CLOCK = "show_clock"
         const val EXTRA_SHOW_TIMES = "show_times"
+
+        /**
+         * Whether the chrome draws the channel/title name (Settings → "Channel
+         * name in the player"). Absent reads as true.
+         */
+        const val EXTRA_SHOW_CHANNEL_NAME = "show_channel_name"
 
         /**
          * Comma list of optional controls the chrome must **not** draw (see

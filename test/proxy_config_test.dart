@@ -19,6 +19,7 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     proxyConfig.value = const ProxyConfig();
     effectiveProxy.value = null;
+    debugResetDirectFailures();
   });
 
   group('the mode', () {
@@ -202,6 +203,28 @@ void main() {
       ]) {
         expect(ProxyEndpoint.isLocalHost(host), isFalse, reason: host);
       }
+    });
+  });
+
+  group('direct-first gate', () {
+    test('needs a proxy, a non-local host and no recent failure', () {
+      expect(shouldTryDirectFirst('cdn.example.com'), isFalse);
+      effectiveProxy.value = const ProxyEndpoint(
+        host: 'proxy',
+        port: 8888,
+        exclusions: ['*.site'],
+      );
+      expect(shouldTryDirectFirst('cdn.example.com'), isTrue);
+      // Platform bypass and the LAN rule answer DIRECT on their own, so a
+      // direct-first attempt is not even made for them.
+      expect(shouldTryDirectFirst('panel.site'), isFalse);
+      expect(shouldTryDirectFirst('transmission'), isFalse);
+
+      noteDirectFailure('cdn.example.com');
+      expect(shouldTryDirectFirst('cdn.example.com'), isFalse);
+      // The memory expires, so a network change can unblock the host again.
+      directFailureWindow = Duration.zero;
+      expect(shouldTryDirectFirst('cdn.example.com'), isTrue);
     });
   });
 

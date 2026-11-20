@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
-import '../data/diagnostics_log.dart';
 import '../data/proxy_config.dart';
 
 /// Cache key of the artwork cache.
@@ -49,7 +47,6 @@ class ProxyAwareFileService extends FileService {
   ProxyAwareFileService({
     this.directTimeout = const Duration(seconds: 4),
     this.proxyTimeout = const Duration(seconds: 20),
-    this.directFailureWindow = const Duration(minutes: 10),
   });
 
   /// Short on purpose: this attempt precedes every artwork download, so a
@@ -57,12 +54,6 @@ class ProxyAwareFileService extends FileService {
   final Duration directTimeout;
   final Duration proxyTimeout;
 
-  /// How long a host stays on the "direct does not work here" list.
-  final Duration directFailureWindow;
-
-  static const int _maxTrackedHosts = 64;
-
-  final Map<String, DateTime> _directFailures = {};
   HttpFileService? _directService;
   HttpFileService? _proxyService;
 
@@ -76,16 +67,19 @@ class ProxyAwareFileService extends FileService {
     if (uri == null || endpoint == null || endpoint.excludes(uri.host)) {
       return _directFetcher.get(url, headers: headers);
     }
-    if (!_recentlyFailedDirect(uri.host)) {
+    // The host memory is **shared** with guide downloads
+    // (`lib/data/proxy_fetch.dart`): a host that fails direct fails for both,
+    // and one timeout per host is enough.
+    if (shouldTryDirectFirst(uri.host)) {
       try {
         final response = await _directFetcher.get(url, headers: headers);
         if (_isSuccess(response.statusCode)) return response;
         // Drain and drop the block page: its socket is otherwise left open
         // until GC, and a filtered CDN answers one of these per poster.
         unawaited(response.content.listen(null).cancel());
-        _noteDirectFailure(uri.host, 'status ${response.statusCode}');
+        noteDirectFailure(uri.host);
       } catch (error) {
-        _noteDirectFailure(uri.host, error.toString());
+        noteDirectFailure(uri.host);
       }
     }
     return _proxyFetcher.get(url, headers: headers);
@@ -121,28 +115,6 @@ class ProxyAwareFileService extends FileService {
       statusCode == HttpStatus.ok ||
       statusCode == HttpStatus.accepted ||
       statusCode == HttpStatus.notModified;
-
-  bool _recentlyFailedDirect(String host) {
-    final at = _directFailures[host];
-    if (at == null) return false;
-    if (DateTime.now().difference(at) < directFailureWindow) return true;
-    _directFailures.remove(host);
-    return false;
-  }
-
-  void _noteDirectFailure(String host, String reason) {
-    if (_directFailures.containsKey(host)) return;
-    if (_directFailures.length >= _maxTrackedHosts) _directFailures.clear();
-    _directFailures[host] = DateTime.now();
-    DiagnosticsLog.instance.addAndPrint(
-      'image',
-      'direct fetch failed host=$host ($reason) — using the proxy for it',
-    );
-  }
-
-  /// Test seam: the hosts currently remembered as "direct does not work".
-  @visibleForTesting
-  Set<String> get debugDirectFailures => _directFailures.keys.toSet();
 }
 
 /// The proxy-free `HttpOverrides`: it overrides nothing, so the client it

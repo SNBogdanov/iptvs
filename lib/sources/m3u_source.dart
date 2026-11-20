@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/load_token.dart';
 import '../data/diagnostics_log.dart';
+import '../data/direct_first_transport.dart';
 import '../data/net.dart';
 import '../data/secret_locator_vault.dart' show hasSealedLocator;
 import 'epg_guides.dart';
@@ -47,6 +48,9 @@ class M3uSource
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 15)
     ..autoUncompress = false;
+
+  /// Guides only: direct first, proxy on failure (see [DirectFirstTransport]).
+  late final DirectFirstTransport _guideTransport = DirectFirstTransport(_http);
 
   List<Channel>? _channels;
   List<Category>? _categories;
@@ -391,7 +395,10 @@ class M3uSource
   }
 
   @override
-  Future<void> dispose() async => _http.close(force: true);
+  Future<void> dispose() async {
+    _guideTransport.close();
+    _http.close(force: true);
+  }
 
   // ── parsing ────────────────────────────────────────────────────────────
 
@@ -464,21 +471,30 @@ class M3uSource
 
   /// Streams [uri]'s body into [destination] without holding it in memory —
   /// the XMLTV path, whose guides can run to hundreds of MB.
+  ///
+  /// **Direct first, proxy on failure** (`DirectFirstTransport`): a guide on the
+  /// panel's own LAN host must not be sent through the proxy, and a filtered CDN
+  /// has to still load. Sources' API traffic keeps the plain proxy policy.
   Future<void> _downloadToFile(
     Uri uri,
     HttpWorkloadPolicy policy,
     File destination,
   ) async {
     final operation = HttpOperation(policy);
-    final bytes = await operation.readToFile(
-      await _open(uri, operation),
-      destination,
+    final resp = await _guideTransport.run(
+      uri,
+      (client) => _open(uri, operation, client: client),
     );
+    final bytes = await operation.readToFile(resp, destination);
     DiagnosticsLog.instance.add('http:${policy.name}', 'body_bytes=$bytes');
   }
 
-  Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {
-    final req = await operation.wait(_http.getUrl(uri));
+  Future<HttpClientResponse> _open(
+    Uri uri,
+    HttpOperation operation, {
+    HttpClient? client,
+  }) async {
+    final req = await operation.wait((client ?? _http).getUrl(uri));
     if (userAgent != null) {
       req.headers.set(HttpHeaders.userAgentHeader, userAgent!);
     }

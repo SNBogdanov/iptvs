@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
+
 import 'diagnostics_log.dart';
 import 'net.dart';
 
@@ -25,18 +27,42 @@ import 'net.dart';
 /// not five. The debounce also keeps this well inside the server's 30-per-minute
 /// push budget, which auto-pushing shares with manual pushes rather than
 /// getting a budget of its own.
+///
+/// The same class drives the watch-state sync with [ticketExtend] set (a ticket
+/// that keeps sliding while playback keeps writing) and a [flushRequests]
+/// stream (the player saying it stopped).
 class CloudAutoSync {
   /// Mirrors the profile into the local cache. Must not throw for the caller —
   /// failures are logged and retried on the next trigger.
   final Future<void> Function() pull;
 
-  /// Sends pending local favorite changes. Returns true when it sent anything.
+  /// Sends pending local changes (favorite toggles, or watch-state entries).
+  /// Returns true when it sent anything.
   final Future<bool> Function() push;
 
-  /// Fires whenever a local favorite changes (`AppDatabase.favoritesChanged`).
+  /// Fires whenever a local change relevant to this sync happens
+  /// (`AppDatabase.favoritesChanged`, `AppDatabase.watchChanged`).
   final Stream<void> changes;
 
+  /// Optional "send now" requests — e.g. the player reporting that it stopped
+  /// watching a title. Listening here keeps call sites from having to know the
+  /// sync object exists.
+  final Stream<void>? flushRequests;
+
   final Duration debounce;
+
+  /// When set, this is a **ticket** rather than a plain debounce: the first
+  /// change schedules a push [debounce] away, and each further change moves
+  /// that same ticket [ticketExtend] later instead of restarting the full
+  /// window.
+  ///
+  /// That is the difference between "coalesce a burst" and "save the position
+  /// of something being watched": a player writes a position every 30 s of
+  /// continuous playback, so a plain debounce would either never fire (each
+  /// write restarts the window) or fire instantly. Extending by a second keeps
+  /// the push roughly [debounce] after the *first* unsent change, and a
+  /// genuinely continuous stream of writes slides it only slightly.
+  final Duration? ticketExtend;
 
   /// Backoff after a failed push. A failure is usually the network or a rate
   /// limit, and the change is still in the outbox, so retrying soon is both
@@ -47,12 +73,16 @@ class CloudAutoSync {
     required this.pull,
     required this.push,
     required this.changes,
+    this.flushRequests,
     this.debounce = const Duration(seconds: 5),
+    this.ticketExtend,
     this.retryDelay = const Duration(seconds: 30),
   });
 
   StreamSubscription<void>? _sub;
+  StreamSubscription<void>? _flushSub;
   Timer? _timer;
+  DateTime? _deadline;
   bool _pushing = false;
   bool _pendingWhilePushing = false;
   bool _disposed = false;
@@ -67,6 +97,9 @@ class CloudAutoSync {
   Future<void> start({bool pullFirst = true}) async {
     if (_disposed) return;
     _sub ??= changes.listen((_) => _schedule());
+    _flushSub ??= flushRequests?.listen((_) {
+      unawaited(flush());
+    });
     if (pullFirst) await pullNow();
     // A device that was offline when the user last toggled something still has
     // it queued; send it once the pull has established a baseline.
@@ -96,13 +129,27 @@ class CloudAutoSync {
       _pendingWhilePushing = true;
       return;
     }
+    final now = clock.now();
+    final extension = ticketExtend;
+    final deadline = _deadline;
+    _deadline = deadline == null || extension == null
+        ? now.add(debounce)
+        : deadline.add(extension);
+    final wait = _deadline!.difference(now);
     _timer?.cancel();
-    _timer = Timer(debounce, _flush);
+    _timer = Timer(wait.isNegative ? Duration.zero : wait, _flush);
   }
 
   Future<void> _flush() async {
     _timer = null;
-    if (_disposed || _pushing) return;
+    _deadline = null;
+    if (_disposed) return;
+    if (_pushing) {
+      // A flush requested mid-push must not be swallowed: the in-flight push
+      // may predate the change that asked for it.
+      _pendingWhilePushing = true;
+      return;
+    }
     _pushing = true;
     try {
       await push();
@@ -142,5 +189,7 @@ class CloudAutoSync {
     _timer = null;
     await _sub?.cancel();
     _sub = null;
+    await _flushSub?.cancel();
+    _flushSub = null;
   }
 }

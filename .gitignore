@@ -54,7 +54,10 @@ app.*.map.json
 
 # Local cloud-sync config for `flutter run --dart-define-from-file=dart_define.json`.
 # Holds only the publishable Supabase values; keep it out of git regardless.
+# Variants (`dart_define.android.json`, ...) override PANEL_URL per target — the
+# phone needs the LAN address of the dev panel, not localhost.
 /dart_define.json
+/dart_define.*.json
 
 # Local Flutter DevTools settings.
 /devtools_options.yaml
@@ -62,3 +65,6 @@ app.*.map.json
 # Working drafts / notes not meant for the repo (store-listing copy, questionnaire
 # answers, tester-feedback triage, etc.). Local scratch only.
 /docs/private/
+
+# Local credentials for tooling (Supabase PAT, etc.). Never commit.
+/secrets/

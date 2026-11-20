@@ -125,7 +125,6 @@ class PlayerUiState(
      * weekday on a TV, `HH:mm` on a phone.
      */
     var showClock by mutableStateOf(true)
-
     /**
      * Whether the VOD scrubber draws its position/duration text (Settings →
      * "Playback time in the player"), seeded from `EXTRA_SHOW_TIMES`.
@@ -137,6 +136,16 @@ class PlayerUiState(
      * gates the bottom-right readout drawn while the chrome is hidden.
      */
     var showPlaybackTimes by mutableStateOf(true)
+
+    /**
+     * Whether the overlay draws the channel/title name in the top bar and as the
+     * top-left HUD pill while the chrome is hidden (Settings → "Channel name in
+     * the player"), seeded from `EXTRA_SHOW_CHANNEL_NAME`.
+     *
+     * Defaults to true: the name is what the bar has always drawn, so only an
+     * explicit `false` takes it away.
+     */
+    var showChannelName by mutableStateOf(true)
 
     /**
      * Which optional controls the control row draws, seeded from

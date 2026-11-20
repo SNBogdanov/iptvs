@@ -250,6 +250,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       final count = await _sync.pullSources(widget.store, profileId);
       final metadata = await _sync.pullMetadata(widget.store, profileId);
       await _sync.pullFavorites(widget.store, profileId);
+      await _sync.pullWatchState(widget.store, profileId);
       _knownRemoteRevision = (await _sync.profileRevision(
         profileId,
       ))?.updatedAt;
@@ -381,6 +382,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       final count = await _sync.pushSources(widget.store, profileId);
       await _sync.pushMetadata(widget.store, profileId);
       await _sync.pushFavorites(widget.store, profileId);
+      // Watch state goes up as a delta, never as a whole-set replace: progress
+      // belongs to the device that watched it, and a manual push must not erase
+      // what another device has watched since. Everything queued is sent.
+      await _sync.pushWatchDelta(widget.store, profileId);
       _knownRemoteRevision = (await _sync.profileRevision(
         profileId,
       ))?.updatedAt;
@@ -388,7 +393,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       setState(
         () => _status =
             'Pushed $count source${count == 1 ? '' : 's'} · metadata · favorites '
-            'to $_activeProfileName.',
+            '· progress to $_activeProfileName.',
       );
     } catch (e) {
       if (mounted) setState(() => _error = friendlyCloudError(e));

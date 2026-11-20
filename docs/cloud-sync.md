@@ -659,10 +659,68 @@ throws at its caller, and `flush()` runs on app pause because a backgrounded And
 never get another turn. Auto-sync shares the server's 30-per-minute `push` budget rather than
 getting one of its own.
 
+## Watch state sync (resume points / watched marks)
+
+`playback_positions` (the "Continue watching" rail and the partial card bar) and `watched_media`
+(the full bar of a finished title) now sync too - `push_watch_delta` / `pullWatchState`, driven by
+a second `CloudAutoSync` in `HomeShell`.
+
+**A table, not another `profiles` array.** One row per title, keyed
+`(profile_id, source_id, kind, item_id)`, with the kind restricted to `movie`/`series`/`episode`
+(live has no timeline; seasons are containers). Progress changes every 30 seconds of playback, so
+rewriting a thousands-element `jsonb` under the profile's row lock - the same row that carries
+favorites - would be a conflict amplifier for no benefit. A keyed table writes only what changed,
+resolves per title by arrival order, and leaves a shape the panel can query later. Sizing mirrors
+favorites: 20000 entries per call, 200000 per profile.
+
+**The delta says "cleared" out loud.** An entry carries `position_ms`, `duration_ms` and
+`watched`; position 0 with `watched: false` means *no state* and deletes the server row. Removing
+a title from Continue watching must reach the other devices, and an absent element cannot express
+that - the same reasoning that gives favorites `add`/`remove` instead of a whole set. Two devices
+on the same title resolve to whichever push the server saw last; `updated_at` is server `now()`,
+because client clocks cannot be compared across devices.
+
+**Delivery is a ticket, not a debounce.** A player writes a position every 30 seconds of continuous
+playback, so a window that restarts on each write would never fire. `CloudAutoSync` therefore has a
+`ticketExtend` mode: the first change sets the ticket 30 seconds out and each later change moves it
+**one second** later (`test/cloud_auto_sync_test.dart` pins that arithmetic). In practice a push
+lands roughly half a minute after the first unsent change, and continues at that rhythm while
+something plays. Closing the player, stepping to a sibling, finishing a title, backgrounding the app
+or tearing the shell down each call `AppDatabase.requestWatchSync()` - the "we are done here" half,
+which must not wait for a launch. `push_watch_delta` is chunked at 500 entries and each chunk is
+cleared when its call returns, so a failure loses nothing already delivered.
+
+**The pull mirrors per title, except where the outbox is ahead.** `planWatchPull` (pure, in
+`lib/data/watch_state.dart`) writes remote states that differ, deletes local rows the cloud no
+longer has, and skips any title with a queued change - overwriting it would visibly undo an action
+the device is about to send. Only cloud-managed sources are touched, so local-only progress stays
+local. Reads are **paged**: PostgREST caps a response at the project's `max_rows` (1000 by
+default), and a truncated read would look exactly like "the cloud removed these titles", i.e. the
+pull would delete rows it never received. The v16 migration seeds `watch_outbox` from the existing
+local tables for the same reason the favorites seed exists: the first pull would otherwise erase
+progress the cloud was never told about.
+
+**The row carries a display snapshot the panel can render.** The cloud has no catalogue:
+`item_id` is a provider id (`stream_id`, `cmd`, an M3U hash) and the human-readable side of it
+lives in the device's SQLite mirror, a 2000-page catalogue that is deliberately not synchronised.
+So `WatchState` gained `title`/`year`/`poster`/`backdrop`, resolved from `media_items` **at push time**
+(`AppDatabase.readWatchMetadata`) rather than stored with the outbox: the catalogue is the truth
+and the playback writers only ever had the id. The push omits unknown values entirely, and
+`push_watch_delta` merges them field-wise (`excluded.title <> '' then ...`), exactly like
+`merge_preserving_nonempty` on `sources.fields` — so an older build, or a device whose catalogue no
+longer holds the id, can never blank what another device stored. The snapshot is **not** part of
+`sameState`: a renamed title is not a new position, and a pull must not rewrite local progress over
+it. Poster and backdrop URLs are clipped to 2048 and restricted to http(s) (the columns place them
+in the panel's `<img src>`); the panel repeats that check when rendering. The panel's **History**
+tab is the reader: Continue watching with a progress bar, then Watched, newest first, each row with
+a **landscape (16:9) thumbnail** that prefers the backdrop (119 of the 121 titles in the reference
+library have one) and falls back to the poster cropped to the same box.
+
 `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
 [`cloud_sync.dart`](../lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, profile
 selection (`listProfiles`/`activeProfileId`/`setProfile`), and profile-scoped
-`pullSources`/`pullMetadata`/`pullFavorites` + `pushSources`/`pushMetadata`/`pushFavorites`.
+`pullSources`/`pullMetadata`/`pullFavorites`/`pullWatchState` +
+`pushSources`/`pushMetadata`/`pushFavorites`/`pushWatchDelta`.
 Sources/metadata write through `SourceStore`; favorites use `AppDatabase` and are mapped between
 the credential-derived `Source.id` (local key) and the `SourceConfig` UUID (cloud key) via
 `config.build().id`. Cloud-managed source ids are tracked in secure storage so a pull replaces
@@ -742,6 +800,42 @@ in this repo's CI is pinned, and a deploy credential is the wrong place to make 
 artefact. The base path is baked into the bundle and `import.meta.env.BASE_URL` is what
 `emailRedirectTo` is composed from, so it has to match the origin it is served at.
 
+#### The private LAN copy (this household's install)
+
+The public origins above are for shipped app builds. The owner's own panel is served from the
+**`transmission` container** (proxmox LXC, 192.168.1.15) by its existing Apache, from
+`/var/www/html/iptvs` — the same document root that already serves `MediaCover/` and `Seed/`:
+
+```bash
+# on the PC (dev machine) — build, then copy the static files
+cd panel && npm run build                     # base stays the default '/iptvs/'
+tar -C dist -czf /tmp/panel-dist.tar.gz .
+scp /tmp/panel-dist.tar.gz transmission:/tmp/
+ssh transmission 'rm -rf /var/www/html/iptvs && mkdir -p /var/www/html/iptvs \
+  && tar -C /var/www/html/iptvs -xzf /tmp/panel-dist.tar.gz \
+  && chmod -R a+rX /var/www/html/iptvs'
+```
+
+Served at **`http://transmission/iptvs/`** and **`https://transmission/iptvs/`** (Apache's
+`default-ssl.conf`, a private-CA certificate whose SAN list includes `DNS:transmission` and
+`IP:192.168.1.15`). No Node on the box: the panel is static, and all data still goes straight to
+Supabase. Opening it over **https** works, but a browser then refuses mixed content, so the
+`http://transmission/...` LAN artwork some series use will not load (the movies' CDN posters are
+https and do); the app's `PANEL_URL` therefore uses the http form. `_headers` is inert on Apache —
+the CSP arrives in the meta tag, which is also why `img-src` there must allow the http(s) artwork
+URLs the History tab renders; scripts, styles, connections and frames stay `'self'` + the
+project's Supabase origin.
+
+Both URLs are in the Supabase redirect allow-list (with the `.local` name and the retired
+`localhost:5173` dev entries, so an older link keeps working), and `site_url` points at the http
+one. The app's `PANEL_URL` is a **build-time constant**, so the local define files carry it:
+`dart_define.json` (Windows) and `dart_define.android.json` (phone) — both `http://transmission/iptvs/`.
+The hostname resolves on the LAN (the router's DNS suffix answers for both Windows and Android)
+and is what the pairing QR encodes. **Cloud sync never touches this server** — it talks to Supabase
+directly, so a stopped panel breaks links, not progress.
+
+`npm run dev` (default `localhost:5173`, `base /iptvs/`, no CSP, HMR) remains the development
+loop; it is not the serving path any more.
 ### The panel re-renders on a change of identity, never on an auth *event*
 
 `render()` rebuilds the whole app shell and the active tab's body, and the panel's sub-views —

@@ -219,6 +219,52 @@ final ValueNotifier<ProxyConfig> proxyConfig = ValueNotifier(
 /// and the diagnostics log. `null` means direct.
 final ValueNotifier<ProxyEndpoint?> effectiveProxy = ValueNotifier(null);
 
+/// Hosts whose direct attempt failed recently, so the next one goes straight to
+/// the proxy instead of paying the connect timeout again.
+///
+/// Shared by every direct-first path (artwork and guide downloads), because the
+/// question is about the host and the network, not about what was being fetched.
+final Map<String, DateTime> _directFailures = {};
+
+/// How long a host stays on the "direct does not work here" list. A network that
+/// unblocks a host should recover without a restart; twenty posters or one guide
+/// refresh must not re-pay the timeout twenty times.
+@visibleForTesting
+Duration directFailureWindow = const Duration(minutes: 10);
+
+/// Whether a one-off request to [host] should be tried **without** the proxy
+/// first.
+///
+/// False when there is no proxy to fall back to (direct is the only route
+/// anyway), when the platform bypass list or the LAN rule already excludes the
+/// host, or when it just failed direct. Everything else — a poster CDN, an XMLTV
+/// guide — is attempted directly, because the common failure they fix is the
+/// opposite: a proxy that blocks or mangles a perfectly reachable host.
+bool shouldTryDirectFirst(String host) {
+  final endpoint = effectiveProxy.value;
+  if (endpoint == null) return false;
+  if (endpoint.excludes(host) || ProxyEndpoint.isLocalHost(host)) return false;
+  final at = _directFailures[host];
+  if (at == null) return true;
+  if (DateTime.now().difference(at) < directFailureWindow) return false;
+  _directFailures.remove(host);
+  return true;
+}
+
+/// Records that [host] could not be reached directly, so the next request for it
+/// starts at the proxy.
+void noteDirectFailure(String host) {
+  if (_directFailures.length >= 64) _directFailures.clear();
+  _directFailures[host] = DateTime.now();
+}
+
+/// Test seam: forgets every remembered direct failure.
+@visibleForTesting
+void debugResetDirectFailures() {
+  _directFailures.clear();
+  directFailureWindow = const Duration(minutes: 10);
+}
+
 /// Reads the stored proxy choice into [proxyConfig] and applies it. Called once
 /// at boot, before the first `HttpClient` exists.
 Future<void> loadProxyConfig({AppSettingsStore? store}) async {

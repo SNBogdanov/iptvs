@@ -1788,9 +1788,10 @@ instead of only while the mouse is moving. **Windows' GDI overlay now draws the 
 HUD** (`NativeHudShown` / `NativeHudClockRect` / `NativeHudTimeRect` / `NativeHudNameRect`): the
 clock and VOD readout as before, plus the top-left name pill from `showChannelName` +
 `NativeControlState.title` (the channel name on live, the title on VOD/catch-up), left-aligned with
-the name's band capped at 60% of the width so it can never reach the clock. Android Compose, iOS and
-the Linux Lua OSD still apply the preferences to their chrome badge/readout only, so their
-persistent HUDs (and the name element in particular) remain outstanding.
+the name's band capped at 60% of the width so it can never reach the clock. **Android Compose now
+does the same** (`PersistentHud` draws the name pill from `PlayerUiState.showChannelName`, and the
+top-bar title is gated on the same flag); iOS and the Linux Lua OSD still apply the preferences to
+their chrome badge/readout only, so their persistent HUDs remain outstanding.
 Pinned by `test/player_overlay_test.dart` and `test/player_chrome_prefs_test.dart`.
 
 ### Player controls: which buttons the chrome draws

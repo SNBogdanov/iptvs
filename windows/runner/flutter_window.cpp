@@ -1393,11 +1393,52 @@ void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
   DeleteObject(icon_font);
 }
 
+// "Enter fullscreen", drawn as four corner brackets pointing **outward**.
+//
+// Segoe MDL2's nearest glyph is `E740`, which on Windows 10/11 is a single
+// two-headed diagonal arrow — not the four-corner icon every other surface uses
+// (Material's `Icons.fullscreen`). Reported twice on VOD: "an arrow with two
+// ends instead of icon 1". Drawn for the same reason as the exit glyph below, in
+// the same button box and colours.
+void DrawFullscreenEnterButton(HDC hdc, const RECT &rect, bool active = false,
+                               int radius = kNativeButtonRadius) {
+  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+  const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
+  FillRoundRectAA(hdc, rect, NativeScale(radius), bg);
+
+  const int cx = (rect.left + rect.right) / 2;
+  const int cy = (rect.top + rect.bottom) / 2;
+  const int s = NativeScale(8);   // half the icon's box
+  const int a = NativeScale(5);   // arm length
+  const int t = std::max(2, NativeScale(2)); // stroke
+  HPEN pen = CreatePen(PS_SOLID, t, fg);
+  if (pen == nullptr) return;
+  HGDIOBJ old_pen = SelectObject(hdc, pen);
+  // Vertex on the outer corner, arms running inward: the bracket opens toward
+  // the centre, matching the shared overlay's icon and the exit glyph mirrored.
+  const POINT top_left[3] = {{cx - s, cy - s}, {cx - s + a, cy - s},
+                             {cx - s, cy - s + a}};
+  const POINT top_right[3] = {{cx + s, cy - s}, {cx + s - a, cy - s},
+                              {cx + s, cy - s + a}};
+  const POINT bottom_left[3] = {{cx - s, cy + s}, {cx - s + a, cy + s},
+                                {cx - s, cy + s - a}};
+  const POINT bottom_right[3] = {{cx + s, cy + s}, {cx + s - a, cy + s},
+                                 {cx + s, cy + s - a}};
+  for (const auto *corner : {top_left, top_right, bottom_left, bottom_right}) {
+    MoveToEx(hdc, corner[0].x, corner[0].y, nullptr);
+    LineTo(hdc, corner[1].x, corner[1].y);
+    MoveToEx(hdc, corner[0].x, corner[0].y, nullptr);
+    LineTo(hdc, corner[2].x, corner[2].y);
+  }
+  SelectObject(hdc, old_pen);
+  DeleteObject(pen);
+}
+
 // "Leave fullscreen" / "return to a normal window", drawn as four corner
 // brackets pointing **inward**.
 //
-// Segoe MDL2 has no such glyph: its pair is `E740` FullScreen (four brackets
-// outward) and `E73F` BackToWindow (two arrows pointing at each other). The two
+// Segoe MDL2 has no such glyph: its pair is `E740` (a two-headed diagonal
+// arrow) and `E73F` BackToWindow (two arrows pointing at each other). The two
 // surfaces then disagreed — the shared Flutter overlay draws Material's
 // `fullscreen_exit`, which is four brackets inward — so the same state looked
 // like two different actions depending on which chrome was up. Drawn rather than
@@ -3706,15 +3747,17 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, l.info, L"\xE946",
                  is_focused(NativeFocusItem::kInfo) ||
                      g_native_control_state.info_open);
-  // `E740` (four brackets outward) = "enter fullscreen"; the inward-bracket
-  // glyph is drawn, because MDL2's `E73F` is two arrows and the Flutter overlay
-  // shows four brackets — one state, one picture, on both surfaces.
+  // Four brackets outward = "enter fullscreen"; four inward = "leave". Both are
+  // **drawn**, because Segoe MDL2 has no four-corner pair at all — its `E740` is
+  // a two-headed diagonal arrow and `E73F` is two arrows pointing at each other,
+  // while the shared Flutter overlay draws Material's four-corner pair. One
+  // state, one picture, on every surface.
   if (g_native_control_state.fullscreen) {
     DrawFullscreenExitButton(paint_hdc, l.fullscreen,
                              is_focused(NativeFocusItem::kFullscreen));
   } else {
-    DrawIconButton(paint_hdc, l.fullscreen, L"\xE740",
-                   is_focused(NativeFocusItem::kFullscreen));
+    DrawFullscreenEnterButton(paint_hdc, l.fullscreen,
+                               is_focused(NativeFocusItem::kFullscreen));
   }
   // A text chip rather than an MDL2 glyph: the "Picture" codepoint is not in
   // every installed Segoe MDL2 build (it renders as a placeholder box), and
@@ -3769,8 +3812,8 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     // inward brackets when it returns to a normal window. Same two pictures the
     // full bar uses, so the pair never changes meaning between modes.
     if (g_native_mini_return_fullscreen) {
-      DrawIconButton(paint_hdc, l.restore, L"\xE740",
-                     is_focused(NativeFocusItem::kRestore));
+      DrawFullscreenEnterButton(paint_hdc, l.restore,
+                               is_focused(NativeFocusItem::kRestore));
     } else {
       DrawFullscreenExitButton(paint_hdc, l.restore,
                                is_focused(NativeFocusItem::kRestore));

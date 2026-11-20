@@ -48,6 +48,21 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   `delete_account` RPC removes only the signed-in real account. Owner foreign
   keys cascade its cloud data, and the RPC also removes the anonymous auth
   identities of devices paired to that account.
+- **Watch state** (`..._watch_state.sql`, `..._watch_state_meta.sql`,
+  `..._watch_state_backdrop.sql`) — VOD/series resume points and watched marks in their
+  own keyed table (`watch_state`, primary key
+  `(profile_id, source_id, kind, item_id)`, `kind` limited to
+  movie/series/episode), instead of another array on `profiles`: progress moves
+  every few seconds, so the write has to be O(changed titles). Devices push a
+  per-title delta through `push_watch_delta` (position, watched, or **cleared** —
+  which deletes the row, because an absence cannot express a removal); the RPC
+  skips entries whose source is not in the profile and never errors on them.
+  Each row also carries the `title`/`year`/`poster`/`backdrop` snapshot the panel
+  renders (the cloud holds no catalogue); the merge is field-preserving, so a
+  push that does not know a value keeps the stored one, and both artwork URLs are
+  http(s)-only and bounded like every other client-writable column.
+  `anon`/`authenticated` hold SELECT only (RLS: the owner or a paired device);
+  deleting a source cascades its progress away.
 
 ## One-time setup
 
@@ -109,9 +124,10 @@ pgTAP suite in `supabase/tests/` — prefer extending that over re-checking by h
 - [ ] Anonymous session has **no direct** INSERT/UPDATE/DELETE on any table (writes need a real account).
 - [ ] `push_sources`/`push_metadata` reject an **unpaired** anonymous caller (no owner).
 - [ ] A `push_sources` payload can't create/modify/delete rows for another account (owner-scoped).
-- [ ] `push_sources`/`push_metadata`/`push_favorites`/`set_device_profile` reject a
-      `profile_id` the caller's account doesn't own.
-- [ ] Account A cannot read or write account B's profiles, sources, or favorites.
+- [ ] `push_sources`/`push_metadata`/`push_favorites`/`push_watch_delta`/
+      `set_device_profile` reject a `profile_id` the caller's account doesn't own.
+- [ ] Account A cannot read or write account B's profiles, sources, favorites or
+      watch state.
 - [ ] `claim_pairing` rejects an anonymous claimer, an expired code, and an already-claimed code.
 - [ ] Deleting a `devices` row immediately revokes that device's read access (and its push).
 - [ ] `delete_account` rejects anonymous devices, deletes only the caller, and

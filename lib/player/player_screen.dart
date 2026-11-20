@@ -1500,17 +1500,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (!(_separateEngineOwnsPlayback || _usesWindowsNativeSurface)) return;
     try {
-      await _nativeHdrPlayer.invokeMethod<void>(
-        'setZapBanner',
-        {
-          ...zap.bannerPayload(),
-          // The overlay keys its 3 s auto-hide on this stamp. Unrelated pushes
-          // (the auto-switch countdown ticks once a second) repeat the same
-          // value, so they refresh the banner without restarting its timer -
-          // otherwise the channel name sat over the picture forever.
-          'atMs': _zapBannerAtMs,
-        },
-      );
+      await _nativeHdrPlayer.invokeMethod<void>('setZapBanner', {
+        ...zap.bannerPayload(),
+        // The overlay keys its 3 s auto-hide on this stamp. Unrelated pushes
+        // (the auto-switch countdown ticks once a second) repeat the same
+        // value, so they refresh the banner without restarting its timer -
+        // otherwise the channel name sat over the picture forever.
+        'atMs': _zapBannerAtMs,
+      });
     } on MissingPluginException {
       // Native half not implemented on this platform/build — expected.
     } catch (error) {
@@ -1850,6 +1847,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // (or nothing at all) — reported as "the position is not remembered when I
     // press Next".
     await _persistPlaybackPosition();
+    // The outgoing title is done for this session — ask the cloud for the send
+    // now rather than letting its 30-second ticket outlive the step.
+    widget.playback?.db.requestWatchSync();
     if (!mounted) {
       _steppingVod = false;
       return;
@@ -2200,6 +2200,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             // the current value.
             'showClock': showPlayerClock.value,
             'showPlaybackTimes': showPlaybackTimes.value,
+            'showChannelName': showChannelName.value,
             'seekStepSeconds': seekStepSeconds.value,
             // Which optional controls to draw, as the comma list of wire names
             // `PlayerControl.storageName` defines. Read once at launch, like the
@@ -2360,7 +2361,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// (a pure window call that never touches the native state). The overlay's
   /// fullscreen button draws "leave" from this, so reading only one of them left
   /// the "enter" glyph up while the window was already fullscreen.
-  bool get _windowFullscreen => _isNativeFullscreen || _embeddedWindowFullscreen;
+  bool get _windowFullscreen =>
+      _isNativeFullscreen || _embeddedWindowFullscreen;
 
   Future<void> _toggleFullscreenForCurrentSurface() async {
     // The native surface owns the GDI control overlay, so it alone may go
@@ -2610,6 +2612,9 @@ class _PlayerScreenState extends State<PlayerScreen>
               position: Duration(milliseconds: positionMs),
               duration: Duration(milliseconds: durationMs),
             );
+            // The native player is closing: send its last position now instead
+            // of leaving it queued for the debounce/next launch.
+            playback.db.requestWatchSync();
           }
         }
         // The native overlay's final favorite state — persist it (awaited, like
@@ -2965,7 +2970,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     // position before dropping the session reference or the embedded player
     // fallback will have no useful state to persist.
     try {
-      await _persistPlaybackPosition(completed: _player.state.completed);
+      await _persistPlaybackPosition(
+        completed: _player.state.completed,
+        finish: true,
+      );
     } catch (error) {
       _logPlayback('warn native Linux position save failed: $error');
     }
@@ -4623,7 +4631,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// position) actually runs on the next frame. A fire-and-forget save there
   /// raced the reload and reliably lost, which is why the rail looked stale
   /// until a manual refresh re-read the by-then-completed write.
-  Future<void> _persistPlaybackPosition({bool completed = false}) async {
+  ///
+  /// [finish] marks the end of watching this title (route closing, stepping to
+  /// a sibling, or reaching the end). Local saving and cloud syncing are
+  /// deliberately separate rhythms — the position is written every 30 s of
+  /// playback, while the cloud gets a debounced push — so the "done here" half
+  /// has to be said out loud; without it a closed player would leave its last
+  /// position queued for up to a launch.
+  Future<void> _persistPlaybackPosition({
+    bool completed = false,
+    bool finish = false,
+  }) async {
     final playback = widget.playback;
     if (playback == null || _isLive) return;
     // Android's Activity and iOS's presented controller both own the position
@@ -4632,7 +4650,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // can still be *asked* (see [_persistNativeAndroidPosition]) — which is what
     // a VOD step needs, because the outgoing title never sees `nativeClosed`.
     if ((Platform.isAndroid || Platform.isIOS) && _nativePlaybackLaunched) {
-      if (Platform.isAndroid) await _persistNativeAndroidPosition(playback);
+      if (Platform.isAndroid) {
+        await _persistNativeAndroidPosition(playback, finish: finish);
+      }
       return;
     }
     // A VOD step moves the route onto a sibling the launch context never named,
@@ -4653,6 +4673,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         duration: linuxState.duration,
         completed: completed,
       );
+      if (finish) playback.db.requestWatchSync();
       return;
     }
     final position = completed
@@ -4669,6 +4690,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       duration: duration > Duration.zero ? duration : position,
       completed: completed,
     );
+    if (finish) playback.db.requestWatchSync();
   }
 
   /// The position an **Android** session is at, read from the Activity.
@@ -4683,7 +4705,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// Silent about failure on purpose: a missing handler (older build) or an
   /// Activity that is already finishing means "nothing to save", not an error
   /// the user should see mid-step.
-  Future<void> _persistNativeAndroidPosition(PlaybackContext playback) async {
+  Future<void> _persistNativeAndroidPosition(
+    PlaybackContext playback, {
+    bool finish = false,
+  }) async {
     Map<String, Object?>? map;
     try {
       map = await _nativeHdrPlayer.invokeMapMethod<String, Object?>(
@@ -4710,6 +4735,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       position: Duration(milliseconds: positionMs),
       duration: duration,
     );
+    if (finish) playback.db.requestWatchSync();
   }
 
   /// One-shot write-back of a run-length actually discovered by playback, so
@@ -4780,7 +4806,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Last-resort safety net (e.g. dispose without an explicit exit path) —
     // the real save-before-pop is in _exitAndPop/nativeClosed, both of which
     // run and complete well before this.
-    unawaited(_persistPlaybackPosition(completed: _player.state.completed));
+    unawaited(
+      _persistPlaybackPosition(
+        completed: _player.state.completed,
+        finish: true,
+      ),
+    );
     final reconnectTimer = _reconnectTimer;
     if (reconnectTimer != null) {
       final wasActive = reconnectTimer.isActive;
@@ -4851,7 +4882,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     await _setEmbeddedWindowFullscreen(false);
     // Await the final position write before popping — see the doc comment on
     // _persistPlaybackPosition for why this can't be fire-and-forget here.
-    await _persistPlaybackPosition(completed: _player.state.completed);
+    await _persistPlaybackPosition(
+      completed: _player.state.completed,
+      finish: true,
+    );
     await _teardownLinuxNative();
     if (Platform.isWindows && _nativePlaybackLaunched) {
       await _prepareWindowsNativeExit();
@@ -5281,7 +5315,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_separateEngineOwnsPlayback) return;
     final playback = widget.playback;
     if (playback == null) return;
-    await _persistPlaybackPosition(completed: true);
+    await _persistPlaybackPosition(completed: true, finish: true);
     final session = _vodStep;
     if (!playback.autoPlayNext || session == null) return;
     // The route's cursor, not the session's launch index: a manual step has

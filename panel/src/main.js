@@ -5,6 +5,10 @@ import { supabase, KIND_FIELDS } from './supabase.js';
 import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, esc, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, sessionIdentityChanged, passwordFieldHtml, setPasswordReveal, sourceFieldHtml, splitFields, stashPairingCode, togglePasswordReveal, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
+import {
+  historyRowHtml,
+  partitionHistory,
+} from './history.js';
 import { hashPin, isValidPin, PIN_LENGTH } from './pin.js';
 import {
   generatePassphrase,
@@ -82,22 +86,60 @@ supabase.auth.getSession().then(({ data }) => {
 
 // Load the account's profiles, creating a Default when there are none (so
 // sources have somewhere to attach), and settle on a valid current profile.
+//
+// **Single-flight.** Several paths call this on the first render after a login
+// or a pairing — the auth callback's render, the hash router, and the pair
+// handler — and each used to find `profiles === null` and run its own
+// "select, then insert if empty". Three concurrent callers therefore created
+// *three* accounts' worth of "Default" profiles for one account (seen on the
+// first hand-made project: three identical rows, created within 200 ms). One
+// promise, shared by every caller, makes that impossible.
+let profilesLoading = null;
+
 async function ensureProfiles() {
-  const { data, error } = await supabase.from('profiles').select('*').order('position');
-  if (error) { profiles = []; return; }
-  profiles = data;
-  if (profiles.length === 0) {
-    const { data: created } = await supabase
+  if (profilesLoading) return profilesLoading;
+  profilesLoading = (async () => {
+    const { data, error } = await supabase
       .from('profiles')
-      .insert({ owner: session.user.id, name: 'Default', position: 0 })
-      .select()
-      .single();
-    if (created) profiles = [created];
-  }
-  if (!currentProfileId || !profiles.some((p) => p.id === currentProfileId)) {
-    currentProfileId = profiles[0]?.id ?? null;
-  }
-  if (currentProfileId) localStorage.setItem('iptvs_profile', currentProfileId);
+      .select('*')
+      .order('position');
+    if (error) {
+      profiles = [];
+      return;
+    }
+    profiles = data;
+    if (profiles.length === 0) {
+      const { data: created } = await supabase
+        .from('profiles')
+        .insert({ owner: session.user.id, name: 'Default', position: 0 })
+        .select()
+        .single();
+      if (created) profiles = [created];
+    }
+    if (!currentProfileId || !profiles.some((p) => p.id === currentProfileId)) {
+      // Prefer the profile the paired device actually syncs: a phone that has
+      // already pushed should not open the panel on an empty sibling.
+      let preferred = null;
+      try {
+        const { data: devices } = await supabase
+          .from('devices')
+          .select('active_profile_id')
+          .not('active_profile_id', 'is', null)
+          .limit(1);
+        preferred = devices?.[0]?.active_profile_id ?? null;
+      } catch (_) {
+        // No device (or no read access yet): the first profile is fine.
+      }
+      currentProfileId =
+        profiles.find((p) => p.id === preferred)?.id ?? profiles[0]?.id ?? null;
+    }
+    if (currentProfileId) {
+      localStorage.setItem('iptvs_profile', currentProfileId);
+    }
+  })().finally(() => {
+    profilesLoading = null;
+  });
+  return profilesLoading;
 }
 
 const profileName = (id) =>
@@ -114,6 +156,7 @@ async function render() {
       </span>
       <nav>
         ${navButton('sources', 'Sources')}
+        ${navButton('history', 'History')}
         ${navButton('metadata', 'Metadata')}
         ${navButton('security', 'Security')}
         ${navButton('profiles', 'Profiles')}
@@ -139,6 +182,7 @@ async function render() {
     b.onclick = () => { tab = b.dataset.tab; render(); };
   }
   if (tab === 'sources') renderSources();
+  else if (tab === 'history') renderHistory();
   else if (tab === 'metadata') renderMetadata();
   else if (tab === 'security') renderSecurity();
   else if (tab === 'profiles') renderProfiles();
@@ -321,6 +365,50 @@ async function renderSources() {
     el.onclick = () => reorder(data, data.findIndex((s) => s.id === el.dataset.up), -1);
   for (const el of view().querySelectorAll('[data-down]'))
     el.onclick = () => reorder(data, data.findIndex((s) => s.id === el.dataset.down), 1);
+}
+
+// Watch history, as the paired app reported it.
+//
+// Nothing here is authoritative: the device is the only party that watches
+// anything, and it pushes a per-title delta (position / watched / cleared)
+// with a display snapshot of the title. The panel is a reader, so this tab
+// renders the rows as they are and never writes.
+async function renderHistory() {
+  view().innerHTML = '<p class="muted">Loading…</p>';
+  if (!currentProfileId) {
+    return (view().innerHTML =
+      '<p class="muted">Create a profile first (Profiles tab).</p>');
+  }
+  // `*`, not an explicit column list: a backend that predates the metadata
+  // migration still answers, and the rows simply fall back to their ids.
+  const [state, sources] = await Promise.all([
+    supabase
+      .from('watch_state')
+      .select('*')
+      .eq('profile_id', currentProfileId)
+      .order('updated_at', { ascending: false })
+      .limit(500),
+    supabase.from('sources').select('id, label').eq('profile_id', currentProfileId),
+  ]);
+  if (state.error) {
+    logError(state.error);
+    return (view().innerHTML =
+      `<p class="error">${esc(friendlyError(state.error))}</p>`);
+  }
+  const labels = new Map(
+    (sources.data ?? []).map((s) => [s.id, s.label || 'Source']),
+  );
+  const rows = state.data ?? [];
+  const { inProgress, watched } = partitionHistory(rows);
+  const section = (heading, items, empty) => `
+    <h3>${heading}</h3>
+    <div class="rows">
+      ${items.length ? items.map((row) => historyRowHtml(row, labels.get(row.source_id))).join('') : `<p class="muted">${empty}</p>`}
+    </div>`;
+  view().innerHTML = `
+    <p class="muted hint">Watch progress reported by the app for <strong>${esc(profileName(currentProfileId))}</strong> · ${rows.length} title${rows.length === 1 ? '' : 's'}.</p>
+    ${section('Continue watching', inProgress, 'Nothing in progress.')}
+    ${section('Watched', watched, 'Nothing finished yet.')}`;
 }
 
 // The decoded secret map for a source, falling back to legacy inline fields

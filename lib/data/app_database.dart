@@ -13,6 +13,7 @@ import '../sources/source_identity.dart';
 import 'epg_ingest.dart';
 import 'load_token.dart';
 import 'secret_locator_vault.dart';
+import 'watch_state.dart';
 
 /// A saved VOD resume point (see `playback_positions`).
 class PlaybackPosition {
@@ -95,7 +96,7 @@ class AppDatabase {
   /// branch in between over a schema that may already have the change, so each
   /// branch must be idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`, the
   /// `_isDuplicateColumn` guard).
-  static const schemaVersion = 15;
+  static const schemaVersion = 16;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -175,6 +176,7 @@ class AppDatabase {
           await _createPlaybackPositions(db);
           await _createWatchedMedia(db);
           await _createFavoritesOutbox(db);
+          await _createWatchOutbox(db);
           await db.execute(
             'CREATE INDEX idx_channels_source ON channels(source_id)',
           );
@@ -270,7 +272,7 @@ class AppDatabase {
             // `_createMediaTables`), so this one branch covers every upgrade
             // path including pre-v3 — which skips the v3+ media branches
             // entirely. Idempotent.
-await _createFavoritesOutbox(db);
+            await _createFavoritesOutbox(db);
             // The seed below reads `favorites`, which an upgrade recorded at
             // v9+ never re-creates — and a database that never had it (an old
             // partial fixture, or any path where the v9 branch was skipped)
@@ -314,6 +316,50 @@ await _createFavoritesOutbox(db);
             // outside `_createMediaTables`), so this one branch covers every
             // upgrade path including pre-v3. Idempotent.
             await _createWatchedMedia(db);
+          }
+          if (oldV < 16) {
+            // Pending watch-state changes awaiting a cloud push (resume points
+            // and watched marks). Standalone table, like the favorites outbox.
+            await _createWatchOutbox(db);
+            // Both source tables are created by their own (older) branches, but
+            // the seeds below read them: an upgrade path that skipped those
+            // branches must not turn into a failed open. `IF NOT EXISTS`, so
+            // this costs one no-op DDL on every real path.
+            await _createPlaybackPositions(db);
+            await _createWatchedMedia(db);
+            // Seed with everything already known locally.
+            //
+            // Without this, the first pull after the upgrade would mirror the
+            // profile — which has never heard of this history — and delete every
+            // resume point and watched mark of the cloud-managed sources: the
+            // exact data-loss shape the favorites seed was added for. Re-sending
+            // state the cloud already has is a no-op upsert there.
+            //
+            // OR IGNORE, not OR REPLACE: the branch must survive being re-run
+            // (there is no onDowngrade), and a re-run must not overwrite a
+            // pending *clear* with an in-progress state — that would resurrect
+            // an entry the user removed from Continue watching.
+            final now = DateTime.now().millisecondsSinceEpoch;
+            await db.execute(
+              '''
+              INSERT OR IGNORE INTO watch_outbox
+                (source_id, kind, item_id, position_ms, duration_ms, watched,
+                 updated_at)
+              SELECT source_id, kind, item_id, position_ms, duration_ms, 0, ?
+                FROM playback_positions
+            ''',
+              [now],
+            );
+            await db.execute(
+              '''
+              INSERT OR IGNORE INTO watch_outbox
+                (source_id, kind, item_id, position_ms, duration_ms, watched,
+                 updated_at)
+              SELECT source_id, kind, item_id, 0, 0, 1, ?
+                FROM watched_media
+            ''',
+              [now],
+            );
           }
         },
       ),
@@ -690,6 +736,29 @@ await _createFavoritesOutbox(db);
     ''');
   }
 
+  /// Pending watch-state changes awaiting a cloud push.
+  ///
+  /// Keyed like [recordFavoriteChange]'s outbox — one row per title — so a
+  /// 30-second position tick replaces the previous row instead of queueing a
+  /// history of them. A row's `watched` flag and its position are kept together
+  /// because they are mutually exclusive states of the same title: `watched`
+  /// true (finished), `position_ms > 0` (in progress), or neither (the entry was
+  /// cleared — a removal the cloud has to hear about).
+  static Future<void> _createWatchOutbox(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS watch_outbox (
+        source_id   TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        item_id     TEXT NOT NULL,
+        position_ms INTEGER NOT NULL DEFAULT 0,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        watched     INTEGER NOT NULL DEFAULT 0,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind, item_id)
+      )
+    ''');
+  }
+
   static Future<void> _createPlaybackPositions(Database db) async {
     // VOD resume positions (movies/episodes), keyed like `favorites` by the
     // source-stable ids and deliberately separate from `media_items` so a
@@ -776,6 +845,10 @@ await _createFavoritesOutbox(db);
         'favorites_outbox',
         'playback_positions',
         'watched_media',
+        // Pending watch-state changes, for exactly the same reason as the
+        // favorites outbox above: they are keyed by source, and the delta push
+        // reads this table.
+        'watch_outbox',
       ]) {
         final keys = await _keyColumnsOtherThanSource(txn, table);
         if (keys.isNotEmpty) {
@@ -996,15 +1069,26 @@ await _createFavoritesOutbox(db);
         (duration > Duration.zero &&
             position.inMilliseconds >=
                 duration.inMilliseconds * kFinishedFraction)) {
-      await markWatched(sourceId, kind, itemId);
-      await clearPlaybackPosition(sourceId, kind, itemId);
+      await markWatched(sourceId, kind, itemId, queue: false);
+      await clearPlaybackPosition(sourceId, kind, itemId, queue: false);
+      // One outbox row for the whole transition, written last: the outbox is a
+      // record of committed intent, so nothing is queued for a write that
+      // threw. `watched` true and no position is the terminal state.
+      await _queueWatchState(
+        WatchState(
+          sourceId: sourceId,
+          kind: kind,
+          itemId: itemId,
+          watched: true,
+        ),
+      );
       return;
     }
     // Ignore the first instants — a resume row for second 0 is just noise. This
     // early-return is deliberate before the in-progress write: it also guards
     // the watched mark from being cleared by a sub-10 s session.
     if (position < const Duration(seconds: 10)) return;
-    await clearWatched(sourceId, kind, itemId);
+    await clearWatched(sourceId, kind, itemId, queue: false);
     await _db.insert('playback_positions', {
       'source_id': sourceId,
       'kind': kind.name,
@@ -1013,6 +1097,15 @@ await _createFavoritesOutbox(db);
       'duration_ms': duration.inMilliseconds,
       'updated_at': DateTime.now().millisecondsSinceEpoch,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
+    await _queueWatchState(
+      WatchState(
+        sourceId: sourceId,
+        kind: kind,
+        itemId: itemId,
+        positionMs: position.inMilliseconds,
+        durationMs: duration.inMilliseconds,
+      ),
+    );
   }
 
   /// Records a run-length the player **actually saw** by playing [itemId], so
@@ -1057,22 +1150,34 @@ await _createFavoritesOutbox(db);
   Future<void> clearPlaybackPosition(
     String sourceId,
     ContentKind kind,
-    String itemId,
-  ) => _db.delete(
-    'playback_positions',
-    where: 'source_id = ? AND kind = ? AND item_id = ?',
-    whereArgs: [sourceId, kind.name, itemId],
-  );
+    String itemId, {
+    bool queue = true,
+  }) async {
+    await _db.delete(
+      'playback_positions',
+      where: 'source_id = ? AND kind = ? AND item_id = ?',
+      whereArgs: [sourceId, kind.name, itemId],
+    );
+    if (queue) {
+      await _queueWatchState(
+        WatchState(sourceId: sourceId, kind: kind, itemId: itemId),
+      );
+    }
+  }
 
   /// Records that [itemId] has been played to the end (see `watched_media`).
   /// Idempotent: re-finishing an already-watched title just refreshes its stamp.
   /// Written by [savePlaybackPosition]'s completion branch — treat that method
   /// as the only writer, exactly like `playback_positions` rows.
+  ///
+  /// [queue] is the internal seam: the caller that performs a *compound* change
+  /// passes false and queues the resulting state once itself.
   Future<void> markWatched(
     String sourceId,
     ContentKind kind,
     String itemId, {
     DateTime? at,
+    bool queue = true,
   }) async {
     await _db.insert('watched_media', {
       'source_id': sourceId,
@@ -1080,26 +1185,44 @@ await _createFavoritesOutbox(db);
       'item_id': itemId,
       'updated_at': (at ?? DateTime.now()).millisecondsSinceEpoch,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
+    if (queue) {
+      await _queueWatchState(
+        WatchState(
+          sourceId: sourceId,
+          kind: kind,
+          itemId: itemId,
+          watched: true,
+        ),
+      );
+    }
   }
 
   /// Removes a title's watched mark (a new in-progress session starts).
   Future<void> clearWatched(
     String sourceId,
     ContentKind kind,
-    String itemId,
-  ) => _db.delete(
-    'watched_media',
-    where: 'source_id = ? AND kind = ? AND item_id = ?',
-    whereArgs: [sourceId, kind.name, itemId],
-  );
+    String itemId, {
+    bool queue = true,
+  }) async {
+    await _db.delete(
+      'watched_media',
+      where: 'source_id = ? AND kind = ? AND item_id = ?',
+      whereArgs: [sourceId, kind.name, itemId],
+    );
+    // A watched mark removed on its own means the title now has no state at
+    // all. [savePlaybackPosition] passes false here and queues the position it
+    // writes instead — one row per title, carrying the final state.
+    if (queue) {
+      await _queueWatchState(
+        WatchState(sourceId: sourceId, kind: kind, itemId: itemId),
+      );
+    }
+  }
 
   /// The item ids of [kind] finished for [sourceId] — the titles whose cards
   /// draw a full bar. Projected to ids only, like [readPlaybackProgress]:
   /// nothing that could touch the sealed-locator path.
-  Future<Set<String>> readWatchedIds(
-    String sourceId,
-    ContentKind kind,
-  ) async {
+  Future<Set<String>> readWatchedIds(String sourceId, ContentKind kind) async {
     final rows = await _db.query(
       'watched_media',
       columns: ['item_id'],
@@ -1170,9 +1293,7 @@ await _createFavoritesOutbox(db);
     for (final row in rows) {
       final progress = row['progress'];
       if (progress is! num) continue;
-      out[row['item_id'] as String] = progress
-          .toDouble()
-          .clamp(0.0, 1.0);
+      out[row['item_id'] as String] = progress.toDouble().clamp(0.0, 1.0);
     }
     return out;
   }
@@ -1374,6 +1495,240 @@ await _createFavoritesOutbox(db);
       );
     }
     await batch.commit(noResult: true);
+  }
+
+  // ── watch state outbox (pending cloud delta) ──────────────────────────────
+
+  /// Fires after a local watch-state change is queued in the outbox.
+  ///
+  /// The watch auto-sync listens here instead of at every player call site,
+  /// for the same reason [favoritesChanged] exists: the DB writers are the one
+  /// place every user action already funnels through.
+  Stream<void> get watchChanged => _watchChanged.stream;
+  final StreamController<void> _watchChanged =
+      StreamController<void>.broadcast();
+
+  /// Fires when the player reports that it has *stopped* watching a title —
+  /// closed, stepped to a sibling, or finished.
+  ///
+  /// A position write alone is not a reason to talk to the server (the player
+  /// saves one every 30 s of continuous playback); this is the "we are done
+  /// here, send what is queued" signal behind the debounced push.
+  Stream<void> get watchSyncRequested => _watchSyncRequested.stream;
+  final StreamController<void> _watchSyncRequested =
+      StreamController<void>.broadcast();
+
+  /// Asks the watch auto-sync to send anything pending without waiting out its
+  /// debounce. Purely local; a no-op when nothing is listening.
+  void requestWatchSync() {
+    if (!_watchSyncRequested.isClosed) _watchSyncRequested.add(null);
+  }
+
+  /// Fires when watch state was rewritten by something other than the user —
+  /// today only the cloud pull, via [notifyWatchReplaced]. The "you are stale,
+  /// re-read" half, kept apart from [watchChanged]'s "push this".
+  Stream<void> get watchReplaced => _watchReplaced.stream;
+  final StreamController<void> _watchReplaced =
+      StreamController<void>.broadcast();
+
+  /// Announces that watch state was replaced wholesale (the cloud pull).
+  void notifyWatchReplaced() {
+    if (!_watchReplaced.isClosed) _watchReplaced.add(null);
+  }
+
+  /// Queues one title's state for the next cloud push.
+  ///
+  /// Replaces the previous row for the same title, so a position tick every
+  /// 30 s of playback is still one queued row. Kinds without watch state
+  /// (live/seasons) are never queued: they are not part of the synced set, and
+  /// queueing them would send the cloud entries its validator rejects.
+  Future<void> _queueWatchState(WatchState state) async {
+    if (!WatchState.accepts(state.kind)) return;
+    await _db.insert('watch_outbox', {
+      'source_id': state.sourceId,
+      'kind': state.kind.name,
+      'item_id': state.itemId,
+      'position_ms': state.positionMs,
+      'duration_ms': state.durationMs,
+      'watched': state.watched ? 1 : 0,
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    if (!_watchChanged.isClosed) _watchChanged.add(null);
+  }
+
+  /// Pending watch-state changes, oldest first.
+  Future<List<WatchState>> readWatchOutbox() async {
+    final rows = await _db.query('watch_outbox', orderBy: 'updated_at');
+    return [
+      for (final row in rows)
+        if (ContentKind.values.asNameMap()[row['kind'] as String]
+            case final kind?)
+          if (WatchState.accepts(kind))
+            WatchState(
+              sourceId: row['source_id'] as String,
+              kind: kind,
+              itemId: row['item_id'] as String,
+              positionMs: (row['position_ms'] as int?) ?? 0,
+              durationMs: (row['duration_ms'] as int?) ?? 0,
+              watched: (row['watched'] as int? ?? 0) != 0,
+              updatedAtMs: (row['updated_at'] as int?) ?? 0,
+            ),
+    ];
+  }
+
+  /// Clears outbox rows a push has now delivered.
+  ///
+  /// Takes the exact entries that were sent and matches their `updated_at` too:
+  /// a position written *while* the push was in flight has already replaced its
+  /// row with a newer stamp, and must survive to be sent next time.
+  Future<void> clearWatchOutbox(List<WatchState> delivered) async {
+    if (delivered.isEmpty) return;
+    final batch = _db.batch();
+    for (final entry in delivered) {
+      final stamp = entry.updatedAtMs;
+      if (stamp == null) continue;
+      batch.delete(
+        'watch_outbox',
+        where: 'source_id = ? AND kind = ? AND item_id = ? AND updated_at = ?',
+        whereArgs: [entry.sourceId, entry.kind.name, entry.itemId, stamp],
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
+  /// The merged local view of watch state for [sourceIds]: a resume point where
+  /// one exists, else the watched mark.
+  ///
+  /// The two tables are mutually exclusive by construction
+  /// ([savePlaybackPosition] clears one when writing the other), so a duplicate
+  /// key can only come from a stale row; the newer stamp wins.
+  Future<List<WatchState>> readWatchStates(Iterable<String> sourceIds) async {
+    final ids = sourceIds.toSet().toList();
+    if (ids.isEmpty) return const [];
+    final marks = List.filled(ids.length, '?').join(', ');
+    final positions = await _db.rawQuery(
+      'SELECT source_id, kind, item_id, position_ms, duration_ms, updated_at '
+      'FROM playback_positions WHERE source_id IN ($marks)',
+      ids,
+    );
+    final watched = await _db.rawQuery(
+      'SELECT source_id, kind, item_id, updated_at FROM watched_media '
+      'WHERE source_id IN ($marks)',
+      ids,
+    );
+
+    final byKey = <String, WatchState>{};
+    final stamps = <String, int>{};
+    for (final row in positions) {
+      final kind = ContentKind.values.asNameMap()[row['kind'] as String];
+      if (kind == null || !WatchState.accepts(kind)) continue;
+      final state = WatchState(
+        sourceId: row['source_id'] as String,
+        kind: kind,
+        itemId: row['item_id'] as String,
+        positionMs: (row['position_ms'] as int?) ?? 0,
+        durationMs: (row['duration_ms'] as int?) ?? 0,
+      );
+      byKey[state.key] = state;
+      stamps[state.key] = (row['updated_at'] as int?) ?? 0;
+    }
+    for (final row in watched) {
+      final kind = ContentKind.values.asNameMap()[row['kind'] as String];
+      if (kind == null || !WatchState.accepts(kind)) continue;
+      final state = WatchState(
+        sourceId: row['source_id'] as String,
+        kind: kind,
+        itemId: row['item_id'] as String,
+        watched: true,
+      );
+      final stamp = (row['updated_at'] as int?) ?? 0;
+      final previous = stamps[state.key];
+      if (previous != null && previous > stamp) continue;
+      byKey[state.key] = state;
+      stamps[state.key] = stamp;
+    }
+    return byKey.values.toList();
+  }
+
+  /// Display metadata (title/year/poster) for [states], keyed by
+  /// [WatchState.key], read from the local catalogue.
+  ///
+  /// Filled at **push** time rather than stored with the outbox: the catalogue
+  /// row is the truth and may have been refreshed since the outbox row was
+  /// written, and the id is all the playback writers ever had. An item the
+  /// catalogue no longer holds is simply absent — the push then sends no
+  /// metadata, and the server keeps the snapshot another device stored.
+  Future<Map<String, WatchMeta>> readWatchMetadata(
+    Iterable<WatchState> states,
+  ) async {
+    final groups = <String, List<WatchState>>{};
+    for (final state in states) {
+      if (!WatchState.accepts(state.kind)) continue;
+      (groups['${state.sourceId}\u0000${state.kind.name}'] ??= []).add(state);
+    }
+    final out = <String, WatchMeta>{};
+    for (final group in groups.values) {
+      final first = group.first;
+      final byId = {
+        for (final item in await readMediaItemsByIds(
+          first.sourceId,
+          first.kind,
+          [for (final state in group) state.itemId],
+        ))
+          item.id: item,
+      };
+      for (final state in group) {
+        final item = byId[state.itemId];
+        if (item == null) continue;
+        out[state.key] = WatchMeta(
+          title: item.title,
+          year: (item.year ?? '').trim(),
+          poster: (item.poster ?? '').trim(),
+          backdrop: (item.backdrop ?? '').trim(),
+        );
+      }
+    }
+    return out;
+  }
+
+  /// Applies states pulled from the cloud (or a plan's clears) in one
+  /// transaction, **without** queueing them back at the server — the same rule
+  /// `setFavorites`/`clearFavorites` follow.
+  Future<void> applyWatchStates(Iterable<WatchState> states) async {
+    final list = [
+      for (final state in states)
+        if (WatchState.accepts(state.kind)) state,
+    ];
+    if (list.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.transaction((txn) async {
+      for (final state in list) {
+        final where = 'source_id = ? AND kind = ? AND item_id = ?';
+        final args = [state.sourceId, state.kind.name, state.itemId];
+        if (state.watched) {
+          await txn.delete('playback_positions', where: where, whereArgs: args);
+          await txn.insert('watched_media', {
+            'source_id': state.sourceId,
+            'kind': state.kind.name,
+            'item_id': state.itemId,
+            'updated_at': now,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+        } else if (state.positionMs > 0) {
+          await txn.delete('watched_media', where: where, whereArgs: args);
+          await txn.insert('playback_positions', {
+            'source_id': state.sourceId,
+            'kind': state.kind.name,
+            'item_id': state.itemId,
+            'position_ms': state.positionMs,
+            'duration_ms': state.durationMs,
+            'updated_at': now,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+        } else {
+          await txn.delete('playback_positions', where: where, whereArgs: args);
+          await txn.delete('watched_media', where: where, whereArgs: args);
+        }
+      }
+    });
   }
 
   /// Removes every favorite of [kind] for [sourceId] in one statement.
@@ -2745,6 +3100,9 @@ await _createFavoritesOutbox(db);
     await _favoritesChanged.close();
     await _favoritesReplaced.close();
     await _epgChanged.close();
+    await _watchChanged.close();
+    await _watchSyncRequested.close();
+    await _watchReplaced.close();
     await _db.close();
   }
 }

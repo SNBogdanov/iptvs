@@ -16,6 +16,7 @@ import 'net.dart';
 import 'secret_keys.dart';
 import 'source_store.dart';
 import 'source_identity_migration.dart';
+import 'watch_state.dart';
 
 /// The prefix the server puts on validation errors it wants surfaced verbatim
 /// (`errcode check_violation`, e.g. "iptvs: too many favorites (max 200000)").
@@ -275,8 +276,7 @@ bool isCkVersionRollback({
   required int rowCkVersion,
   required int serverCkVersion,
   required int watermark,
-}) =>
-    rowCkVersion < serverCkVersion || rowCkVersion < watermark;
+}) => rowCkVersion < serverCkVersion || rowCkVersion < watermark;
 
 /// Whether [e] is a "function does not exist" error from calling an RPC that a
 /// pre-migration backend doesn't have yet. Such a call must degrade to "no cloud
@@ -285,7 +285,8 @@ bool isMissingFunctionError(Object e) {
   if (e is! PostgrestException) return false;
   if (e.code == '42883' || e.code == 'PGRST202') return true;
   final m = e.message.toLowerCase();
-  return m.contains('does not exist') || m.contains('could not find the function');
+  return m.contains('does not exist') ||
+      m.contains('could not find the function');
 }
 
 /// Decode a pulled `{"format":0|1,"payload":...}` secret entry to a plain secret
@@ -321,7 +322,8 @@ Future<Map<String, String>> decodeSecretEntry({
     if (status != CloudCryptoStatus.off) return const {};
     if (payload is! Map) return const {};
     return {
-      for (final e in payload.entries) e.key.toString(): e.value?.toString() ?? '',
+      for (final e in payload.entries)
+        e.key.toString(): e.value?.toString() ?? '',
     };
   }
   if (format == 1) {
@@ -534,8 +536,9 @@ class CloudSync {
         : suggestion;
     final List res;
     try {
-      res = await _client.rpc('request_pairing', params: {'p_label': capped})
-          as List;
+      res =
+          await _client.rpc('request_pairing', params: {'p_label': capped})
+              as List;
     } on PostgrestException catch (e) {
       // Only a backend that predates the suggestion migration may fall back —
       // a real rate-limit or auth rejection must surface, not silently retry.
@@ -908,6 +911,135 @@ class CloudSync {
     return normalized.length;
   }
 
+  /// Push only the watch-state changes queued since the last successful push.
+  ///
+  /// Watch state is the most volatile thing the cloud holds — a position moves
+  /// every few seconds of playback — so this is a **delta**, keyed per title by
+  /// the same `(source_id, kind, item_id)` triple the local tables use, and
+  /// last-write-wins on the server. Sending the whole history would race two
+  /// devices exactly the way a whole-set favorites push does; sending only rows
+  /// the outbox holds means two devices can only collide on the *same* title,
+  /// where arrival order is the answer.
+  ///
+  /// Sent in chunks: the first push after an upgrade can carry a whole local
+  /// history (the v16 seed), and one oversized payload would be rejected whole
+  /// instead of delivering what fits. Each chunk's rows are cleared as soon as
+  /// its call returns, so a later failure loses nothing already delivered.
+  ///
+  /// Returns true when something was sent. Only entries belonging to
+  /// cloud-managed sources are pushed; a local-only source's progress stays on
+  /// the device, exactly as with favorites.
+  Future<bool> pushWatchDelta(SourceStore store, String profileId) async {
+    final db = _db;
+    if (db == null) return false;
+    final pending = await db.readWatchOutbox();
+    if (pending.isEmpty) return false;
+
+    final managed = await _readCloudIds();
+    final byUuid = {for (final c in await store.list()) c.id: c};
+    final entries = <WatchState>[];
+    for (final entry in pending) {
+      if (!managed.contains(entry.sourceId)) continue;
+      if (!byUuid.containsKey(entry.sourceId)) continue;
+      if (!WatchState.accepts(entry.kind)) continue;
+      entries.add(entry);
+    }
+    if (entries.isEmpty) {
+      // Same reasoning as the favorites delta: "not managed right now" is also
+      // what the transient middle of a profile switch looks like, so leave the
+      // rows queued rather than clearing them.
+      return false;
+    }
+
+    for (var offset = 0; offset < entries.length; offset += _kWatchChunk) {
+      final chunk = entries.skip(offset).take(_kWatchChunk).toList();
+      // Resolve the display snapshot for this chunk from the local catalogue.
+      // The push is the only place a title exists in a form the panel can read:
+      // the cloud has no catalogue, and the outbox carries ids only.
+      final meta = await db.readWatchMetadata(chunk);
+      final payload = <Map<String, dynamic>>[];
+      for (final entry in chunk) {
+        final display = meta[entry.key];
+        payload.add(
+          (display == null ? entry : entry.withMeta(display)).toCloudJson(),
+        );
+      }
+      await _client.rpc(
+        'push_watch_delta',
+        params: {'p_entries': payload, 'p_profile_id': profileId},
+      );
+      await db.clearWatchOutbox(chunk);
+    }
+    return true;
+  }
+
+  /// Largest number of watch-state entries one `push_watch_delta` call carries.
+  /// Small enough that a burst of chunks stays well inside the shared push rate
+  /// limit (30/min) even for a full first sync of a few thousand titles.
+  static const _kWatchChunk = 500;
+
+  /// Pull the profile's watch state (resume points and watched marks) into the
+  /// local cache, for the cloud-managed sources only.
+  ///
+  /// The merge rule (cloud wins, queued local changes are skipped, a local row
+  /// the cloud lacks is a deletion to mirror) lives in [planWatchPull] — pure
+  /// and unit-tested. Applied in one transaction, and announced on
+  /// [AppDatabase.watchReplaced] so the Continue watching rail and the card
+  /// progress bars re-read instead of showing the pre-pull state.
+  Future<void> pullWatchState(SourceStore store, String profileId) async {
+    final db = _db;
+    if (db == null) return;
+    final managed = await _readCloudIds();
+    if (managed.isEmpty) return;
+    final byUuid = {for (final c in await store.list()) c.id: c};
+
+    final remoteRows = await _fetchWatchStateRows(profileId);
+    final remote = <WatchState>[];
+    for (final row in remoteRows) {
+      final state = WatchState.fromCloudRow(row);
+      if (state == null) continue;
+      if (!managed.contains(state.sourceId)) continue;
+      if (!byUuid.containsKey(state.sourceId)) continue;
+      remote.add(state);
+    }
+    final local = await db.readWatchStates(managed);
+    final pending = await db.readWatchOutbox();
+    final plan = planWatchPull(remote: remote, local: local, pending: pending);
+    if (plan.isEmpty) return;
+    await db.applyWatchStates([...plan.writes, ...plan.clears]);
+    db.notifyWatchReplaced();
+  }
+
+  /// Every `watch_state` row of [profileId], paged.
+  ///
+  /// Paged deliberately: PostgREST caps a response at the project's `max_rows`
+  /// (1000 by default) and a truncated read would look *exactly* like a cloud
+  /// set with those titles removed — the pull would then delete the local rows
+  /// it never received. Ordering is stable so pages cannot overlap or skip.
+  Future<List<Map<String, dynamic>>> _fetchWatchStateRows(
+    String profileId,
+  ) async {
+    const page = 1000;
+    final rows = <Map<String, dynamic>>[];
+    for (var from = 0; from < _kMaxWatchStateRows; from += page) {
+      final chunk = await _client
+          .from('watch_state')
+          .select('source_id, kind, item_id, position_ms, duration_ms, watched')
+          .eq('profile_id', profileId)
+          .order('source_id')
+          .order('kind')
+          .order('item_id')
+          .range(from, from + page - 1);
+      rows.addAll([for (final row in chunk) Map<String, dynamic>.from(row)]);
+      if (chunk.length < page) break;
+    }
+    return rows;
+  }
+
+  /// Matches `push_watch_delta`'s per-profile ceiling, so a pull can never be
+  /// truncated by this loop itself.
+  static const _kMaxWatchStateRows = 200000;
+
   /// Push this device's metadata provider config up to the given profile
   /// (last-write-wins, via the `push_metadata` RPC).
   Future<void> pushMetadata(SourceStore store, String profileId) async {
@@ -1150,7 +1282,10 @@ class CloudSync {
       await _publishDevicePublicKey(keyPair);
       final ckRow = await _getDeviceCk(profileId);
       if (ckRow == null) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: ckVersion,
+        );
       }
       // No `?? ckVersion` fallback: a row without a version cannot be checked
       // for freshness, so it is not usable.
@@ -1161,15 +1296,24 @@ class CloudSync {
             serverCkVersion: ckVersion,
             watermark: mark.ckVersion,
           )) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: ckVersion,
+        );
       }
       final wrapped = _asJsonMap(ckRow['wrapped_ck']);
       if (wrapped == null) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: rowCkv,
+        );
       }
       final uid = deviceId;
       if (uid == null) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: rowCkv,
+        );
       }
       final ck = await decodeDeviceWrap(
         envelope: wrapped,
@@ -1188,10 +1332,16 @@ class CloudSync {
         ck: ck,
       );
     } on CloudCryptoException {
-      return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+      return _CryptoState(
+        status: CloudCryptoStatus.locked,
+        ckVersion: ckVersion,
+      );
     } on PostgrestException catch (e) {
       if (isMissingFunctionError(e)) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: ckVersion,
+        );
       }
       rethrow;
     }
@@ -1281,7 +1431,10 @@ class CloudSync {
         return EcKeyPair(privateKey: priv, publicKey: b64Decode(pubB64));
       }
       final rebuilt = p256KeyPairFromScalar(priv);
-      await _storage.write(key: _kDevicePub, value: b64Encode(rebuilt.publicKey));
+      await _storage.write(
+        key: _kDevicePub,
+        value: b64Encode(rebuilt.publicKey),
+      );
       return rebuilt;
     }
     final fresh = generateP256KeyPair();
@@ -1352,25 +1505,22 @@ class _CryptoState {
   final bool downgraded;
 
   // Only [_CryptoState.downgraded] sets that flag, so it is not a parameter here.
-  const _CryptoState({
-    required this.status,
-    this.ckVersion = 0,
-    this.ck,
-  }) : downgraded = false;
+  const _CryptoState({required this.status, this.ckVersion = 0, this.ck})
+    : downgraded = false;
 
   const _CryptoState.off()
-      : status = CloudCryptoStatus.off,
-        ckVersion = 0,
-        ck = null,
-        downgraded = false;
+    : status = CloudCryptoStatus.off,
+      ckVersion = 0,
+      ck = null,
+      downgraded = false;
 
   /// Locked because the server's claim regressed. Carries no ck_version on
   /// purpose: nothing the server just said about versions is trustworthy.
   const _CryptoState.downgraded()
-      : status = CloudCryptoStatus.locked,
-        ckVersion = 0,
-        ck = null,
-        downgraded = true;
+    : status = CloudCryptoStatus.locked,
+      ckVersion = 0,
+      ck = null,
+      downgraded = true;
 
   /// The message a blocked push explains itself with.
   String get blockedPushMessage =>

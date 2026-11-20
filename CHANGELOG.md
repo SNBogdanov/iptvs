@@ -41,6 +41,32 @@ each release's notes also appear on GitHub Releases. New work lands under
   `serve_not_available`, instead of retrying it forever.
 - Windows: a centred "Loading…" indicator while a stream is opening or buffering
   (the native video surface previously showed a plain black screen with no progress).
+- HTTP proxy support (Settings → Proxy): **System** (the Android Wi-Fi proxy with its
+  bypass list, the Windows Internet-options proxy, or the `https_proxy` family),
+  **Custom** (host and port), or **Off**. LAN addresses — dotless names, `.local`,
+  `localhost` and the private ranges — always go direct, so a provider panel on the
+  local network keeps working while only internet traffic uses the proxy.
+- Poster artwork **and XMLTV guides** are fetched **direct first and through the proxy only if that
+  fails**, with a short connect timeout and a per-host memory shared between the two, so a LAN image
+  or guide server is never sent to the proxy and a blocked CDN still loads. Provider API traffic keeps
+  following the proxy setting outright.
+- Settings → **Player controls**: ten optional buttons — previous/next, ±seek, mute,
+  the volume bar, channel list, favorite, subtitles, aspect, picture-in-picture and
+  stream info — each can be hidden; play/pause always stays.
+- **Double tap on the picture** (touch): the left half goes back/previous, the right
+  half forward/next. The action is a setting — Previous/Next (default) or Seek by the
+  configured VOD step; live channels always step, because they cannot be seeked.
+- Windows: the picture-in-picture window's restore button shows where it returns to
+  (fullscreen or a normal window), with the same icon pair the full bar uses.
+- Cloud sync: VOD/series **watch progress and watched marks** now follow the paired
+  profile. Progress is sent per title on a 30-second ticket (moved one second later for
+  each further update while playback continues) and flushed when the player closes,
+  steps to a sibling, finishes a title, or the app is backgrounded; a pull applies the
+  other devices' state, and the upgrade queues the existing local history so it cannot
+  be erased by the first sync. Each row carries the title, year and artwork (poster +
+  backdrop) the device knows, so the panel's new **History** tab shows a real list with
+  landscape (16:9) thumbnails — Continue watching with a progress bar, then Watched —
+  without needing the (unsynchronised) catalogue.
 
 ### Changed
 
@@ -49,6 +75,22 @@ each release's notes also appear on GitHub Releases. New work lands under
 - Playback volume and mute are a device-wide session, preserved across every player
   surface and reconnect.
 - Dates throughout the app follow the OS's short-date format.
+- **Portrait player chrome fills two rows instead of three** where it can: mute rides
+  the transport row, and the volume slider shares a wrapping row with the contextual
+  buttons. Hiding the slider no longer leaves mute alone on a strip of its own.
+- The ±seek buttons and the seek double tap use the same **VOD seek step**, instead of
+  a hard-coded ten seconds.
+- The VOD card-shape preference also applies to the list thumbnail a phone shows
+  instead of the poster grid, in width only (its height sets the paging row count).
+- The media status line only prints `pages N/M` where pages are actually paged; a
+  touch surface infinite-scrolls, so the readout is omitted there.
+- On a phone the EPG/sort action sits beside the category picker on the same row
+  instead of alone on its own.
+- The in-player channel list scrolls through the whole range on touch (a 40-row
+  window used to stop at its edge) and gained a close button.
+- The player keeps a clock, a VOD position readout and the channel/title name in the corners
+  while the chrome is hidden, on Android as well as in the shared overlay — each gated by its own
+  Settings preference (the Android name pill and top-bar title follow "Channel name in the player").
 
 ### Fixed
 
@@ -78,8 +120,28 @@ each release's notes also appear on GitHub Releases. New work lands under
 - Windows: a failed VOD open now shows a native "Playback error" panel with Retry
   (and OK/Enter/Space) instead of a black screen — the Flutter error overlay was
   behind the native video surface.
+- Android: the live player no longer mixes modes — a VOD session's title, synopsis and
+  scrubber could be repainted over a live channel when the previous overlay's state
+  outlived its route.
+- Android: a channel change used to reset the aspect ratio the viewer had just picked;
+  the player's own choice now outranks the launch value carried by a zap.
+- Android: the auto-switch countdown no longer reopened the channel banner every
+  second (the name blinked), and the Random zapping checkmark is correct at launch.
+- Android: a double tap on live did nothing when "Seek" was selected; live always
+  steps a channel now.
+- Android: stepping to the next film or episode saves the outgoing title's position,
+  so "Continue watching" resumes the one that was left behind.
+- Android: a provider panel on the local network was unreachable whenever a proxy was
+  configured (the proxy closed the LAN request); local addresses bypass it now.
+- Windows: returning from the picture-in-picture window could restore a PiP-sized
+  window, and the fullscreen button could show the wrong state after a PiP or VOD
+  session — the window's real style is read at paint time now.
+- Windows: the fullscreen and PiP buttons no longer take their glyph from Segoe MDL2,
+  where `E740` is a single two-headed arrow and `E73F` is two arrows pointing at each
+  other — both states are drawn as the same four corner brackets the Flutter overlay
+  uses (outward to enter, inward to leave), in the full bar and the PiP mini bar.
 - Windows: saved window placement restores the window to its monitor, including a
   maximized window and a window hidden to the tray across a display sleep/wake.
 - Windows: Back/Escape can close playback while "Reconnecting..." is shown.
 
-[Unreleased]: https://github.com/SNBogdanov/iptvs/commits/local
+[Unreleased]: https://github.com/SNBogdanov/iptvs/commits/main

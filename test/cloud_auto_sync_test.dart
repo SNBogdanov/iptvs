@@ -26,6 +26,8 @@ void main() {
     Future<bool> Function()? push,
     Duration debounce = const Duration(seconds: 5),
     Duration retryDelay = const Duration(seconds: 30),
+    Duration? ticketExtend,
+    Stream<void>? flushRequests,
   }) => CloudAutoSync(
     pull: pull ?? () async => pulls++,
     push:
@@ -35,7 +37,9 @@ void main() {
           return true;
         },
     changes: changes.stream,
+    flushRequests: flushRequests,
     debounce: debounce,
+    ticketExtend: ticketExtend,
     retryDelay: retryDelay,
   );
 
@@ -178,6 +182,140 @@ void main() {
       async.elapse(const Duration(minutes: 5));
       async.flushMicrotasks();
       expect(pushes, 0);
+    });
+  });
+
+  group('ticket mode (watch state)', () {
+    // A player writes a position every 30 s while something plays. The ticket is
+    // set 30 s out on the first change and each later change moves it only 1 s,
+    // so the push happens shortly after the first unsent change instead of
+    // waiting for playback to stop (a plain debounce restarts on every write and
+    // would never fire).
+
+    test('the first ticket comes due 30 s after start', () {
+      fakeAsync((async) {
+        final sync = build(
+          debounce: const Duration(seconds: 30),
+          ticketExtend: const Duration(seconds: 1),
+        );
+        sync.start(pullFirst: false);
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(seconds: 29));
+        async.flushMicrotasks();
+        expect(pushes, 0);
+
+        async.elapse(const Duration(seconds: 1));
+        async.flushMicrotasks();
+        expect(pushes, 1);
+        sync.dispose();
+      });
+    });
+
+    test('a write slides the ticket one second, not the whole window', () {
+      fakeAsync((async) {
+        final sync = build(
+          debounce: const Duration(seconds: 30),
+          ticketExtend: const Duration(seconds: 1),
+        );
+        sync.start(pullFirst: false);
+        async.flushMicrotasks();
+
+        changes.add(null);
+        async.elapse(const Duration(seconds: 30));
+        async.flushMicrotasks();
+        expect(
+          pushes,
+          0,
+          reason: 'the ticket moved to 31 s; a restart would be 60 s away',
+        );
+
+        async.elapse(const Duration(seconds: 1));
+        async.flushMicrotasks();
+        expect(pushes, 1);
+        sync.dispose();
+      });
+    });
+
+    test('a stream of writes slides the ticket, which still comes due', () {
+      fakeAsync((async) {
+        final sync = build(
+          debounce: const Duration(seconds: 30),
+          ticketExtend: const Duration(seconds: 1),
+        );
+        sync.start(pullFirst: false);
+        async.flushMicrotasks();
+
+        // Six writes over 25 s: the ticket is 30 + 6 = 36 s after start.
+        for (var i = 0; i < 6; i++) {
+          changes.add(null);
+          async.elapse(const Duration(seconds: 5));
+          async.flushMicrotasks();
+        }
+        async.elapse(const Duration(seconds: 4));
+        async.flushMicrotasks();
+        expect(pushes, 0, reason: 'at 34 s the ticket is still ahead');
+
+        async.elapse(const Duration(seconds: 2));
+        async.flushMicrotasks();
+        expect(pushes, 1, reason: 'the ticket eventually comes due');
+        sync.dispose();
+      });
+    });
+
+    test('a stop request flushes without waiting out the ticket', () {
+      fakeAsync((async) {
+        final flush = StreamController<void>.broadcast();
+        final sync = build(
+          debounce: const Duration(seconds: 30),
+          ticketExtend: const Duration(seconds: 1),
+          flushRequests: flush.stream,
+        );
+        sync.start(pullFirst: false);
+        async.flushMicrotasks();
+        pushes = 0;
+
+        changes.add(null);
+        async.elapse(const Duration(seconds: 2));
+        flush.add(null);
+        async.flushMicrotasks();
+        expect(pushes, 1, reason: 'closing the player sends what is queued');
+        flush.close();
+        sync.dispose();
+      });
+    });
+
+    test('a flush during an in-flight push is not swallowed', () {
+      fakeAsync((async) {
+        final completers = <Completer<bool>>[];
+        final sync = build(
+          debounce: const Duration(seconds: 30),
+          ticketExtend: const Duration(seconds: 1),
+          push: () {
+            pushes++;
+            final c = Completer<bool>();
+            completers.add(c);
+            return c.future;
+          },
+        );
+        sync.start(pullFirst: false);
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(seconds: 30));
+        async.flushMicrotasks();
+        expect(pushes, 1);
+
+        sync.flush();
+        async.flushMicrotasks();
+        expect(pushes, 1, reason: 'nothing is stacked behind the first push');
+
+        completers.first.complete(true);
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 30));
+        async.flushMicrotasks();
+        expect(pushes, 2);
+        sync.dispose();
+      });
     });
   });
 }

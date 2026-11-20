@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/diagnostics_log.dart';
 import '../data/load_token.dart';
+import '../data/direct_first_transport.dart';
 import '../data/net.dart';
 import '../data/secret_locator_vault.dart' show hasSealedLocator;
 import 'epg_guides.dart';
@@ -181,6 +182,9 @@ class StalkerSource
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 10)
     ..autoUncompress = false;
+
+  /// Guides only: direct first, proxy on failure (see [DirectFirstTransport]).
+  late final DirectFirstTransport _guideTransport = DirectFirstTransport(_http);
 
   String? _endpoint;
   String? _referer;
@@ -407,9 +411,12 @@ class StalkerSource
   /// over, since some guide hosts reject a default one.
   Future<void> _downloadGuide(Uri uri, File destination) async {
     final operation = HttpOperation(kEpgWorkload);
-    final req = await operation.wait(_http.getUrl(uri));
-    req.headers.set(HttpHeaders.userAgentHeader, profile.userAgent);
-    final resp = await operation.wait(req.close());
+    // Direct first, proxy on failure: a guide beside the panel is a LAN fetch.
+    final resp = await _guideTransport.run(uri, (client) async {
+      final req = await operation.wait(client.getUrl(uri));
+      req.headers.set(HttpHeaders.userAgentHeader, profile.userAgent);
+      return operation.wait(req.close());
+    });
     if (resp.statusCode != 200) {
       // Drain before throwing: an unread body never returns its socket to the
       // pool, so a guide URL that 404s leaks one per EPG refresh.
@@ -953,7 +960,10 @@ class StalkerSource
   }
 
   @override
-  Future<void> dispose() async => _http.close(force: true);
+  Future<void> dispose() async {
+    _guideTransport.close();
+    _http.close(force: true);
+  }
 
   // ── data mapping ───────────────────────────────────────────────────────────
 

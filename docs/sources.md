@@ -686,14 +686,18 @@ bad port) resolves to **direct** rather than to a proxy that does not exist, and
 records what was resolved (`[iptvs.net] proxy 192.168.1.4:8888 (HTTP, mode=system, bypass=2)` or
 `[iptvs.net] no proxy (mode=system, direct)`).
 
-**Artwork is the exception: direct first, proxy only on failure.** Posters frequently come from a
-LAN address beside the panel, and a phone's Wi-Fi proxy would otherwise send a local host through
-the proxy and blank every thumbnail; a CDN the network filters fails direct and then succeeds
-through the proxy. `ProxyAwareFileService` (`lib/widgets/artwork_cache.dart`) therefore fetches
-through a raw `HttpClient` with `findProxy = DIRECT`, and if that throws (a dropped connect) or
-answers a non-success status (a block page's 403) retries through the configured proxy. The direct
-attempt has a **4 s** connect timeout - it precedes every artwork download, so the default 20 s
-would stall a grid - and a host that fails direct is remembered for 10 minutes so twenty posters on
-a blocked CDN pay that timeout once, not twenty times. Every `CachedNetworkImage` in the app passes
-`cacheManager: artworkCacheManager`, which is the default cache key (`libCachedImageData`) so
-already-downloaded artwork is reused, with that file service behind it.
+**Artwork and guides are the exception: direct first, proxy only on failure.** Posters frequently come
+from a LAN address beside the panel, and a phone's Wi-Fi proxy would otherwise send a local host
+through the proxy and blank every thumbnail; a CDN the network filters fails direct and then succeeds
+through the proxy. The same applies to **XMLTV guide downloads**, which are often served by the same
+LAN box as the panel. Both go through one rule (`lib/data/proxy_config.dart`'s
+`shouldTryDirectFirst`/`noteDirectFailure`): attempt the request with a raw `HttpClient` whose
+`findProxy` is `DIRECT` (`ProxyAwareFileService` for artwork, `DirectFirstTransport` for the three
+sources' guides), and retry through the configured proxy on an exception or a non-success status. The
+direct attempt has a **4 s** (artwork) / **6 s** (guides) connect timeout — it precedes every download,
+so the default 20 s would stall a grid or a refresh — and a host that fails direct is remembered for
+10 minutes, **shared between the two**, so twenty posters or one guide refresh pay that timeout once,
+not twenty times. Provider API traffic is *not* direct-first: it follows the proxy setting outright,
+because a panel is either reachable the way the setting says or not at all. Every
+`CachedNetworkImage` in the app passes `cacheManager: artworkCacheManager`, which is the default cache
+key (`libCachedImageData`) so already-downloaded artwork is reused, with that file service behind it.

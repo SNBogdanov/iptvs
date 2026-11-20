@@ -65,6 +65,11 @@ dependencies:
   package_info_plus: ^10.2.1
   cryptography: ^2.9.0
   timezone: ^0.11.1
+  # `clock.now()`, not `DateTime.now()`, for the cloud auto-sync's ticket: the
+  # suite drives those 30-second windows with `fake_async`, which fakes
+  # `package:clock` (and `Timer`) but not `DateTime.now()` — mixing the two made
+  # the ticket arithmetic untestable and, worse, drift against real time.
+  clock: ^1.1.2
   # Renders the cloud-sync pairing code as a scannable panel link. Pure Dart
   # (a CustomPainter over the `qr` encoder) — no platform channels, no native
   # dependency, nothing added to any store build but Dart code.

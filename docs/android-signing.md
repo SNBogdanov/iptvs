@@ -100,12 +100,14 @@ export:
    removing the old app.
 
 Cloud sync does **not** transfer device-local profile names, the active source,
-EPG/media caches, playback positions/Continue Watching, diagnostics, or update
-preferences. Those values start fresh. Users who do not opt into cloud sync
-must re-enter their source configuration manually; there is intentionally no
-credential-bearing plaintext export. The two new identities also remain
-isolated from each other, so the same cloud procedure is required when moving
-between Play and GitHub-direct installations.
+EPG/media caches, diagnostics, or update preferences. VOD/series playback
+positions and watched marks **do** follow the paired cloud profile (they sync as
+a per-title delta), but only for sources that profile manages — a local-only
+source's progress stays on the device. Those other values start fresh. Users who
+do not opt into cloud sync must re-enter their source configuration manually;
+there is intentionally no credential-bearing plaintext export. The two new
+identities also remain isolated from each other, so the same cloud procedure is
+required when moving between Play and GitHub-direct installations.
 
 ## Permanent build rules
 

@@ -331,6 +331,12 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_SHOW_TIMES,
                             args["showPlaybackTimes"] as? Boolean ?: true,
                         )
+                        // Settings → "Channel name in the player". Fail open like
+                        // the two above: an older Dart build keeps the title.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_SHOW_CHANNEL_NAME,
+                            args["showChannelName"] as? Boolean ?: true,
+                        )
                         // Which optional controls the chrome draws (Settings →
                         // "Player controls"), as a comma list of wire names.
                         // Absent means "everything shown" — the same fail-open

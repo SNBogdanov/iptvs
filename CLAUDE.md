@@ -479,7 +479,10 @@ dragging a name sort or reading as ancient is worse than admitting the provider 
   `cacheManager: artworkCacheManager`** (`lib/widgets/artwork_cache.dart`): it is the default cache
   key with a `FileService` behind it that fetches artwork **direct first and through the configured
   proxy only if that fails** (a LAN poster must not be sent through a phone's Wi-Fi proxy, and a
-  filtered CDN must still load), while API traffic follows the proxy setting outright. The proxy
+  filtered CDN must still load), while API traffic follows the proxy setting outright. **XMLTV guides
+  follow the same direct-first rule** (`DirectFirstTransport`, `lib/data/direct_first_transport.dart`,
+  used by the m3u/xtream/stalker guide downloads) and share one per-host failure memory with artwork
+  (`shouldTryDirectFirst`/`noteDirectFailure`), so a guide beside the panel is a LAN fetch too. The proxy
   itself is `lib/data/proxy_config.dart` (System/Custom/Off, resolved per platform, bypass list
   honoured); detail: docs/sources.md "The HTTP proxy". **A LAN address is always `DIRECT`** —
   dotless names, `.local`, `localhost` and the private IPv4/IPv6 ranges never reach the proxy
@@ -837,19 +840,32 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
 ## Cloud sync + profiles (essentials)
 
 Optional Supabase-backed web panel for managing sources; device pairs by code, pulls the profile's
-sources/metadata/favorites, and can push back. Hidden entirely unless built with
+sources/metadata/favorites/watch progress, and can push back. Hidden entirely unless built with
 `SUPABASE_URL`/`SUPABASE_ANON_KEY` (`cloud_config.dart` `isConfigured`). **Read
 docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** Non-negotiables:
 
 - The **anon key ships in clients by design**; access control is *only* RLS + `SECURITY DEFINER`
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before
   changing it). The `service_role` key must never appear in any client or this repo.
-- **Favorites are the one collection that syncs automatically** (`cloud_auto_sync.dart`, started
+- **Favorites are one of two collections that sync automatically** (`cloud_auto_sync.dart`, started
   from `HomeShell`; everything else stays manual Pull/Push). That works only because they push a
   **delta**, not a set: `push_favorites_delta` merges adds/removes per row under the profile's row
   lock, so same-row conflicts resolve by arrival order and **no `updated_at` revision guard is
   needed**. The delta comes from `favorites_outbox` (schema v14), written only by `setFavorite`
   (user intent) and never by the pull, which rebases the outbox onto the pulled state.
+- **VOD/series watch state is the other one** (`push_watch_delta` / `pullWatchState`; a second
+  `CloudAutoSync` on `watch_outbox`, schema v16). Progress is a keyed table, not an array, and its
+  delta carries `position_ms`/`duration_ms`/`watched` per title — **`watched: false` with position
+  0 is a deliberate "cleared" that deletes the row**, because an absence cannot express a removal.
+  The push rhythm is a **ticket**, not a debounce: 30 s out on the first change, **+1 s per further
+  change** (`CloudAutoSync.ticketExtend`), flushed immediately when the player stops
+  (`AppDatabase.requestWatchSync`); a plain debounce would never fire under a position write every
+  30 s. Pull pages the table (PostgREST `max_rows` truncation would otherwise look like deletions)
+  and its merge rule is the pure `planWatchPull` in `lib/data/watch_state.dart`. Each row also
+  carries a **display snapshot** (`title`/`year`/`poster`/`backdrop`, resolved from `media_items` at
+  push time) because the cloud has no catalogue; the push omits unknown values and the server
+  preserves them field-wise, so an older build can never blank another device's snapshot. The
+  panel's **History** tab reads it with landscape (16:9) thumbnails, preferring the backdrop.
 - **No tombstones in `profiles.favorites`, deliberately — don't add keys to that element shape.**
   A removal drops the element outright. Tombstones only pay off in a "changes since T" sync; this
   pull **mirrors** the profile, so an absent favorite is already a deletion on every device. More
@@ -1008,7 +1024,15 @@ position, the same row the alphabetical read would have shown. Pinned by `persis
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 15` (v15: `watched_media`, the `(source_id, kind,
+`AppDatabase` is at `schemaVersion = 16` (v16: `watch_outbox`, the pending local
+resume-point/watched-mark changes a cloud *delta* push sends — one row per title, replaced on
+every position write, `watched` / `position_ms` / neither being the three mutually exclusive
+states, and "neither" meaning a clear the server must hear about; written by the playback writers
+(`savePlaybackPosition`, `markWatched`, `clearPlaybackPosition`, `clearWatched`) and never by the
+pull, which applies through `applyWatchStates`; the branch **seeds** it from
+`playback_positions` + `watched_media` with `OR IGNORE` so an upgrade does not hand the first pull
+a profile that has never heard of the user's history, and so a re-run does not resurrect a pending
+clear; v15: `watched_media`, the `(source_id, kind,
 item_id)`-keyed "played to the end" marks behind a finished card's full progress bar —
 separate from `playback_positions` by design, whose rows are unfinished by construction
 (`savePlaybackPosition` clears a row at `kFinishedFraction`), while "watched once" is a
@@ -1238,9 +1262,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   session's settled entry so a zap re-renders the running number too. The clock/times preference reaches every
   surface (`showClock`/`showPlaybackTimes` on the native payloads); the channel name now reaches the **Windows
   GDI overlay** too (`showChannelName`, drawn as the top-left HUD pill — the channel name on live, the title on
-  VOD/catch-up), while Android Compose, iOS and the Linux Lua OSD still have no persistent-HUD name element.
-  The always-on HUD is implemented on the embedded/shared overlay and (now including the name) the Windows GDI
-  overlay; the other native surfaces apply the chromium preferences to their chrome only so far.
+  VOD/catch-up) **and Android's Compose overlay** (`EXTRA_SHOW_CHANNEL_NAME` → `PlayerUiState.showChannelName`,
+  gating both the top-bar title and the same top-left HUD pill), while iOS and the Linux Lua OSD still have no
+  persistent-HUD name element.
+  The always-on HUD is implemented on the embedded/shared overlay, the Windows GDI overlay and Android's
+  Compose overlay (name, clock and VOD readout); iOS and the Linux Lua OSD apply the preferences to their chrome only
+  so far.
   **The dated clock badge is the machine's own regional format on Windows** — the OS long date
   (formatted by NLS from `LOCALE_SLONGDATE`, so the inflected month is right) + short time, sourced
   once over `iptvs/clock` (`clock_format.dart`) so the native GDI overlay and the shared Flutter

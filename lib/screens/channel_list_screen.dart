@@ -460,6 +460,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// built on demand to play them (see [_repoFor]).
   late GlobalFavoritesController _globalFavorites;
   StreamSubscription<void>? _favoritesReplacedSub;
+  StreamSubscription<void>? _watchReplacedSub;
   final Map<String, LibraryRepository> _foreignRepos = {};
   String? _categoryId;
   String _query = '';
@@ -946,6 +947,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       unawaited(_loadFavorites(ContentKind.live));
       unawaited(_globalFavorites.load());
     });
+    // Same for watch state: a pull rewrites resume points and watched marks
+    // behind the UI, so the Continue watching rail and the card progress bars
+    // have to re-read. The rail is the visible half; `loadContinueWatching`
+    // republishes the bar map too.
+    _watchReplacedSub = widget.repo.db.watchReplaced.listen((_) {
+      if (!mounted) return;
+      for (final controller in _mediaControllers.values) {
+        unawaited(controller.loadContinueWatching());
+      }
+    });
     _dataListenable = Listenable.merge([
       _live,
       _favorites,
@@ -1093,6 +1104,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void _disposeRepositoryControllers() {
     unawaited(_favoritesReplacedSub?.cancel() ?? Future<void>.value());
     _favoritesReplacedSub = null;
+    unawaited(_watchReplacedSub?.cancel() ?? Future<void>.value());
+    _watchReplacedSub = null;
     _live.dispose();
     _preview.dispose();
     _favorites.dispose();
@@ -4103,7 +4116,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
             // Phones/tablets auto-load on scroll; the button only flashed
             // under the finger. TV keeps it as the D-pad fallback.
-            autoLoadMore: (Platform.isAndroid && !isTelevision) || Platform.isIOS,
+            autoLoadMore:
+                (Platform.isAndroid && !isTelevision) || Platform.isIOS,
             resumeProgress: _media(_tab).resumeProgress,
             continueWatching: _media(_tab).continueWatching,
             onResume: (item) =>
