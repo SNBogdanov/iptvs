@@ -56,6 +56,18 @@ each release's notes also appear on GitHub Releases. New work lands under
 - **Double tap on the picture** (touch): the left half goes back/previous, the right
   half forward/next. The action is a setting — Previous/Next (default) or Seek by the
   configured VOD step; live channels always step, because they cannot be seeked.
+- Android: a player **orientation button** — follow the device, or pin landscape with the
+  sensor deciding which side is up, so the picture and text stay upright when the phone is
+  turned over. Hidden on devices without an accelerometer (TVs). The choice is remembered
+  across launches and applies only while a player is on screen.
+- Live TV: the last browsed **category is remembered per source**, and a service that renamed
+  or dropped it falls back to "All channels" instead of opening on an empty list. The
+  last-channel resume now runs **after** that restore, and switching category keeps the
+  selected channel when the new view lists it too.
+- Android player: a tap **outside** the channel list closes it, a **long press** on the
+  channel-list button opens the list on its categories (current one selected), and a long
+  press on the zapping button opens the **auto-switch pace** menu with the current value
+  checked — the chosen pace is stored per source.
 - Windows: the picture-in-picture window's restore button shows where it returns to
   (fullscreen or a normal window), with the same icon pair the full bar uses.
 - Cloud sync: VOD/series **watch progress and watched marks** now follow the paired
@@ -126,8 +138,14 @@ each release's notes also appear on GitHub Releases. New work lands under
   (e.g. an auto-advance whose next-title fetch fails): the empty Continue-watching
   read cleared the `watched_media` bars until another title was played.
 - VOD/series: with the Continue watching rail on screen, the first **Next page**
-  control no longer lands a row below the fold — page one (and only page one) is
+  control no longer lands a row below the fold - page one (and only page one) is
   measured against the space the rail leaves above the grid.
+- Android: a touch layout no longer shortens page one by the rail (that window fits
+  the viewport on a phone, which left nothing to scroll and made the catalogue
+  unreachable); when a window is shorter than the viewport the next one is now
+  revealed from the window report, not only from a scroll event.
+- Android: Page Up/Down page the open quick list by a windowful again instead of
+  stepping one row.
 - Windows: a failed VOD open now shows a native "Playback error" panel with Retry
   (and OK/Enter/Space) instead of a black screen — the Flutter error overlay was
   behind the native video surface.

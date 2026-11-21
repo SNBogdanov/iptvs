@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -47,11 +48,13 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Replay30
 import androidx.compose.material.icons.filled.Replay5
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.StayCurrentLandscape
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
@@ -105,6 +108,8 @@ class PlayerCallbacks(
     val onToggleFavorite: () -> Unit,
     val onBack: () -> Unit,
     val onEnterPip: () -> Unit,
+    /** Toggles "landscape locked" vs "follow the device" for this Activity. */
+    val onToggleOrientation: () -> Unit,
     /**
      * One member of the shared zap vocabulary (`lib/player/zap_command.dart`)
      * sent to Dart. The overlay's only use for it is the quick list's
@@ -176,6 +181,7 @@ fun PlayerScreen(
         } else {
             state.openMenu = PlayerMenu.None
             state.infoOpen = false
+            state.dwellMenuOpen = false
             runCatching { rootFocus.requestFocus() }
         }
     }
@@ -336,6 +342,10 @@ fun PlayerScreen(
                 } else {
                     { callbacks.onZapCommand("zap:close") }
                 },
+                // Pointer dismissal is platform-blind: a tap on the picture
+                // outside the panel closes it, which is the one gesture a
+                // touch user will try first.
+                onDismiss = { callbacks.onZapCommand("zap:close") },
             )
         }
 
@@ -821,6 +831,14 @@ private fun RightCluster(
         IconControlButton(
             icon = Icons.AutoMirrored.Filled.List,
             contentDescription = "Channel list",
+            // A tap opens the channel list; a **long press** opens the same
+            // list one rung higher — its categories, cursor on the current one.
+            // A finger has no Left key to step back to the categories, so
+            // without this the mode was unreachable on a phone.
+            onLongClick = {
+                onInteract()
+                callbacks.onZapCommand("zap:categories")
+            },
         ) { onInteract(); callbacks.onZapCommand("zap:list") }
         if (!spread) Spacer(Modifier.width(8.dp))
     }
@@ -894,6 +912,28 @@ private fun RightCluster(
         TextControlButton(state.aspect.label, "Aspect ratio") {
             onInteract(); callbacks.onCycleAspect()
         }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
+    // Orientation: follow the device, or pin landscape with the **sensor**
+    // choosing which side is up (so turning the phone over keeps the picture
+    // upright). The icon is the mode, not the action: a rotating phone for
+    // auto, a landscape phone for the lock. Absent on a TV, where the button
+    // could not change anything.
+    if (state.supportsOrientationLock) {
+        IconControlButton(
+            icon = if (state.orientationLocked) {
+                Icons.Filled.StayCurrentLandscape
+            } else {
+                Icons.Filled.ScreenRotation
+            },
+            contentDescription = if (state.orientationLocked) {
+                "Orientation: landscape locked"
+            } else {
+                "Orientation: follow device"
+            },
+            active = state.orientationLocked,
+        ) { onInteract(); callbacks.onToggleOrientation() }
+        if (!spread) Spacer(Modifier.width(8.dp))
     }
     if (state.supportsPip && state.showsPip) {
         if (!spread) Spacer(Modifier.width(8.dp))
@@ -925,6 +965,12 @@ private fun RightCluster(
             icon = Icons.Filled.Bolt,
             contentDescription = "Auto-switch channels",
             active = state.autoSwitchEnabled,
+            // A long press is the *pace*: tap still toggles the mode, and the
+            // number lives one gesture deeper rather than in an extra control.
+            onLongClick = {
+                onInteract()
+                state.dwellMenuOpen = true
+            },
         ) { onInteract(); callbacks.onZapCommand("zap:auto") }
     }
 }
@@ -981,6 +1027,11 @@ fun IconControlButton(
     // Toggle state: an accent-tinted glyph (white while focused, so it stays
     // legible on the accent-filled focus background).
     active: Boolean = false,
+    // A second, deeper action on a touch press. Deliberately *not* a second
+    // control: the cluster is full, and these two buttons have a natural pair
+    // of meanings (open the list / open its categories, toggle the mode /
+    // choose its pace). A D-pad has no long press, so nothing is lost there.
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -989,11 +1040,16 @@ fun IconControlButton(
         .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
         .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
     val withFocus = if (focusRequester != null) base.focusRequester(focusRequester) else base
+    val press = if (onLongClick == null) {
+        Modifier.clickable(onClick = onClick)
+    } else {
+        Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = withFocus
             .onFocusChanged { focused = it.isFocused }
-            .clickable(onClick = onClick),
+            .then(press),
     ) {
         Icon(
             imageVector = icon,

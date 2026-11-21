@@ -25,6 +25,35 @@ class PlayerBackPolicyTest {
     }
 
     @Test
+    fun `the auto-switch pace menu closes like any other menu`() {
+        // It is drawn by the same primitive as the track menus, so a Back that
+        // left it on screen over a hidden chrome would be a layer the ladder
+        // never peels.
+        for (infoOpen in listOf(false, true)) {
+            assertEquals(
+                PlayerBackAction.CloseMenu,
+                nextPlayerBackAction(
+                    menuOpen = false,
+                    infoOpen = infoOpen,
+                    controlsVisible = true,
+                    dwellMenuOpen = true,
+                ),
+            )
+        }
+        // The quick list still outranks it: it is drawn over every chrome layer.
+        assertEquals(
+            PlayerBackAction.QuickListBack,
+            nextPlayerBackAction(
+                menuOpen = true,
+                infoOpen = true,
+                controlsVisible = true,
+                quickListOpen = true,
+                dwellMenuOpen = true,
+            ),
+        )
+    }
+
+    @Test
     fun `the quick list is the ladder's top rung`() {
         // It outranks every chrome layer, because it is drawn over all of them.
         assertEquals(

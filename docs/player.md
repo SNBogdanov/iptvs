@@ -158,14 +158,23 @@ The transport row draws **previous/next** beside play/pause when Dart sends
 `stepEnabled` (live zapping or VOD stepping; fails closed). They send the shared
 `zap:down`/`zap:up`, so the route decides between channel and entry. On live, the
 right cluster carries **two toggle buttons** — a shuffle glyph for random zapping
-(`zap:random`) and an autorenew glyph for auto-switch (`zap:auto`), each tinted
+(`zap:random`) and a bolt for auto-switch (`zap:auto`), each tinted
 with the accent while it is on. They replaced a three-dot overflow menu: a remote
 had to open a menu to reach either, and the state only showed as a checkmark
 inside it. Both remain Dart-owned toggles acknowledged by the zap banner, so the
 buttons carry no state copy that could disagree with the session.
 
-The PiP and channel-list controls use their Material pictures everywhere:
-`picture_in_picture_alt` (the frame with the inset screen; Android, the shared
+**Two of those buttons also answer a long press** (touch only — a D-pad has no such gesture):
+the **channel list** opens the quick list one rung higher, on its *categories* mode with the current
+category selected (`zap:categories`), and the **bolt** opens the auto-switch **pace** menu
+(`zap:dwell:<seconds>`). Both exist because a phone has no Left key and no overflow menu: without
+them the categories were one invisible Back-rung away and the pace lived only in Settings. The pace
+menu is the same `ListMenu` primitive as the track menus, with the checkmark on the current value;
+the ladder comes from Dart (`dwellOptions` on `setZapModes`), so the native side draws it and never
+decides what "10 s" means. A tap still does the old thing — open the list, toggle the mode — and
+the long press adds the second meaning rather than an extra control.
+
+The PiP and channel-list controls use their Material pictures everywhere:`picture_in_picture_alt` (the frame with the inset screen; Android, the shared
 Flutter overlay and a hand-drawn glyph in the Windows GDI bar, since Segoe MDL2
 has no PiP codepoint) and a **list** for the channel list (Material
 `format_list_bulleted` on Android, the shared overlay and the Lua OSD; MDL2
@@ -173,6 +182,26 @@ has no PiP codepoint) and a **list** for the channel list (Material
 Shuffle for random, a **bolt** for auto-switch — the bolt is the "zap" picture
 and belongs to the mode, not to the list. The PiP button used to be a "PiP" text
 chip on Windows and in the shared overlay.
+
+**Orientation (Android).** The right cluster carries a rotation button between the aspect chip
+and PiP: `Icons.screen_rotation` follows the device (`fullSensor`, all four sides), and
+`Icons.stay_current_landscape` pins landscape. The lock asks for
+`SCREEN_ORIENTATION_SENSOR_LANDSCAPE`, **not** `LANDSCAPE`: both landscape sides stay available
+and the **sensor** picks which one is up, so turning the phone the other way keeps the picture
+and the text upright instead of showing them upside down. The button is tinted while locked, and
+it is hidden on devices without an accelerometer (TVs), where it could not change anything.
+Android 16 ignores orientation requests on large screens for apps targeting API 36; phones are
+unaffected.
+
+**The lock lasts exactly as long as a player window.** The choice is stored in the player's own
+native preferences (`iptvs_player` / `orientation_locked`, written when the button is pressed) and
+read in `onCreate`, so it survives a channel change, a process death and a full app restart. It is
+applied with `requestedOrientation` **on `HdrPlayerActivity` only** — the channel list, Settings
+and every other screen are separate Activities and keep following the device, so leaving the
+player ends the effect without any reset call. `PlayerOrientation.requestedFor` holds the mapping
+and a JVM test (`PlayerOrientationTest`, `./gradlew :app:testDevelopmentDebugUnitTest`) pins it,
+including the stored key names: swapping `SENSOR_LANDSCAPE` for `LANDSCAPE`, or renaming a key,
+would otherwise be invisible without a phone in hand.
 
 **In portrait the bottom bar is two rows, or three only when the volume slider really needs
 its own.** A 360 dp phone leaves ~312 dp inside the edge padding, and VOD is the widest case:
@@ -1760,6 +1789,37 @@ category list (or one the provider has since dropped) is shown as "All" instead 
 tripping `DropdownButton`'s "exactly one item with this value" assertion — the
 transient red error screen on Live→Movies.
 
+### Persisted live category
+
+Live remembers its category too, per **source** (`app_live_category_<sourceId>`, `AppSettingsStore`)
+— the ids are the provider's own, so one portal's group must never be restored inside another's
+catalogue. `null` is "All channels" and deletes the row. The value is written by
+`ChannelListScreen._selectCategory`, which is the single funnel every route uses: the sidebar's OK
+row, a tap, the phone's dropdown, and a number jump that has to leave the current group. The
+boot-time cache (`media_category_cache.dart`, filled by `preloadTabCategoryPrefs`) is what lets the
+screen restore **synchronously** in `initState`: an awaited keychain read there would paint "All"
+for a frame and then jump, and the sidebar cursor would start on the wrong row.
+
+A stored id is only a candidate. After the catalogue loads, `_dropUnavailableLiveCategory` checks
+it against what the UI actually offers — classes, plus the Favorites pseudo-categories — and drops
+it back to "All channels" (and clears the stored value) when the provider renamed or removed the
+group, or when the user disabled it in source settings. Without that, the launch would come up
+filtered to nothing with no row to move off.
+
+**Two ordering rules on a switch.**
+
+- **The last-channel resume runs after the category is settled.** The filter is applied in
+  `initState`/on the restored id and validated before `_maybeResumeLastChannel`, so a stored
+  channel this category lists is revealed *inside* it, and only a channel from another group moves
+  the filter. Reversed, the late category switch would reset the cursor to the top and throw the
+  resumed row away.
+- **A switch keeps the selected channel when the new view still lists it.** A channel that appears
+  in both views (listed in two groups, or seen through Favorites) keeps the cursor and its scroll
+  position; `ChannelListScreen._selectCategory` keeps it by id, and the coordinator's
+  `focusChannelsFromCategory` lands in this order — the carried channel, else the row this category
+  was last left on (`_lastBrowsedByCategory`), else the top of the new list. A genuinely different
+  list still starts at the first row, as before.
+
 **"Play movies immediately"** (`app_movie_quick_play`, Settings) skips the movie details sheet:
 `ChannelListScreen._openMedia` hands the catalogue row straight to `_playMedia`, which resolves
 the stream itself and still honours the saved resume position. Series are unchanged (their sheet
@@ -2042,6 +2102,21 @@ per-tab cooldown keeps one flick from revealing several windows at once, and
 `shownCountFloor`/`hasMore` stop it when nothing is left. The "Next page" card
 remains as a keyboard/D-pad fallback, but a finger no longer has to find and
 press it.
+
+**A window shorter than the viewport needs a second trigger.** With no scrollable
+range there is no scroll event, so the loader never runs and the tab dead-ends on
+whatever page 1 drew. The view therefore reports what it actually drew (`onShown` →
+`_onMediaWindowShown`), and that report re-runs the loader **without** the 500 ms
+cooldown (`fill: true`). Growth is monotonic — one page per report — and stops on
+the same `extentAfter > 400` / `shownCountFloor` guards.
+
+The geometry that made this visible: a 384x763 phone whose VOD body is 432 px with
+the Continue-watching rail taking 270 of them. Page 1 subtracted the rail from the
+screenful and revealed **one** card (`shownLimit=1 visible=6022`). One card does not
+fill 432 px, nothing scrolled, and the handset has no "Next page" button, so the
+catalogue was unreachable. Touch layouts now use the full `p * screen - 1` window
+(the rail subtraction only ever existed to place that card, which touch does not
+draw), which is why `MediaTabView.pageLimit` branches on `autoLoadMore`.
 
 ### VOD/series card shape
 
@@ -3222,7 +3297,9 @@ from every transport:
   control row's quick-list button is the pointer half of the same command.
 
 The vocabulary: `zap:up`, `zap:down`, `zap:prev`, `zap:list`/`zap:close` (open/close the quick
-list), `zap:activate` (OK — the quick list's selected row while it is open, otherwise it commits a
+list), `zap:categories` (open it on the categories rung — the long press on Android's channel-list
+button), `zap:dwell:N` (the auto-switch pace in seconds, from a surface's own pace menu; off-ladder
+values are refused), `zap:activate` (OK — the quick list's selected row while it is open, otherwise it commits a
 pending digit buffer early and is not consumed, so OK still means what it always did),
 `zap:descend` (Right inside the quick list; not consumed with none open), `zap:back` (one rung up
 the quick list's mode stack, else clears a half-typed digit buffer — the same peel-one-rung shape
@@ -3340,9 +3417,19 @@ playback and swallows every input, so the walker must stop reselecting into a wi
 see — a hold (freeze) rather than a stop, so restoring the window resumes the same countdown
 (`LiveZapController` tracks it off the process-wide `silenceRequest`/`resumeRequest`).
 
+**The pace can be changed from the player itself** on a touch surface: a long press on the bolt
+opens a menu of the `ChannelDwell` ladder with the current value checked, and the choice comes back
+as `zap:dwell:<seconds>`. `LiveZapController.setDwell` adopts it into the running timer (a new
+period restarts the countdown, so a user who picks 30 s two seconds before a switch does not get
+switched) and stores it on the **playing channel's owning** source through `ZapCatalog.persistDwell`
+— the same per-source rule as the aspect mode and buffering preset. A value off the ladder is
+refused, not clamped: the menus are drawn from the ladder Dart pushes on `setZapModes`, so anything
+else is a stale sender. The default is stored by removing the key (`channelDwellSeconds`), so an
+untouched source's `settings` blob stays byte-identical.
+
 **Random zapping** (`LiveZapController.random`, toggled by **Ctrl+R**, persisted in
 `AppSettingsStore.randomZapping`) makes `channelUp`/`channelDown` pick a random index that is never
-the channel already under the cursor — which the auto-switch's `channelUp` funnel inherits, so a
+the channel already under the cursor - which the auto-switch's `channelUp` funnel inherits, so a
 running countdown also jumps randomly. The toggle reports through the banner's transient-message
 slot, and the shuffle marker is a `random` field on `ZapBannerState` drawn beside the countdown chip
 (the chip renders when the countdown is on **or** random is on, so the mode stays answerable with
@@ -3506,6 +3593,15 @@ ladder already uses everywhere else in the app.
 **It opens on the `channels` mode, cursor on the channel actually playing.** That is the rung the
 user wants nine times out of ten, and it is the only one that needs no fetch at all — the range is
 already in hand, so the list draws on the same frame as the keypress.
+
+**A long press on the Android channel-list button opens `categories` instead** (`zap:categories`),
+preselected on the current range's category. It is the same list, one rung up: the touch surface's
+substitute for the Left key that would have taken a remote there.
+
+**On Android a tap outside the panel dismisses it.** Dart owns the list, so the panel reports the
+tap as `zap:close` (the same command the header's close button sends) rather than hiding itself —
+one list, one owner, and a closed list is still pushed so no frame can be left drawing one. The
+panel swallows taps that land on it, so only a tap on the picture outside closes it.
 
 #### Re-ranging
 

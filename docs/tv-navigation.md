@@ -137,8 +137,11 @@ race.
 The coordinator also retains the selected channel's stable id. After an async
 refresh inserts, removes, or reorders rows, it reconciles the numeric cursor to
 that id before repainting; if the channel disappeared it clamps to the nearest
-valid index. Explicit search and category changes intentionally reset to the
-first result.
+valid index. An explicit search resets to the first result, and a category change
+does too **only when the new view cannot show the channel the cursor was on** —
+a channel listed in both views keeps the cursor (see `focusChannelsFromCategory`:
+carried channel, else the row that category was left on, else the top of the new
+list).
 
 Wide-layout geometry is platform-, height- and **text-scale**-aware. Android TV images can expose
 either a 960×540 or 1920×1080 logical viewport on a 4K panel, so logical height alone cannot
@@ -238,7 +241,9 @@ tile-width band.
   inside the live body. Pinned by `test/live_focus_coordinator_test.dart` (pure index logic) and
   `test/channel_list_focus_test.dart` (real key events).
 - **Category activation.** Up/Down moves only the sidebar cursor; **OK applies that category and
-  enters the first/resumed channel in the filtered list**. If a provider exposes an empty category,
+  enters the first/resumed channel in the filtered list** — where "resumed" means the channel the
+  cursor was already on when the new category also lists it, else the row that category was last
+  left on, else the first row. If a provider exposes an empty category,
   focus remains in the sidebar rather than moving to a channel pane with no activation target —
   `focusChannels()` falls back to `focusCategories()` when the visible list is empty, because
   every caller has already consumed the key press and returning silently left the D-pad dead

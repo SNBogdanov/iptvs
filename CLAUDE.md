@@ -331,7 +331,15 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
    *display window*: `MediaTabView.displayPages` (owned per kind by `ChannelListScreen._mediaDisplayPages`)
    reveals page `p` at **`p * screenSize - 1` items, because the "Next page" card takes the last cell
    of every screen** — so the card always sits bottom-right (page 1 = 23 items of a 24-cell screen,
-   page 2 = 47, not 24/48). The screenful is computed from what actually fits the viewport
+   page 2 = 47, not 24/48). With the Continue-watching rail up, **page one alone** is measured on the
+   body minus the rail (`firstScreen`), so its card is not pushed a row below the fold; later pages keep
+   the full screen. **A touch layout (`autoLoadMore`) is exempt**: it draws no card, so page `p` is plain
+   `p * screen - 1`, and the first window must never shrink until it fits the viewport - a phone logged
+   `body=432 rail=270 -> shownLimit=1`, and one card cannot scroll, so the scroll-driven loader never
+   ran and the catalogue became unreachable. For the same reason the window report (`onShown` ->
+   `_onMediaWindowShown`) re-runs the loader despite the 500 ms cooldown: with content shorter than the
+   viewport no scroll event will ever arrive, and the reveal must keep growing until `extentAfter > 400`
+   or the catalogue runs out. The screenful is computed from what actually fits the viewport
    (`MediaTabView._mediaPageSize` — grid columns × visible rows, or the list's visible rows), and a row
    counts only when **at least half of it is visible**, so a sliver of the next row is not "fitting".
    Because the screenful is re-read every build, a resize re-lands the card on the last row with no

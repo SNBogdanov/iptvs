@@ -97,6 +97,14 @@ class _FakeCatalog implements ZapCatalog {
   ChannelDwell dwellFor(ZapEntry entry) =>
       channelDwellFromSeconds(entry.config.channelDwellSeconds);
 
+  /// Every pace write, as `(sourceId, seconds)`.
+  final List<(String, int)> dwellWrites = [];
+
+  @override
+  Future<void> persistDwell(ZapEntry entry, ChannelDwell dwell) async {
+    dwellWrites.add((entry.sourceId, dwell.seconds));
+  }
+
   @override
   void log(String note) => logs.add(note);
 
@@ -1089,6 +1097,72 @@ void main() {
     });
   });
 
+  group('auto-switch pace', () {
+    test(
+      'a pace command adopts it and stores it on the playing source',
+      () async {
+        final catalog = _FakeCatalog();
+        final controller = _controller(catalog: catalog);
+        addTearDown(controller.dispose);
+        final surface = _Surface()..attach(controller);
+        expect(controller.dwellSeconds, 10, reason: 'default pace');
+
+        expect(
+          controller.handleCommand(parseZapCommand('zap:dwell:30')!),
+          isTrue,
+          reason: 'pace is the session\'s, never a row action',
+        );
+        await Future<void>.delayed(_past);
+
+        expect(controller.dwellSeconds, 30);
+        expect(catalog.dwellWrites, [('src', 30)]);
+        // Pace is not navigation: nothing was resolved and nothing played.
+        expect(catalog.resolved, isEmpty);
+        expect(surface.events, isEmpty);
+
+        // A zap inside the same source must **keep** the chosen pace: the entry
+        // configs this session holds predate the store write, so re-reading
+        // them would hand back the old number and quietly undo the choice.
+        controller.channelUp();
+        await Future<void>.delayed(_past);
+        expect(controller.playing.channelId, 'b');
+        expect(controller.dwellSeconds, 30);
+      },
+    );
+
+    test('a pace off the ladder is refused, not clamped', () async {
+      // The native menu draws its rows from the ladder Dart pushes, so a value
+      // outside it means a stale or foreign sender. Picking a neighbouring
+      // pace would change a setting nobody chose.
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+
+      controller.handleCommand(parseZapCommand('zap:dwell:7')!);
+      await Future<void>.delayed(_past);
+
+      expect(controller.dwellSeconds, 10);
+      expect(catalog.dwellWrites, isEmpty);
+    });
+
+    test('the pace is claimed with a list open too', () async {
+      // A menu opened from the chrome must work while the quick list is up;
+      // reading the list does not make the pace the list's business.
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+
+      expect(
+        controller.handleCommand(parseZapCommand('zap:dwell:15')!),
+        isTrue,
+      );
+      await Future<void>.delayed(_past);
+      expect(controller.dwellSeconds, 15);
+      expect(controller.quickListOpen, isTrue, reason: 'the list stays put');
+    });
+  });
+
   group('quick list', () {
     test('opens on the channels mode, cursor on the playing channel', () {
       final controller = _controller(initialIndex: 1);
@@ -1230,6 +1304,63 @@ void main() {
         expect(controller.quickList.rows[2].playing, isTrue);
       },
     );
+
+    test(
+      'a long press opens the list on categories, current one selected',
+      () async {
+        // `zap:categories` is what a surface sends for a long press on the
+        // channel-list button: the same list, one rung higher. The channels mode
+        // is entered afterwards by picking a row, so this is an *entry*, not a
+        // mode-relative key.
+        final catalog = _FakeCatalog()
+          ..categories = const [
+            ZapCategoryRow(id: '', title: 'All channels'),
+            ZapCategoryRow(id: 'news', title: 'News'),
+          ];
+        catalog.channelsByCategory['news'] = zapEntriesOf(
+          [_channel('n1', number: 10)],
+          config: _config('src'),
+          sourceName: 'Src',
+        );
+        final controller = _controller(catalog: catalog);
+        addTearDown(controller.dispose);
+
+        expect(
+          controller.handleCommand(parseZapCommand('zap:categories')!),
+          isTrue,
+        );
+        await Future<void>.delayed(_past);
+
+        expect(controller.quickListOpen, isTrue);
+        expect(controller.quickListMode, ZapQuickListMode.categories);
+        expect(controller.quickList.total, 2);
+        expect(
+          controller.quickList.selectedIndex,
+          0,
+          reason: 'the range is All',
+        );
+
+        // Picking a category re-ranges the list to that category's channels.
+        controller.moveQuickList(1);
+        controller.activateQuickList();
+        await Future<void>.delayed(_past);
+        expect(controller.quickListMode, ZapQuickListMode.channels);
+        expect(controller.quickList.rows.single.label, '10 · Channel n1');
+      },
+    );
+
+    test('a long press on an open list still lands on categories', () async {
+      final catalog = _FakeCatalog()
+        ..categories = const [ZapCategoryRow(id: '', title: 'All channels')];
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+
+      controller.openQuickList();
+      expect(controller.quickListMode, ZapQuickListMode.channels);
+      controller.handleCommand(parseZapCommand('zap:categories')!);
+      await Future<void>.delayed(_past);
+      expect(controller.quickListMode, ZapQuickListMode.categories);
+    });
 
     test('picking a category re-ranges Up/Down too', () async {
       final config = _config('src');
@@ -1475,7 +1606,8 @@ void main() {
       expect(controller.digitBuffer, isEmpty);
     });
 
-    test('a 250k range publishes a bounded window that holds the cursor', () {      final config = _config('src');
+    test('a 250k range publishes a bounded window that holds the cursor', () {
+      final config = _config('src');
       final controller = LiveZapController(
         entries: zapEntriesOf(
           List.generate(250000, (i) => _channel('c$i', number: i + 1)),

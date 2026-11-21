@@ -38,6 +38,7 @@ import com.gchofficial.iptvs.player.PlayerCallbacks
 import com.gchofficial.iptvs.player.PlayerBackAction
 import com.gchofficial.iptvs.player.PlayerBackGuard
 import com.gchofficial.iptvs.player.PlayerMenu
+import com.gchofficial.iptvs.player.PlayerOrientation
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
 import com.gchofficial.iptvs.player.QuickListState
@@ -267,6 +268,7 @@ class HdrPlayerActivity : ComponentActivity() {
                 infoOpen = uiState.infoOpen,
                 controlsVisible = uiState.controlsVisible,
                 quickListOpen = quickListOpen(),
+                dwellMenuOpen = uiState.dwellMenuOpen,
             )
         ) {
             // The list's rungs are Dart's mode stack, not a layer this side
@@ -274,7 +276,12 @@ class HdrPlayerActivity : ComponentActivity() {
             // was already claimed by ZapKeyPolicy and sent the same command,
             // which is why one press can never peel two rungs.
             PlayerBackAction.QuickListBack -> sendZap("zap:back")
-            PlayerBackAction.CloseMenu -> uiState.openMenu = PlayerMenu.None
+            PlayerBackAction.CloseMenu -> {
+                uiState.openMenu = PlayerMenu.None
+                // One rung, two menus: the pace menu is drawn like the track
+                // menus and Back closes whichever is up.
+                uiState.dwellMenuOpen = false
+            }
             PlayerBackAction.CloseInfo -> uiState.infoOpen = false
             PlayerBackAction.HideControls -> uiState.controlsVisible = false
             PlayerBackAction.Exit -> finish()
@@ -440,6 +447,7 @@ class HdrPlayerActivity : ComponentActivity() {
             uiState.controlsVisible = true
             uiState.openMenu = PlayerMenu.None
             uiState.infoOpen = false
+            uiState.dwellMenuOpen = false
             uiState.inPip = false
         }
         // Android TV's PiP framework restricts entry to communication/smartHome/health/ticker
@@ -505,6 +513,20 @@ class HdrPlayerActivity : ComponentActivity() {
         // the values are kept in the companion and re-applied here.
         pendingRandomZapping?.let { uiState.randomZapping = it }
         pendingAutoSwitch?.let { uiState.autoSwitchEnabled = it }
+        // The pace and its ladder, for the auto-switch long-press menu. Same
+        // pre-`onCreate` race as the two modes above: Dart seeds them on `open`.
+        pendingDwellSeconds?.let { uiState.dwellSeconds = it }
+        pendingDwellOptions?.let { uiState.dwellOptions = it }
+        // Orientation is a **player-only device preference** (native prefs, not
+        // Dart's settings store): it survives a channel change and applies to
+        // the next player open. Default off = the manifest's `fullSensor`.
+        uiState.orientationLocked =
+            orientationPrefs().getBoolean(PlayerOrientation.KEY_LOCKED, false)
+        // A phone has an accelerometer; a TV does not, and a rotation button
+        // there would be a control that can never change anything.
+        uiState.supportsOrientationLock =
+            packageManager.hasSystemFeature(PackageManager.FEATURE_SENSOR_ACCELEROMETER)
+        applyOrientationLock(uiState.orientationLocked)
         // Preserve the user's audible level across a muted session, so the
         // close result can report it with RESULT_MUTED and unmuting restores
         // that level rather than full volume.
@@ -892,9 +914,16 @@ class HdrPlayerActivity : ComponentActivity() {
         // ahead of `onCreate` (see the companion's `pending*` fields).
         (args["random"] as? Boolean)?.let { pendingRandomZapping = it }
         (args["autoSwitch"] as? Boolean)?.let { pendingAutoSwitch = it }
+        (args["dwellSeconds"] as? Number)?.toInt()?.let { pendingDwellSeconds = it }
+        (args["dwellOptions"] as? List<*>)?.let { raw ->
+            val options = raw.mapNotNull { (it as? Number)?.toInt() }.filter { it > 0 }
+            if (options.isNotEmpty()) pendingDwellOptions = options
+        }
         if (!::uiState.isInitialized || isFinishing || isDestroyed) return
         uiState.randomZapping = pendingRandomZapping ?: false
         uiState.autoSwitchEnabled = pendingAutoSwitch ?: false
+        pendingDwellSeconds?.let { uiState.dwellSeconds = it }
+        pendingDwellOptions?.let { uiState.dwellOptions = it }
     }
 
     /**
@@ -1210,6 +1239,7 @@ class HdrPlayerActivity : ComponentActivity() {
         },
         onBack = { finish() },
         onEnterPip = { enterPip() },
+        onToggleOrientation = { toggleOrientationLock() },
         onZapCommand = { sendZap(it) },
     )
 
@@ -1258,6 +1288,41 @@ class HdrPlayerActivity : ComponentActivity() {
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         enterPip()
+    }
+
+    /**
+     * Player-only device preferences. Deliberately **not** Dart's settings store:
+     * the orientation lock belongs to this Activity's window — leaving the
+     * player ends its effect, and the choice is re-applied the next time one
+     * opens. Nothing else in the app reads it.
+     */
+    private fun orientationPrefs() =
+        getSharedPreferences(PlayerOrientation.PREFS_NAME, MODE_PRIVATE)
+
+    /**
+     * Applies the orientation mode to **this** Activity's window only, which is
+     * what keeps the lock to "while watching": the channel list, Settings and
+     * every other screen are separate Activities and follow the device.
+     *
+     * The mapping itself is [PlayerOrientation.requestedFor] — locked is
+     * `SENSOR_LANDSCAPE`, not `LANDSCAPE`, so both landscape sides stay
+     * available and the sensor picks the one that is up.
+     */
+    private fun applyOrientationLock(locked: Boolean) {
+        requestedOrientation = PlayerOrientation.requestedFor(locked)
+    }
+
+    /** The chrome's orientation button: auto ⇄ landscape locked (sensor up). */
+    private fun toggleOrientationLock() {
+        val locked = !uiState.orientationLocked
+        uiState.orientationLocked = locked
+        // Written before the request, so a process death between the two still
+        // remembers the choice the user just made.
+        orientationPrefs()
+            .edit()
+            .putBoolean(PlayerOrientation.KEY_LOCKED, locked)
+            .apply()
+        applyOrientationLock(locked)
     }
 
     /** Enters PiP if currently eligible; also invoked from a manual overlay button so entry
@@ -1644,6 +1709,13 @@ class HdrPlayerActivity : ComponentActivity() {
         @Volatile
         private var pendingAutoSwitch: Boolean? = null
 
+        /** The auto-switch pace and its ladder, for the same pre-`onCreate` window. */
+        @Volatile
+        private var pendingDwellSeconds: Int? = null
+
+        @Volatile
+        private var pendingDwellOptions: List<Int>? = null
+
         /**
          * Stores the modes for an Activity that does not exist yet.
          *
@@ -1655,9 +1727,16 @@ class HdrPlayerActivity : ComponentActivity() {
          * device preference on. The push now lands here instead, and
          * `onCreate` applies it.
          */
-        fun seedZapModes(random: Boolean?, autoSwitch: Boolean?) {
+        fun seedZapModes(
+            random: Boolean?,
+            autoSwitch: Boolean?,
+            dwellSeconds: Int? = null,
+            dwellOptions: List<Int>? = null,
+        ) {
             random?.let { pendingRandomZapping = it }
             autoSwitch?.let { pendingAutoSwitch = it }
+            dwellSeconds?.let { pendingDwellSeconds = it }
+            if (!dwellOptions.isNullOrEmpty()) pendingDwellOptions = dwellOptions
         }
 
         const val EXTRA_URL = "url"

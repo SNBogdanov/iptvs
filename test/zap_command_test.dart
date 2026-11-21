@@ -25,6 +25,14 @@ void main() {
         const ZapCommand(ZapCommandKind.openList),
       );
       expect(
+        parseZapCommand('zap:categories'),
+        const ZapCommand(ZapCommandKind.openCategories),
+      );
+      expect(
+        parseZapCommand('zap:dwell:15'),
+        const ZapCommand(ZapCommandKind.dwell, 15),
+      );
+      expect(
         parseZapCommand('zap:close'),
         const ZapCommand(ZapCommandKind.closeList),
       );
@@ -72,6 +80,11 @@ void main() {
       expect(parseZapCommand('zap:digit:-1'), isNull);
       expect(parseZapCommand('zap:move:'), isNull);
       expect(parseZapCommand('zap:move:0'), isNull);
+      expect(parseZapCommand('zap:dwell:'), isNull);
+      expect(parseZapCommand('zap:dwell:0'), isNull);
+      expect(parseZapCommand('zap:dwell:-5'), isNull);
+      expect(parseZapCommand('zap:dwell:x'), isNull);
+      expect(parseZapCommand('zap:categories:now'), isNull);
       expect(parseZapCommand('favorite:'), isNull);
       expect(parseZapCommand('favorite:2'), isNull);
     });
@@ -216,7 +229,8 @@ void main() {
       expect(
         declared?.group(1),
         '$kZapWheelRows',
-        reason: 'the native wheel step is ${declared?.group(1)}, '
+        reason:
+            'the native wheel step is ${declared?.group(1)}, '
             'but Dart moves the cursor by $kZapWheelRows',
       );
     });
@@ -231,9 +245,24 @@ void main() {
         mode: ZapQuickListMode.channels,
         heading: 'All channels',
         rows: const [
-          ZapQuickListRow(index: 10, id: 'a', label: 'a', kind: ZapQuickListRowKind.channel),
-          ZapQuickListRow(index: 11, id: 'b', label: 'b', kind: ZapQuickListRowKind.channel),
-          ZapQuickListRow(index: 12, id: 'c', label: 'c', kind: ZapQuickListRowKind.channel),
+          ZapQuickListRow(
+            index: 10,
+            id: 'a',
+            label: 'a',
+            kind: ZapQuickListRowKind.channel,
+          ),
+          ZapQuickListRow(
+            index: 11,
+            id: 'b',
+            label: 'b',
+            kind: ZapQuickListRowKind.channel,
+          ),
+          ZapQuickListRow(
+            index: 12,
+            id: 'c',
+            label: 'c',
+            kind: ZapQuickListRowKind.channel,
+          ),
         ],
         selectedIndex: 4,
         windowStart: 10,
@@ -283,7 +312,8 @@ void main() {
         expect(
           declared?.group(1),
           '$kZapPageRows',
-          reason: '$path declares $name as ${declared?.group(1)}, '
+          reason:
+              '$path declares $name as ${declared?.group(1)}, '
               'but Dart pages by $kZapPageRows',
         );
       });

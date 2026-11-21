@@ -53,6 +53,7 @@ import 'live_controller.dart';
 import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
 import 'live_tab_view.dart';
+import 'media_category_cache.dart';
 import 'media_sort.dart';
 import 'media_tab_controller.dart';
 import 'media_tab_view.dart';
@@ -882,6 +883,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // without this a shape change left "Next page" revealing the old number of
     // rows until some unrelated rebuild came along.
     vodCardOrientation.addListener(_onVodCardShapeChanged);
+    // The live category remembered for this source, read from the boot-time
+    // cache so the first build already opens on it — a keychain `await` here
+    // would paint "All" for a frame and then jump, and the sidebar cursor would
+    // start on the wrong row. The id is only a *candidate* until the catalogue
+    // arrives (`_dropUnavailableLiveCategory`): a provider may have renamed or
+    // dropped the group since, and the fallback is "All channels".
+    _categoryId = cachedLiveCategory(widget.repo.source.id);
     _createRepositoryControllers();
     _focus = LiveFocusCoordinator(
       scrollController: _scrollController,
@@ -1014,6 +1022,26 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         settings: <String, dynamic>{...owner.settings, 'aspectMode': label},
       ),
     );
+  }
+
+  /// Writes a zap pace chosen **in the player** onto [owner]'s settings.
+  ///
+  /// Stored like every other per-source setting: the default is kept by
+  /// **removing** the key, so a source that never touched it keeps a
+  /// byte-identical `settings` blob (see `SourceConfig.channelDwell`). A shared
+  /// save path with the Settings tile, so the two cannot drift.
+  Future<void> _persistChannelDwell(
+    SourceConfig owner,
+    ChannelDwell dwell,
+  ) async {
+    if (owner.channelDwellSeconds == dwell.seconds) return;
+    final settings = Map<String, dynamic>.from(owner.settings);
+    if (dwell == kDefaultChannelDwell) {
+      settings.remove('channelDwellSeconds');
+    } else {
+      settings['channelDwellSeconds'] = dwell.seconds;
+    }
+    await widget.store.save(owner.copyWith(settings: settings));
   }
 
   /// The [SourceConfig] that owns [channel] — the active source's, or a
@@ -1210,11 +1238,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // Cross-source rows come from the cache, not from this source's load, so
     // this neither waits on nor blocks the active catalog.
     await _globalFavorites.load();
+    // The remembered category is settled *before* the last-channel resume, in
+    // that order on purpose: the resume runs against the filter the launch
+    // restored, so a stored channel that this category also lists is revealed
+    // inside it, and only a channel from another group moves the filter. Doing
+    // it the other way round let a late category switch reset the cursor to the
+    // top and throw the resumed row away.
+    if (mounted) _dropUnavailableLiveCategory();
     if (mounted) _ensureCrossSourceCategoryStillOffered();
     // After everything the resume needs is in: the catalog, the favorites that
-    // decide what a view may draw, and the cross-source index. Guarded to the
-    // first load by `_resumeAttempted`, so a Reload or a source change inside
-    // this same screen does not re-run it.
+    // decide what a view may draw, the cross-source index, and the category
+    // filter above. Guarded to the first load by `_resumeAttempted`, so a Reload
+    // or a source change inside this same screen does not re-run it.
     if (mounted) unawaited(_maybeResumeLastChannel());
   }
 
@@ -1237,6 +1272,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _crossSourceIndexCache = null;
       _focus.resetChannelSelection();
       _zapRecall = null;
+      // A different source has its own remembered category (ids are the
+      // provider's), so the previous one must not leak into it.
+      _categoryId = cachedLiveCategory(widget.repo.source.id);
       _loadLive();
       _live.startEpgRefresh();
       _globalFavorites.startEpgRefresh();
@@ -1250,6 +1288,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (!identical(old.config, widget.config)) {
       if (_hiddenCategories(ContentKind.live).contains(_categoryId)) {
         _categoryId = null;
+        unawaited(_rememberLiveCategory(null));
       }
       for (final kind in const [ContentKind.movie, ContentKind.series]) {
         if (_hiddenCategories(kind).contains(_media(kind).categoryId)) {
@@ -1289,16 +1328,37 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     unawaited(_loadFavorites(kind));
   }
 
+  /// Records the window the VOD view actually drew, and — on a touch layout —
+  /// keeps revealing pages until that window fills the viewport.
+  ///
+  /// The report is the only signal that arrives when the content is *shorter*
+  /// than the viewport: with no scrollable range the scroll listener never
+  /// fires, and the tab used to dead-end on page 1 (one card on screen, and no
+  /// "Next page" button on touch). Growth terminates: each reveal adds a page,
+  /// and the check stops the moment `extentAfter > 400` or the catalogue is
+  /// exhausted.
+  void _onMediaWindowShown(ContentKind kind, int count) {
+    _media(kind).noteShownCount(count);
+    _maybeAutoLoadMedia(kind, fill: true);
+  }
+
   /// Android/pointer infinite scroll: when the last visible card is close, the
   /// next window is revealed (and the next provider page fetched, when the tab
   /// is provider-paged) without waiting for the "Next page" button. The button
   /// stays as a keyboard/D-pad fallback, but a finger never has to find it.
-  void _maybeAutoLoadMedia(ContentKind kind) {
+  ///
+  /// [fill] is the window-report path (see [_onMediaWindowShown]): it skips the
+  /// 500 ms scroll throttle, because a window that does not fill the viewport
+  /// has **no scrollable range** and would otherwise stop at whatever the
+  /// throttle happened to allow. Growth is monotonic — every call reveals one
+  /// more page — so the loop ends when the content overflows the viewport or the
+  /// catalogue runs out.
+  void _maybeAutoLoadMedia(ContentKind kind, {bool fill = false}) {
     if (!mounted) return;
     if (!_mediaAutoLoadScheduled.add(kind)) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _mediaAutoLoadScheduled.remove(kind);
-      if (mounted) _runAutoLoadMedia(kind);
+      if (mounted) _runAutoLoadMedia(kind, fill: fill);
     });
   }
 
@@ -1313,7 +1373,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   bool get _autoLoadMediaOnScroll =>
       (Platform.isAndroid && !isTelevision) || Platform.isIOS;
 
-  void _runAutoLoadMedia(ContentKind kind) {
+  void _runAutoLoadMedia(ContentKind kind, {bool fill = false}) {
     if (!_autoLoadMediaOnScroll) return;
     final controller = _media(kind);
     final snap = controller.snapshot;
@@ -1323,7 +1383,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final visibleCount = _visibleMedia(kind).length;
     if (controller.shownCountFloor >= visibleCount && !snap.hasMore) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - (_mediaAutoLoadAt[kind] ?? 0) < 500) return;
+    if (!fill && now - (_mediaAutoLoadAt[kind] ?? 0) < 500) return;
     _mediaAutoLoadAt[kind] = now;
     setState(() {
       _mediaDisplayPages[kind] = (_mediaDisplayPages[kind] ?? 1) + 1;
@@ -1678,13 +1738,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
     if (!nowEmpty) return;
     // Emptying the Favorites view leaves nothing to select — fall back to All.
+    var leftFavorites = false;
     setState(() {
       if (kind == ContentKind.live && _categoryId == kFavoritesCategoryId) {
         _categoryId = null;
+        leftFavorites = true;
       } else if (kind != ContentKind.live) {
         _media(kind).resetFavoritesCategoryToAll();
       }
     });
+    // The stored category is this fallback too, or the next launch would
+    // restore a Favorites view with nothing in it.
+    if (leftFavorites) unawaited(_rememberLiveCategory(null));
   }
 
   /// True when the cross-source view has something the per-source one doesn't.
@@ -1710,6 +1775,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     setState(() => _categoryId = null);
     _focus.resetChannelSelection();
     _focus.clampSelection();
+    // Same record: the entry vanished, so "All channels" is where the next
+    // launch has to land as well.
+    unawaited(_rememberLiveCategory(null));
     // Leaving the cross-source view also changes the row extent (those rows
     // carry no EPG, so they run on the shorter one — `liveRowsShowEpg`), which
     // makes the retained pixel offset mean a different row than it did a frame
@@ -3633,18 +3701,86 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void _focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
 
   /// Apply a live category filter: OK on a sidebar row, a tap, or the phone
-  /// dropdown. The channel cursor restarts at the top of the new list. The
-  /// focus coordinator moves OK activation into a non-empty channel list;
-  /// pointer/dropdown callers retain their natural focus behavior.
+  /// dropdown. The focus coordinator moves OK activation into a non-empty
+  /// channel list; pointer/dropdown callers retain their natural focus behavior.
+  ///
+  /// **The cursor keeps its channel when the new view still draws it** — a
+  /// channel listed in several groups, or the same row seen through Favorites.
+  /// A filter change is not a jump to another list, so restarting at the top
+  /// would lose the row the user was on (and, on the wide layout, retarget the
+  /// preview for no reason). Only when that channel is absent does the cursor
+  /// go back to the first row, which is the old behavior and the only sensible
+  /// landing point for a genuinely different list.
+  ///
   /// [scrollToTop] is false only for a reveal that names its own row (a typed
   /// channel number): the caller scrolls to that row, and a deferred
   /// `jumpTo(0)` landing after it would throw the reveal away.
   void _selectCategory(String? categoryId, {bool scrollToTop = true}) {
+    final keepChannelId = _focus.selectedChannelId;
     setState(() => _categoryId = categoryId);
     _focus.syncCategorySelection(categoryId);
+    // The kept row is revealed post-frame for the same reason a number jump is:
+    // the reveal's offset arithmetic runs against the *outgoing* list's extent
+    // (see `_revealChannelInList`), so measuring it before this frame rebuilds
+    // would clamp to the wrong place.
+    final keepsChannel =
+        keepChannelId != null &&
+        _visible.any((channel) => channel.id == keepChannelId);
+    if (keepsChannel) {
+      // `clampSelection` re-finds the row by id in the new view.
+      _focus.clampSelection();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _tab == ContentKind.live) {
+          _focus.revealSelectedChannel();
+        }
+      });
+    } else {
+      _focus.resetChannelSelection();
+      _focus.clampSelection();
+      if (scrollToTop) _scrollToTop();
+    }
+    // Every route into a category ends here — the sidebar/OK row, the phone's
+    // dropdown, and a number jump that has to leave the current group — so this
+    // is the one place the choice is remembered. Written after the state change
+    // so the screen never waits on the keychain.
+    unawaited(_rememberLiveCategory(categoryId));
+  }
+
+  /// Persists the live category for this source, and mirrors it into the
+  /// boot-time cache so a rebuild of the screen (a profile switch, a source
+  /// reload) restores what the user just picked without another keychain read.
+  Future<void> _rememberLiveCategory(String? categoryId) async {
+    final sourceId = widget.repo.source.id;
+    cacheLiveCategory(sourceId, categoryId);
+    try {
+      await const AppSettingsStore().setLiveCategory(sourceId, categoryId);
+    } catch (_) {
+      // A convenience record: an unreadable keychain must never fail a category
+      // switch, it just means the next launch opens on "All".
+    }
+  }
+
+  /// Drops a restored category the catalogue no longer offers.
+  ///
+  /// Two ways a stored id goes stale: the provider renamed or removed the group,
+  /// or the user disabled it in the source's category settings. Left alone, the
+  /// list would come up filtered to nothing with no row in the sidebar to move
+  /// off, and the dropdown would have no matching item. Favorites entries are
+  /// checked the same way — the last favorite may have been removed on another
+  /// device, and its pseudo-category only exists while favorites do.
+  void _dropUnavailableLiveCategory() {
+    final remembered = _categoryId;
+    if (remembered == null) return;
+    if (_liveCategoriesForUi.any((category) => category.id == remembered)) {
+      // The filter was restored from the cache before the catalogue arrived, so
+      // the sidebar cursor has never been told about it.
+      _focus.syncCategorySelection(remembered);
+      return;
+    }
+    setState(() => _categoryId = null);
     _focus.resetChannelSelection();
     _focus.clampSelection();
-    if (scrollToTop) _scrollToTop();
+    unawaited(_rememberLiveCategory(null));
   }
 
   /// Double-Back exit confirmation: the first Back at the top of the ladder
@@ -4138,7 +4274,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             loadMoreFocusNode: _mediaLoadMoreFocusFor(_tab),
             displayPages: _mediaDisplayPages[_tab] ?? 1,
             minShown: _media(_tab).shownCountFloor,
-            onShown: _media(_tab).noteShownCount,
+            onShown: (count) => _onMediaWindowShown(_tab, count),
             isFavorite: (id) => _isFavorite(_tab, id),
             onOpenMedia: _openMedia,
             onLoadMore: () => _mediaLoadMore(_tab),
@@ -4389,6 +4525,10 @@ class _ChannelListZapCatalog implements ZapCatalog {
   @override
   ChannelDwell dwellFor(ZapEntry entry) =>
       channelDwellFromSeconds(entry.config.channelDwellSeconds);
+
+  @override
+  Future<void> persistDwell(ZapEntry entry, ChannelDwell dwell) =>
+      _screen._persistChannelDwell(entry.config, dwell);
 
   @override
   void log(String note) => DiagnosticsLog.instance.add('library', note);

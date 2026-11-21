@@ -1,4 +1,4 @@
-﻿// The VOD display window: the catalogue is loaded whole (global release-date
+// The VOD display window: the catalogue is loaded whole (global release-date
 // sorting needs every page), so paging is a *display* step вЂ” "Load more"
 // reveals the next screenful of items already in memory. One screenful is what
 // actually fits the viewport, not a fixed count, so a wall of a TV and a phone
@@ -10,6 +10,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/screens/media_tab_controller.dart';
 import 'package:iptvs/screens/media_tab_view.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
@@ -28,10 +30,13 @@ Future<void> _mount(
   WidgetTester tester, {
   required List<MediaItem> visible,
   required int displayPages,
+  Size window = const Size(1280, 900),
+  double? bodyHeight,
+  bool autoLoadMore = false,
+  List<ContinueWatchingEntry> continueWatching = const [],
+  List<int>? reported,
 }) async {
-  // A window comfortably in the grid branch, and tall enough that the computed
-  // screenful is several rows.
-  tester.view.physicalSize = const Size(1280, 900);
+  tester.view.physicalSize = window;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -40,33 +45,37 @@ Future<void> _mount(
   final focus = FocusNode();
   addTearDown(scroll.dispose);
   addTearDown(focus.dispose);
+  Widget body = MediaTabView(
+    kind: ContentKind.movie,
+    visible: visible,
+    // Null snapshot (no provider paging): the window alone decides what is
+    // drawn, which is exactly the sorted-mode case the window exists for.
+    snapshot: null,
+    loading: false,
+    loadingMore: false,
+    error: null,
+    showingSearch: false,
+    lastPlayedId: null,
+    scrollController: scroll,
+    firstFocusNode: focus,
+    displayPages: displayPages,
+    isFavorite: (_) => false,
+    onOpenMedia: (_) {},
+    onLoadMore: () {},
+    onRetry: () {},
+    continueWatching: continueWatching,
+    onResume: (_) {},
+    onRemoveContinueWatching: (_) {},
+    autoLoadMore: autoLoadMore,
+    onShown: reported?.add,
+  );
+  if (bodyHeight != null) {
+    body = SizedBox(height: bodyHeight, child: body);
+  }
   await tester.pumpWidget(
     MaterialApp(
       theme: AppTheme.dark,
-      home: Scaffold(
-        body: MediaTabView(
-          kind: ContentKind.movie,
-          visible: visible,
-          // Null snapshot (no provider paging): the window alone decides what is
-          // drawn, which is exactly the sorted-mode case the window exists for.
-          snapshot: null,
-          loading: false,
-          loadingMore: false,
-          error: null,
-          showingSearch: false,
-          lastPlayedId: null,
-          scrollController: scroll,
-          firstFocusNode: focus,
-          displayPages: displayPages,
-          isFavorite: (_) => false,
-          onOpenMedia: (_) {},
-          onLoadMore: () {},
-          onRetry: () {},
-          continueWatching: const [],
-          onResume: (_) {},
-          onRemoveContinueWatching: (_) {},
-        ),
-      ),
+      home: Scaffold(body: body),
     ),
   );
   await tester.pump();
@@ -106,5 +115,75 @@ void main() {
     expect(find.text('Title 2'), findsOneWidget);
     expect(find.textContaining('Next page'), findsNothing);
   });
-}
 
+  testWidgets('a touch window is never shortened by the rail', (tester) async {
+    // The phone this was reported on: a 384x763 window whose VOD body is only
+    // 432 px once the app bar, tabs and toolbar are taken out, with the
+    // Continue-watching rail 270 px of it. Subtracting the rail left
+    // `firstScreen - 1 == 1` item on page 1 — the log line read
+    // `shownLimit=1 visible=6022` — and one card does not fill 432 px, so there
+    // was nothing to scroll, the scroll-driven loader never ran, and no
+    // "Next page" button exists on touch. The catalogue was unreachable.
+    //
+    // The rail subtraction exists to place the keyboard/desktop "Next page"
+    // card, so the touch branch must keep the full screen instead.
+    final touchReported = <int>[];
+    await _mount(
+      tester,
+      visible: _items(300),
+      displayPages: 1,
+      window: const Size(384, 763),
+      bodyHeight: 432,
+      autoLoadMore: true,
+      continueWatching: [
+        for (final item in _items(2))
+          ContinueWatchingEntry(
+            item: item,
+            position: PlaybackPosition(
+              kind: ContentKind.movie,
+              itemId: item.id,
+              position: const Duration(minutes: 40),
+              duration: const Duration(minutes: 100),
+              updatedAt: DateTime(2024, 1, 1),
+            ),
+          ),
+      ],
+      reported: touchReported,
+    );
+
+    expect(touchReported, isNotEmpty);
+    expect(
+      touchReported.last,
+      greaterThan(1),
+      reason: 'one card cannot fill the viewport, so nothing would scroll',
+    );
+
+    // The same geometry on a keyboard/desktop surface keeps the shortened
+    // first page — that is the whole point of the subtraction there.
+    final cardReported = <int>[];
+    await _mount(
+      tester,
+      visible: _items(300),
+      displayPages: 1,
+      window: const Size(384, 763),
+      bodyHeight: 432,
+      continueWatching: [
+        for (final item in _items(2))
+          ContinueWatchingEntry(
+            item: item,
+            position: PlaybackPosition(
+              kind: ContentKind.movie,
+              itemId: item.id,
+              position: const Duration(minutes: 40),
+              duration: const Duration(minutes: 100),
+              updatedAt: DateTime(2024, 1, 1),
+            ),
+          ),
+      ],
+      reported: cardReported,
+    );
+
+    expect(cardReported, isNotEmpty);
+    expect(cardReported.last, lessThan(touchReported.last));
+  });
+}

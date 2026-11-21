@@ -1,10 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show
-        KeyDownEvent,
-        KeyEvent,
-        KeyRepeatEvent,
-        LogicalKeyboardKey;
+    show KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
 
 import '../player/channel_number_entry.dart';
 import '../sources/source.dart';
@@ -429,11 +425,19 @@ class LiveFocusCoordinator extends ChangeNotifier {
     );
   }
 
-  void _revealChannel(int index, {bool immediate = false}) =>
-      _reveal(scrollController, index, channelRowExtent(), immediate: immediate);
+  void _revealChannel(int index, {bool immediate = false}) => _reveal(
+    scrollController,
+    index,
+    channelRowExtent(),
+    immediate: immediate,
+  );
 
-  void _revealCategory(int index, {bool immediate = false}) =>
-      _reveal(categoryScrollController, index, categoryRowExtent(), immediate: immediate);
+  void _revealCategory(int index, {bool immediate = false}) => _reveal(
+    categoryScrollController,
+    index,
+    categoryRowExtent(),
+    immediate: immediate,
+  );
 
   /// Scroll [controller] the minimum amount to bring row [index] fully into
   /// view. No focus involved, nothing to build first — pure arithmetic.
@@ -495,16 +499,42 @@ class LiveFocusCoordinator extends ChangeNotifier {
     );
   }
 
-  /// Enter the channel pane from the sidebar, resuming on the row the user last
-  /// browsed in this category.
-  void focusChannelsFromCategory() {
+  /// Enter the channel pane from the sidebar after a category change.
+  ///
+  /// Landing row, in priority order:
+  ///
+  /// 1. **[carriedChannelId]** when the new view still draws it — the channel
+  ///    the cursor was on before the switch. A filter change is not a jump to
+  ///    another list, so a channel that appears in both views (listed in two
+  ///    groups, or seen through Favorites) keeps the cursor. Captured by the
+  ///    caller *before* `onCategoryActivated`, because the screen may have
+  ///    already clamped the cursor to the new list by the time this runs.
+  /// 2. **The row this category was left on** ([_lastBrowsedByCategory]) — the
+  ///    long-standing per-category memory.
+  /// 3. **The top** of the new list.
+  void focusChannelsFromCategory({String? carriedChannelId}) {
     final visible = visibleChannels();
     if (visible.isEmpty) return;
+    final carried = carriedChannelId == null
+        ? -1
+        : visible.indexWhere((channel) => channel.id == carriedChannelId);
     final resumeId = _lastBrowsedByCategory[_categoryKey(selectedCategoryId)];
-    final index = resumeId == null
+    final resumed = resumeId == null
         ? -1
         : visible.indexWhere((channel) => channel.id == resumeId);
-    if (index >= 0) _selectedChannelIndex = index;
+    // Fallback to the top *here* rather than trusting the caller's reset: the
+    // screen's `_selectCategory` may have kept the cursor on an index that this
+    // list no longer has, and a cursor left past the end would paint no row.
+    final index = carried >= 0
+        ? carried
+        : resumed >= 0
+        ? resumed
+        : 0;
+    // The id travels with the index: `clampSelection` (a refresh, an EPG
+    // landing) re-finds the row by id, so leaving it pointing at the previous
+    // category's channel would drag the cursor back there on the next reconcile.
+    _selectedChannelIndex = index;
+    _selectedChannelId = visible[index].id;
     _notifyChannelCursor();
     focusChannels();
   }
@@ -661,7 +691,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     }
     if (key == LogicalKeyboardKey.arrowRight) {
       if (!_isPress(event)) return KeyEventResult.handled;
-      focusChannelsFromCategory();
+      focusChannelsFromCategory(carriedChannelId: selectedChannelId);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
@@ -669,13 +699,16 @@ class LiveFocusCoordinator extends ChangeNotifier {
     }
     if (_isActivate(key)) {
       if (event is KeyDownEvent) {
+        // Captured before the filter changes: this is the "keep the channel if
+        // the new category also lists it" candidate.
+        final carriedChannelId = selectedChannelId;
         onCategoryActivated(selectedCategoryId);
         // Category activation updates the screen's filter synchronously, so
         // visibleChannels() now represents the selected category. Enter that
         // result immediately instead of leaving the user in the sidebar and
         // requiring a separate Right press. Empty categories deliberately keep
         // focus here so the D-pad is not moved onto a list with no target.
-        focusChannelsFromCategory();
+        focusChannelsFromCategory(carriedChannelId: carriedChannelId);
       }
       return KeyEventResult.handled;
     }

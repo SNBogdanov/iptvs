@@ -530,7 +530,17 @@ class MediaTabView extends StatelessWidget {
         // 1 therefore shows `firstScreen - 1` items; every further press adds a
         // full `screen` of rows (the rail is scrolled past by then), and the card
         // lands in the bottom-right cell of the page it belongs to.
-        final pageLimit = (firstScreen - 1) + (displayPages - 1) * screen;
+        //
+        // **Touch layouts keep the full first screen.** They have no card at all
+        // (`autoLoadMore` reveals the next window by scrolling), and shortening
+        // page 1 there could leave a window that *fits the viewport*: nothing to
+        // scroll, so the scroll listener never fires and the tab dead-ends. A
+        // 384x763 phone measured `body=432` with the rail at `270`, i.e.
+        // `firstScreen - 1 == 1` — a single card, and the catalogue became
+        // unreachable ("VOD перестал пролистываться").
+        final pageLimit = autoLoadMore
+            ? displayPages * screen - 1
+            : (firstScreen - 1) + (displayPages - 1) * screen;
         final targetIndex = jumpTargetIndex ?? -1;
         final hasJumpTarget =
             targetIndex >= 0 &&

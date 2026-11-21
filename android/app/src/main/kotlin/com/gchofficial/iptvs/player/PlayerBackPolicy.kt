@@ -32,15 +32,19 @@ enum class PlayerBackAction { QuickListBack, CloseMenu, CloseInfo, HideControls,
  * the list uncloseable on a phone using gesture navigation. There is still no
  * double peel on the key path — [ZapKeyPolicy] claims Back outright while the
  * list is open, so `handleSystemBack` never runs for that press.
+ *
+ * The auto-switch **pace menu** ([dwellMenuOpen]) shares the menu rung: it is
+ * drawn exactly like the audio/subtitle menus and closes the same way.
  */
 fun nextPlayerBackAction(
     menuOpen: Boolean,
     infoOpen: Boolean,
     controlsVisible: Boolean,
     quickListOpen: Boolean = false,
+    dwellMenuOpen: Boolean = false,
 ): PlayerBackAction = when {
     quickListOpen -> PlayerBackAction.QuickListBack
-    menuOpen -> PlayerBackAction.CloseMenu
+    menuOpen || dwellMenuOpen -> PlayerBackAction.CloseMenu
     infoOpen -> PlayerBackAction.CloseInfo
     controlsVisible -> PlayerBackAction.HideControls
     else -> PlayerBackAction.Exit

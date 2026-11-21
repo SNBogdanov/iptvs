@@ -34,6 +34,21 @@ enum ZapCommandKind {
   /// Open the quick list.
   openList,
 
+  /// Open the quick list **directly on its categories mode**, with the current
+  /// category preselected.
+  ///
+  /// A long press on the channel-list button, which a phone/tablet has instead
+  /// of a Left key: without it the categories are one Back-rung away and
+  /// invisible to a finger, and the list opens on channels every time.
+  openCategories,
+
+  /// Change the auto-switch pace ([ZapCommand.value] = seconds).
+  ///
+  /// Sent by a surface that draws its own pace menu (Android's long press on
+  /// the zapping button). The ladder itself is Dart's (`ChannelDwell`), so a
+  /// value outside it is refused rather than clamped.
+  dwell,
+
   /// Close the quick list.
   closeList,
 
@@ -118,6 +133,8 @@ ZapCommand? parseZapCommand(String? raw) {
       return const ZapCommand(ZapCommandKind.previousChannel);
     case 'zap:list':
       return const ZapCommand(ZapCommandKind.openList);
+    case 'zap:categories':
+      return const ZapCommand(ZapCommandKind.openCategories);
     case 'zap:close':
       return const ZapCommand(ZapCommandKind.closeList);
     case 'zap:activate':
@@ -140,6 +157,13 @@ ZapCommand? parseZapCommand(String? raw) {
     final delta = int.tryParse(raw.substring('zap:move:'.length));
     if (delta == null || delta == 0) return null;
     return ZapCommand(ZapCommandKind.move, delta);
+  }
+  if (raw.startsWith('zap:dwell:')) {
+    final seconds = int.tryParse(raw.substring('zap:dwell:'.length));
+    // Positive only: the ladder is checked by the controller, which owns it,
+    // but a zero/negative pace is nonsense on any surface.
+    if (seconds == null || seconds <= 0) return null;
+    return ZapCommand(ZapCommandKind.dwell, seconds);
   }
   if (raw.startsWith('favorite:')) {
     final value = raw.substring('favorite:'.length);

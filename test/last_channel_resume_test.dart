@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/last_channel_store.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/data/source_refresh_store.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
@@ -230,6 +231,13 @@ void main() {
       tempDir = Directory.systemTemp.createTempSync('iptvs_resume_test');
       db = await AppDatabase.openAt('${tempDir.path}/iptv.db');
       FlutterSecureStorage.setMockInitialValues({});
+      // Keep the scheduled catalogue refresh out of these tests. It runs a
+      // second `replaceLibrary` in the background after the first load, and
+      // that transaction can still be open when the widget tree is disposed —
+      // the failure reads "A Timer is still pending", followed by a stuck
+      // sqflite lock and a ten-minute test timeout. Stamping "just refreshed"
+      // models a normal launch where the schedule is not due.
+      await SourceRefreshStore().setLastRefresh(sourceId, DateTime.now());
     });
 
     tearDown(() async {

@@ -165,6 +165,27 @@ class AppSettingsStore {
     return _storage.write(key: key, value: categoryId);
   }
 
+  /// Last category browsed in the live tab, per source.
+  ///
+  /// Keyed by source for the same reason the media tabs are: live category ids
+  /// are the provider's own, so a two-provider install would otherwise restore
+  /// a group that only exists on the other portal and land on an empty list.
+  /// `null` is "All channels" and is never written.
+  String _liveCategoryKey(String sourceId) => 'app_live_category_$sourceId';
+
+  Future<String?> liveCategory(String sourceId) =>
+      _storage.read(key: _liveCategoryKey(sourceId));
+
+  /// Stores the selection; `null` ("All channels") deletes the row, so an
+  /// untouched install keeps a clean keychain.
+  Future<void> setLiveCategory(String sourceId, String? categoryId) {
+    final key = _liveCategoryKey(sourceId);
+    if (categoryId == null) {
+      return _storage.delete(key: key);
+    }
+    return _storage.write(key: key, value: categoryId);
+  }
+
   /// The stored VOD/series card orientation as `VodCardOrientation.storageValue`,
   /// or null when nothing was ever chosen — which reads as the default.
   ///

@@ -180,14 +180,26 @@ const val ZAP_PAGE_ROWS = 39
             // The page keys run **against** the channel keys, and deliberately:
             // Page Down is "step forward" to a remote, the same gesture as a
             // scrollbar, so it advances the zap cursor while Page Up steps
-            // back. What the command *means* is untouched — `ChannelUp` is
-            // still the next channel — and because this branch sits above the
-            // quick-list one, the open list resolves the same command into a
-            // cursor move that now runs the way the key reads.
-            KEYCODE_PAGE_DOWN ->
-                return ZapKeyDecision(ZapKeyAction.ChannelUp)
-            KEYCODE_PAGE_UP ->
-                return ZapKeyDecision(ZapKeyAction.ChannelDown)
+            // back. What the command *means* is untouched - `ChannelUp` is
+            // still the next channel.
+            //
+            // **Over an open quick list they page it**, which is what the
+            // commit that introduced these keys promised and what the unit test
+            // pins: routing them through `zap:up` resolves to a *one-row* move
+            // in Dart's cursor, making Page Down indistinguishable from the
+            // arrow beside it. The list's own branch below would return
+            // `MoveUp`/`MoveDown` (also one row) for the same reason, so the
+            // page-sized delta has to be decided here, above both.
+            KEYCODE_PAGE_DOWN -> return if (quickListEnabled && quickListOpen) {
+                ZapKeyDecision(ZapKeyAction.Move, delta = ZAP_PAGE_ROWS)
+            } else {
+                ZapKeyDecision(ZapKeyAction.ChannelUp)
+            }
+            KEYCODE_PAGE_UP -> return if (quickListEnabled && quickListOpen) {
+                ZapKeyDecision(ZapKeyAction.Move, delta = -ZAP_PAGE_ROWS)
+            } else {
+                ZapKeyDecision(ZapKeyAction.ChannelDown)
+            }
             KEYCODE_LAST_CHANNEL ->
                 // Holding it would toggle back and forth; one press, one swap.
                 return if (isRepeat) {

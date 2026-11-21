@@ -139,13 +139,14 @@ Future<void> main() async {
     DiagnosticsLog.instance.addAndPrint(
       'boot',
       'source identity migration skipped: ${error.runtimeType}: '
-      '${redactText('$error')}',
+          '${redactText('$error')}',
     );
   }
-  // Remembered movie/series categories, read before the first list can open so
-  // `MediaTabController` can restore them synchronously (a `load()` with an
-  // awaited keychain read would delay the first provider fetch).
-  await preloadMediaCategoryPrefs(sources.map((source) => source.id));
+  // Remembered tab categories (movie, series, live), read before the first list
+  // can open so the controllers/screens can restore theirs synchronously (a
+  // `load()` with an awaited keychain read would delay the first provider
+  // fetch; the live tab would flash "All" for a frame).
+  await preloadTabCategoryPrefs(sources.map((source) => source.id));
   runApp(IptvApp(db: db, store: store));
 }
 
@@ -233,7 +234,11 @@ class _IptvAppState extends State<IptvApp> {
       theme: AppTheme.dark,
       // The picker itself decides whether to appear (startup-mode setting +
       // profile count) and silently short-circuits to HomeShell otherwise.
-      home: ProfilePickScreen(db: widget.db, store: widget.store, bootMode: true),
+      home: ProfilePickScreen(
+        db: widget.db,
+        store: widget.store,
+        bootMode: true,
+      ),
     );
   }
 }

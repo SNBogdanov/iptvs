@@ -445,6 +445,10 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.seedZapModes(
                                 random = args["random"] as? Boolean,
                                 autoSwitch = args["autoSwitch"] as? Boolean,
+                                dwellSeconds = (args["dwellSeconds"] as? Number)?.toInt(),
+                                dwellOptions = (args["dwellOptions"] as? List<*>)
+                                    ?.mapNotNull { (it as? Number)?.toInt() }
+                                    ?.filter { it > 0 },
                             )
                         }
                     }

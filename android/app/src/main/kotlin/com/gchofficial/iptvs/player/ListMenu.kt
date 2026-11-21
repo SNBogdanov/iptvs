@@ -42,6 +42,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,6 +56,30 @@ fun BoxScope.PlayerMenusLayer(
     callbacks: PlayerCallbacks,
     onInteract: () -> Unit,
 ) {
+    // The auto-switch **pace** menu (a long press on the bolt). Drawn with the
+    // same primitive as the track menus on purpose: same width, row rhythm and
+    // checkmark, so "the check is on the current value" reads the same here as
+    // on the audio track list.
+    if (state.dwellMenuOpen) {
+        ListMenu(
+            header = "Auto-switch every",
+            options = state.dwellOptions.map { TrackOption("$it", "$it s") },
+            selectedId = state.dwellSeconds.toString(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(
+                    end = PlayerDimens.edgePadding(state.isTv),
+                    bottom = 96.dp + PlayerDimens.edgeExtraVertical(state.isTv),
+                ),
+            onSelect = { id ->
+                onInteract()
+                state.dwellMenuOpen = false
+                id.toIntOrNull()?.let { callbacks.onZapCommand("zap:dwell:$it") }
+            },
+        )
+        return
+    }
+
     val menu = state.openMenu
     if (menu == PlayerMenu.None) return
 
@@ -230,6 +256,13 @@ fun QuickListPanel(
     state: PlayerUiState,
     onActivateRow: (QuickListRow) -> Unit,
     onClose: (() -> Unit)? = null,
+    /**
+     * A tap on the picture **outside** the panel. Dart owns the list, so this
+     * is reported as `zap:close` rather than swallowed here — the same rule as
+     * every other list action. It is what a phone user expects from a panel
+     * that covers half the screen and has no Back key under their thumb.
+     */
+    onDismiss: (() -> Unit)? = null,
 ) {
     val list = state.quickList
     val listState = rememberLazyListState()
@@ -250,6 +283,18 @@ fun QuickListPanel(
     }
 
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+        // Behind the panel: a tap on the video closes the list. The panel is
+        // drawn after this, and swallows taps of its own (below), so a tap on
+        // a row still reaches that row.
+        if (onDismiss != null) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = { onDismiss() })
+                    },
+            )
+        }
         Column(
             Modifier
                 .align(Alignment.CenterStart)
@@ -261,7 +306,10 @@ fun QuickListPanel(
                 .width(PlayerDimens.QuickListWidth)
                 .fillMaxHeight()
                 .clip(RoundedCornerShape(PlayerDimens.MenuCorner))
-                .background(PlayerColors.Panel),
+                .background(PlayerColors.Panel)
+                // Swallow taps that land on the panel but not on a row (the
+                // header, the gap below the list): only *outside* dismisses.
+                .pointerInput(Unit) { detectTapGestures(onTap = {}) },
         ) {
             QuickListHeader(list, onClose)
             when {

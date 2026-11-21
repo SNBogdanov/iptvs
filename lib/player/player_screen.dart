@@ -20,6 +20,7 @@ import '../sources/source.dart';
 import '../widgets/channel_number_chip.dart';
 import 'channel_number_entry.dart';
 import 'channel_owner.dart';
+import 'channel_dwell.dart';
 import 'hwdec_policy.dart';
 import 'ios_engine.dart';
 import 'live_zap_controller.dart';
@@ -1468,9 +1469,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// chrome. Fire-and-forget and failure-tolerant: until the Kotlin/C++ halves
   /// land (Phase 2/4) this method simply isn't implemented natively, and a
   /// banner that doesn't draw must never break playback.
-  /// Pushes the two live zap modes to a native overlay that draws checkmarks
-  /// for them (Android's overflow menu). Separate from [setZapBanner] so the
-  /// menu updates without showing the banner.
+  /// Pushes the live zap modes to a native overlay that draws its own state:
+  /// Android's two toggle buttons (random, auto-switch) and the pace menu a long
+  /// press opens. Separate from [setZapBanner] so the chrome updates without
+  /// showing the banner, and re-sent whenever the countdown ticks or a mode
+  /// changes, because a native control that keeps its own copy is a second
+  /// source of truth.
   Future<void> _pushZapModes() async {
     final zap = _zap;
     if (zap == null) return;
@@ -1479,6 +1483,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _nativeHdrPlayer.invokeMethod<void>('setZapModes', {
         'random': zap.random,
         'autoSwitch': zap.autoSwitch.enabled,
+        // The pace and the ladder it came from: the native chrome draws a
+        // long-press menu with a checkmark on the current value, and the
+        // ladder lives in Dart (`ChannelDwell.values`), so the two cannot
+        // drift into disagreeing about what "10 s" means.
+        'dwellSeconds': zap.dwellSeconds,
+        'dwellOptions': [
+          for (final dwell in ChannelDwell.values) dwell.seconds,
+        ],
       });
     } on MissingPluginException {
       // Older native build: no menu state to update.

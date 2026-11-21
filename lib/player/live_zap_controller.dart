@@ -111,6 +111,14 @@ abstract class ZapCatalog {
   /// rather than staying on whichever source the session happened to open on.
   ChannelDwell dwellFor(ZapEntry entry);
 
+  /// Writes a pace chosen **inside the player** onto [entry]'s owning source.
+  ///
+  /// The same per-owning-source rule as [persistAspect]: a cross-source
+  /// favourite's provider keeps its own pace. Called after the session has
+  /// already adopted the new period, so a failed write costs persistence, not
+  /// the setting the user just made — the controller logs it and plays on.
+  Future<void> persistDwell(ZapEntry entry, ChannelDwell dwell);
+
   /// A credential-free diagnostics note. Implementations route it to
   /// `DiagnosticsLog`; **never** pass a locator, a header or a logo URL.
   void log(String note);
@@ -222,7 +230,7 @@ class LiveZapController extends ChangeNotifier {
        _playingIndex = initialIndex,
        _playingEntry = entries[initialIndex],
        _launchEntry = entries[initialIndex],
-_rangeCatId = rangeCategoryId,
+       _rangeCatId = rangeCategoryId,
        _launchRangeCatId = rangeCategoryId,
        _playingRange = (
          entries: entries,
@@ -292,7 +300,7 @@ _rangeCatId = rangeCategoryId,
   /// move every second while the banner still behaves like a banner; a surface
   /// that shows the mode listens to this one, not to the controller.
   late final AutoSwitch autoSwitch = AutoSwitch(
-    dwell: catalog.dwellFor(playing),
+    dwell: _dwellFor(playing),
     tickInterval: autoSwitchTick,
     onAdvance: channelUp,
   );
@@ -503,8 +511,7 @@ _rangeCatId = rangeCategoryId,
       // surfaces would otherwise each round the remaining time its own way and
       // disagree by a second. Absent when the mode is off, so a surface that
       // has never heard of the mode reads an absent key as "nothing to draw".
-      if (autoSwitch.enabled)
-        'autoSwitch': autoSwitchChipLabel(autoSwitch),
+      if (autoSwitch.enabled) 'autoSwitch': autoSwitchChipLabel(autoSwitch),
       // Printed, never derived: the shuffle marker beside the countdown chip,
       // so a surface that has never heard of random zapping reads an absent key
       // as "no marker".
@@ -548,6 +555,20 @@ _rangeCatId = rangeCategoryId,
       toggleRandom();
       return true;
     }
+    // The auto-switch **pace** is the same kind of thing: it changes how the
+    // session runs, not which row is highlighted, so an open list neither
+    // diverts it nor is re-ranged by it.
+    if (command.kind == ZapCommandKind.dwell) {
+      applyDwellSeconds(command.value);
+      return true;
+    }
+    // Entering the list one rung higher is an *entry*, not navigation inside
+    // it: claimed here so a second long press re-opens the categories mode
+    // instead of being read as a mode-relative key.
+    if (command.kind == ZapCommandKind.openCategories) {
+      openQuickListCategories();
+      return true;
+    }
     // **While the quick list is open it owns navigation.** Nothing here can
     // change channel except an explicit OK on a row: a list on screen that
     // the user is reading must not have channels changing behind it, and the
@@ -564,6 +585,10 @@ _rangeCatId = rangeCategoryId,
         return true;
       case ZapCommandKind.random:
         // Same: claimed above, before the list could capture it.
+        return true;
+      case ZapCommandKind.dwell:
+      case ZapCommandKind.openCategories:
+        // Both claimed above, for the same reason as the two mode toggles.
         return true;
       case ZapCommandKind.channelUp:
         channelUp();
@@ -617,6 +642,11 @@ _rangeCatId = rangeCategoryId,
         return true;
       case ZapCommandKind.random:
         // Same contract as auto-switch.
+        return true;
+      case ZapCommandKind.dwell:
+      case ZapCommandKind.openCategories:
+        // Claimed by [handleCommand] before it got here (pace and entry, not
+        // navigation). Unreachable, and `true` if it ever is.
         return true;
       case ZapCommandKind.openList:
         return true;
@@ -701,6 +731,66 @@ _rangeCatId = rangeCategoryId,
     return random;
   }
 
+  /// The pace the session is actually running at.
+  ///
+  /// Read from the auto-switch timer, not from the playing entry's config: a
+  /// source change adopts its entry's dwell into the timer, so the timer is
+  /// the one value that is true of the channel on screen *right now*.
+  ChannelDwell get dwell => autoSwitch.period;
+
+  /// Paces chosen **in this session**, per source id.
+  ///
+  /// The host writes a choice to the source row, but the `ZapEntry.config`
+  /// objects this controller already holds were built before that write, so a
+  /// plain re-read would hand back the old number on the next channel change.
+  /// Session-scoped and per source exactly like the stored setting, so a
+  /// cross-source zap still brings *that* source's pace.
+  final Map<String, ChannelDwell> _dwellBySource = {};
+
+  ChannelDwell _dwellFor(ZapEntry entry) =>
+      _dwellBySource[entry.sourceId] ?? catalog.dwellFor(entry);
+
+  /// The same pace in seconds — the unit the native surfaces' menu speaks.
+  int get dwellSeconds => dwell.seconds;
+
+  /// Applies a pace chosen on a native surface, whose menu sends seconds.
+  ///
+  /// A number off the ladder is **refused**, not clamped: the surfaces draw
+  /// their menu from [ChannelDwell.values] (pushed on `setZapModes`), so an
+  /// unknown value means a stale or foreign sender, and silently picking a
+  /// nearby pace would change a setting nobody chose.
+  void applyDwellSeconds(int seconds) {
+    final dwell = channelDwellFromSeconds(seconds);
+    if (dwell.seconds != seconds) return;
+    unawaited(setDwell(dwell));
+  }
+
+  /// Sets the auto-switch pace for this session and stores it on the playing
+  /// channel's **owning** source.
+  ///
+  /// The running timer is what makes the change immediate: `adoptDwell`
+  /// restarts the current countdown with the new period, so a user who picks
+  /// 30 s while the countdown was 2 s from firing gets 30 s, not a switch.
+  Future<void> setDwell(ChannelDwell dwell) async {
+    final changed = autoSwitch.period != dwell;
+    // Remembered per source for the rest of the session, and *before* the
+    // persist: the zap-entry configs this controller hands around were built
+    // before the write, so `_syncAutoSwitch` on the next channel change would
+    // otherwise re-adopt the old pace out of a stale config and silently undo
+    // a choice the store already holds.
+    _dwellBySource[_playingEntry.sourceId] = dwell;
+    autoSwitch.adoptDwell(dwell);
+    if (changed) _showMessage('Auto-switch every ${dwell.seconds}s');
+    _notify();
+    try {
+      await catalog.persistDwell(_playingEntry, dwell);
+    } catch (error) {
+      // The session already runs at the new pace; a failed write only means
+      // the next session opens on the old one.
+      catalog.log('zap dwell persist failed: ${error.runtimeType}');
+    }
+  }
+
   /// What this session hands the next one for its "last channel" key — read
   /// by the host when the route pops.
   ZapRecall get recall =>
@@ -779,7 +869,9 @@ _rangeCatId = rangeCategoryId,
     // Identity, not `channel.id`: the rows here span sources, and two providers
     // can both call a channel "12". A row that is not *this* object is not a
     // row this session can play, so fail closed rather than guess a source.
-    final row = _entries.indexWhere((entry) => identical(entry.channel, target));
+    final row = _entries.indexWhere(
+      (entry) => identical(entry.channel, target),
+    );
     if (row < 0) {
       _notify();
       return;
@@ -904,8 +996,18 @@ _rangeCatId = rangeCategoryId,
   /// nine times out of ten, and because it is the only one that needs no
   /// fetch at all — the range is already in hand, so the list draws on the
   /// same frame as the keypress.
-  void openQuickList() {
-    if (_listOpen) return;
+  ///
+  /// [categories] opens one rung higher instead (a long press on the
+  /// channel-list button): the categories arrive from a fetch, so the list
+  /// draws its spinner first, and the cursor lands on the range's current
+  /// category once they do.
+  void openQuickList({bool categories = false}) {
+    if (_listOpen) {
+      if (categories && _listMode != ZapQuickListMode.categories) {
+        unawaited(_openCategories());
+      }
+      return;
+    }
     _listOpen = true;
     _listGeneration++;
     _listLoading = false;
@@ -916,7 +1018,12 @@ _rangeCatId = rangeCategoryId,
     // than running on behind it.
     _syncAutoSwitch();
     _notify();
+    if (categories) unawaited(_openCategories());
   }
+
+  /// The long press on a surface's channel-list button: the same list, opened
+  /// on its categories rung with the current category preselected.
+  void openQuickListCategories() => openQuickList(categories: true);
 
   void closeQuickList() {
     if (!_listOpen) return;
@@ -1174,7 +1281,11 @@ _rangeCatId = rangeCategoryId,
     final total = _quickListTotal;
     final cursor = total == 0 ? 0 : _quickListCursor;
     final window = windowRows <= 0 ? kZapWindowRows : windowRows;
-    final start = zapWindowStart(total: total, selected: cursor, window: window);
+    final start = zapWindowStart(
+      total: total,
+      selected: cursor,
+      window: window,
+    );
     final end = total < start + window ? total : start + window;
     return ZapQuickListState(
       open: true,
@@ -1332,7 +1443,7 @@ _rangeCatId = rangeCategoryId,
   void _syncAutoSwitch() {
     if (_disposed) return;
     autoSwitch
-      ..adoptDwell(catalog.dwellFor(playing))
+      ..adoptDwell(_dwellFor(playing))
       ..sync(
         settling: _settling,
         quickListOpen: _listOpen,
@@ -1352,9 +1463,7 @@ _rangeCatId = rangeCategoryId,
     if (_disposed) return false;
     final on = autoSwitch.toggle();
     final period = autoSwitch.period.seconds;
-    _showMessage(
-      on ? 'Auto-switch on · ${period}s' : 'Auto-switch off',
-    );
+    _showMessage(on ? 'Auto-switch on · ${period}s' : 'Auto-switch off');
     _syncAutoSwitch();
     return on;
   }
@@ -1385,15 +1494,15 @@ _rangeCatId = rangeCategoryId,
         // targets a row the cursor is not on by construction (that is why it
         // exists), so it must not be short-circuited as "already there".
         if (host == null && target == _playingIndex) break;
-// The list this index belongs to, captured with it: the quick list
-          // can re-range the session while a settle is in flight, and `target`
-          // then means a different row (or none) in the new range.
-          final range = (
-            entries: _entries,
-            categoryId: _rangeCatId,
-            label: _rangeCatLabel,
-          );
-          // A reconnect re-resolve in flight describes the channel we are
+        // The list this index belongs to, captured with it: the quick list
+        // can re-range the session while a settle is in flight, and `target`
+        // then means a different row (or none) in the new range.
+        final range = (
+          entries: _entries,
+          categoryId: _rangeCatId,
+          label: _rangeCatLabel,
+        );
+        // A reconnect re-resolve in flight describes the channel we are
         // leaving; discard its outcome rather than let it reload behind us.
         // (The HTTP call itself can't be cancelled — the same tolerance
         // Kotlin's `ResolveGate` timeout path already has.)

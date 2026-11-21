@@ -376,6 +376,40 @@ class PlayerUiState(
     var randomZapping by mutableStateOf(false)
     var autoSwitchEnabled by mutableStateOf(false)
 
+    /**
+     * The auto-switch pace, in seconds, and the ladder it was chosen from.
+     *
+     * Both are pushed by Dart, because `ChannelDwell` is Dart's enum and the
+     * ladder's bounds are its decision (a period below the zap settle time
+     * cannot work). This side only draws the long-press menu from it and sends
+     * the chosen number back as `zap:dwell:<seconds>`.
+     */
+    var dwellSeconds by mutableStateOf(10)
+    var dwellOptions by mutableStateOf(listOf(5, 10, 15, 20, 30, 60))
+
+    /**
+     * The pace menu, opened by a **long press** on the auto-switch button.
+     *
+     * A tap still just toggles the mode: the long press is where the number
+     * lives, and it costs no extra control on a cluster that is already full.
+     */
+    var dwellMenuOpen by mutableStateOf(false)
+
+    /**
+     * "Landscape locked" when true: the Activity asks for
+     * `SCREEN_ORIENTATION_SENSOR_LANDSCAPE`, i.e. landscape only, with the
+     * **sensor** choosing which of the two sides is up. False follows the
+     * device in every orientation (the manifest's `fullSensor`).
+     */
+    var orientationLocked by mutableStateOf(false)
+
+    /**
+     * Whether this device can meaningfully lock its orientation at all. False on
+     * a TV (no accelerometer): the chrome would otherwise draw a rotation button
+     * that can never change anything.
+     */
+    var supportsOrientationLock by mutableStateOf(false)
+
     /** Whether the device supports PiP at all — gates the manual "Enter PiP" button. */
     var supportsPip by mutableStateOf(false)
 
@@ -386,7 +420,8 @@ class PlayerUiState(
     var videoUnsupportedReason by mutableStateOf("")
 
     /** Controls must stay pinned (no auto-hide) while a menu or the info panel is open. */
-    val pinned: Boolean get() = openMenu != PlayerMenu.None || infoOpen
+    val pinned: Boolean
+        get() = openMenu != PlayerMenu.None || infoOpen || dwellMenuOpen
 
     /** Audio button only when there's a real choice to make. */
     val showAudioButton: Boolean get() = audioTracks.size > 1
