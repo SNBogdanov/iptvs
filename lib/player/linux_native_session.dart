@@ -348,6 +348,11 @@ class LinuxNativeSession {
     Duration? resumeFrom,
     BufferPreset bufferPreset = BufferPreset.normal,
 
+    /// Settings → Proxy ("Streams: …") as mpv's `--http-proxy` value, or null
+    /// to open the stream directly. This path is a separate mpv process, so the
+    /// route has to be an argument rather than one of the player's properties.
+    String? httpProxy,
+
     /// Session-wide audio level 0–100 (the Dart [PlaybackAudioSession]). The
     /// native mpv process owns its own audio state, so it must be told what
     /// the shared volume/mute is rather than opening at its default 100.
@@ -388,6 +393,7 @@ class LinuxNativeSession {
         overlayScript: overlayScript,
         resumeFrom: resumeFrom,
         bufferPreset: bufferPreset,
+        httpProxy: httpProxy,
         volume: volume,
       );
       return session;
@@ -414,6 +420,7 @@ class LinuxNativeSession {
     required String overlayScript,
     Duration? resumeFrom,
     BufferPreset bufferPreset = BufferPreset.normal,
+    String? httpProxy,
     required double volume,
   }) async {
     final temp = Directory.systemTemp;
@@ -447,6 +454,10 @@ class LinuxNativeSession {
         '--start=${resumeFrom.inMilliseconds / 1000}',
       '--vo=gpu-next',
       '--hwdec=auto-safe',
+      // Settings → Proxy ("Streams: …"): this process fetches the stream
+      // itself, so the route is a launch argument. Absent = direct, the shape
+      // every build had before the setting.
+      if (httpProxy != null) '--http-proxy=$httpProxy',
       ...mpvColorspaceHintArgs(mpvVersion),
       if (backend == LinuxNativeBackend.wayland) '--wayland-content-type=video',
       '--input-ipc-server=$_socketPath',

@@ -2,6 +2,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../player/next_video_policy.dart';
 import '../player/seek_step.dart';
+import 'stream_kind.dart';
 
 /// Global (profile-independent) app preferences, persisted in the OS keychain.
 ///
@@ -157,6 +158,23 @@ class AppSettingsStore {
   Future<void> setPlayerVolumeSwipeOnLeft(bool value) => value
       ? _storage.delete(key: _kVolumeSwipeOnLeft)
       : _storage.write(key: _kVolumeSwipeOnLeft, value: 'false');
+
+  /// Per content kind, whether its **stream** is opened through the configured
+  /// proxy (Settings → Proxy, "Streams: Live / Movies / Series").
+  ///
+  /// Default **off** and stored by deleting the key: streams were fetched
+  /// directly before this existed, so an untouched install must keep exactly
+  /// that route. Only the video stream is affected; catalogue, guide and
+  /// artwork traffic keep following the proxy mode itself.
+  String _streamProxyKey(StreamKind kind) =>
+      'app_stream_proxy_${kind.storageName}';
+
+  Future<bool> streamProxy(StreamKind kind) async =>
+      (await _storage.read(key: _streamProxyKey(kind))) == 'true';
+
+  Future<void> setStreamProxy(StreamKind kind, bool value) => value
+      ? _storage.write(key: _streamProxyKey(kind), value: 'true')
+      : _storage.delete(key: _streamProxyKey(kind));
 
   /// Last category browsed in a media tab, per source and kind ("movie" /
   /// "series"). Category ids are provider-specific, so the source id is part of

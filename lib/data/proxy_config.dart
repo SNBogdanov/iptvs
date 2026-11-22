@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'app_settings_store.dart';
 import 'diagnostics_log.dart';
+import 'stream_kind.dart';
 
 /// How the app decides which HTTP proxy to use.
 ///
@@ -218,6 +219,53 @@ final ValueNotifier<ProxyConfig> proxyConfig = ValueNotifier(
 /// What [HttpOverrides] is currently answering with, for the Settings subtitle
 /// and the diagnostics log. `null` means direct.
 final ValueNotifier<ProxyEndpoint?> effectiveProxy = ValueNotifier(null);
+
+/// Whether a stream is fetched through the proxy: the kind's switch **and** a
+/// resolved endpoint. Both are needed — a switch with no proxy (mode Off, a
+/// half-filled Custom) must stay direct rather than fail closed to nothing.
+///
+/// The switch defaults **off**: before it existed every stream was fetched
+/// directly (by ExoPlayer/mpv, not by Dart's `HttpOverrides`), and a new
+/// setting must not silently route anyone's video through a proxy. API and
+/// guide traffic keep following the proxy mode on their own.
+bool streamUsesProxy({required bool enabled, required ProxyEndpoint? endpoint}) =>
+    enabled && endpoint != null;
+
+/// The endpoint [kind]'s **stream** is fetched through, or null for direct.
+///
+/// This is the single answer the player asks for, so every stream-opening path
+/// (the Android Activity, the shared preview engine, the embedded and native
+/// mpv surfaces) routes the same way. Null covers all three "direct" cases:
+/// the kind's switch is off (the default), no proxy is configured, or the mode
+/// is Off.
+///
+/// [effectiveProxy] is the live answer `HttpOverrides` is using; the resolve
+/// fallback exists only for a route opened before the boot-time platform lookup
+/// finished, so the first stream of a session cannot silently go direct.
+Future<ProxyEndpoint?> streamProxyEndpointFor(
+  StreamKind kind, {
+  AppSettingsStore? store,
+}) async {
+  final enabled = await (store ?? const AppSettingsStore()).streamProxy(kind);
+  if (!enabled) return null;
+  final endpoint =
+      effectiveProxy.value ?? await resolveProxyEndpoint(proxyConfig.value);
+  // [streamUsesProxy] holds the other half of the rule: a switch with no proxy
+  // in effect is still direct, never a route to nowhere.
+  return streamUsesProxy(enabled: enabled, endpoint: endpoint)
+      ? endpoint
+      : null;
+}
+
+/// [endpoint] as mpv's `http-proxy` / `--http-proxy` value.
+///
+/// mpv spells the scheme out because the one option carries both HTTP and
+/// SOCKS proxies; the endpoint's type is the platform's own answer, so the
+/// mapping is direct.
+String mpvProxyOptionValue(ProxyEndpoint endpoint) =>
+    endpoint.type.toUpperCase() == 'SOCKS'
+    ? 'socks5://${endpoint.host}:${endpoint.port}'
+    : 'http://${endpoint.host}:${endpoint.port}';
 
 /// Hosts whose direct attempt failed recently, so the next one goes straight to
 /// the proxy instead of paying the connect timeout again.

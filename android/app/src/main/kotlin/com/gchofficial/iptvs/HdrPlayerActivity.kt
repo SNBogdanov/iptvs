@@ -40,6 +40,7 @@ import com.gchofficial.iptvs.player.PlayerBackAction
 import com.gchofficial.iptvs.player.PlayerBackGuard
 import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerOrientation
+import com.gchofficial.iptvs.player.StreamRoute
 import com.gchofficial.iptvs.player.SwipeLevel
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
@@ -398,6 +399,12 @@ class HdrPlayerActivity : ComponentActivity() {
         headers = requestHeaders()
         subtitles = subtitleSpecs()
         bufferPreset = BufferPreset.fromName(intent.getStringExtra(EXTRA_BUFFER_PRESET))
+        // Credential-free: the endpoint the stream will be fetched through, or
+        // nothing when direct. It is the difference between "the provider is
+        // unreachable" and "the proxy is", which used to be indistinguishable.
+        streamRoute?.let {
+            logNative("stream proxy ${it.host}:${it.port} (${it.type})")
+        }
 
         // Seamless handoff: when the live preview is already playing this exact
         // stream, adopt its running engine — only the video output moves to this
@@ -635,6 +642,9 @@ class HdrPlayerActivity : ComponentActivity() {
             // (a cross-source zap) and the preset, and the rebuilt engine has
             // to be built with the *current* ones.
             bufferPreset = this.bufferPreset,
+            // Settings -> Proxy: the stream of *this* content kind, when the user
+            // asked for it. streamProxy is null for a direct connection.
+            streamProxy = streamRoute?.javaProxy,
         )
         exo.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
@@ -678,6 +688,7 @@ class HdrPlayerActivity : ComponentActivity() {
             post = { action -> if (!isFinishing) runOnUiThread(action) },
             bufferPreset = this.bufferPreset,
             isLive = uiState.isLive,
+            httpProxy = streamRoute?.mpvUrl,
         )
         setEngine(mpv)
         mpv.load(url, subtitles)
@@ -1424,6 +1435,18 @@ class HdrPlayerActivity : ComponentActivity() {
         engine?.setSpeed(1f)
     }
 
+    /**
+     * The stream's proxy route for this session, or null when it fetches
+     * direct (Settings -> Proxy, per content kind; Dart decided before launch).
+     */
+    private val streamRoute: StreamRoute? by lazy {
+        StreamRoute.of(
+            intent.getStringExtra(EXTRA_PROXY_HOST),
+            intent.getIntExtra(EXTRA_PROXY_PORT, 0),
+            intent.getStringExtra(EXTRA_PROXY_TYPE),
+        )
+    }
+
     /** Enters PiP if currently eligible; also invoked from a manual overlay button so entry
      *  doesn't depend solely on the OS calling [onUserLeaveHint] (inconsistent across OEMs). */    private fun enterPip() {
         if (uiState.inPip || isFinishing || !uiState.isPlaying) return
@@ -1881,6 +1904,17 @@ class HdrPlayerActivity : ComponentActivity() {
    * `true`, the layout every release so far had.
    */
   const val EXTRA_VOLUME_SWIPE_ON_LEFT = "volumeSwipeOnLeft"
+
+  /**
+   * The proxy a **stream** of this session's content kind is fetched through:
+   * resolved by Dart from Settings -> Proxy ("Streams: Live / Movies / Series")
+   * and absent when the user never asked for one (the default, and what every
+   * build before that setting did). Empty host or zero port means direct.
+   * [EXTRA_PROXY_TYPE] is the platform's own vocabulary, `HTTP` or `SOCKS`.
+   */
+  const val EXTRA_PROXY_HOST = "proxyHost"
+  const val EXTRA_PROXY_PORT = "proxyPort"
+  const val EXTRA_PROXY_TYPE = "proxyType"
 
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"

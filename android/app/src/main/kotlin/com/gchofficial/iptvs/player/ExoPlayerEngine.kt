@@ -20,7 +20,9 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DecoderCounters
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -28,7 +30,9 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import java.net.Proxy
 import java.util.Locale
+import okhttp3.OkHttpClient
 
 /**
  * How much media to hold ahead of playback — a user-facing, per-source choice.
@@ -196,6 +200,17 @@ class ExoPlayerEngine(
      * engine — so returning to a source applies its own setting.
      */
     private val bufferPreset: BufferPreset = BufferPreset.NORMAL,
+    /**
+     * Route the **stream itself** through this proxy, or `null` for a direct
+     * connection (the default, and what every install had before the per-kind
+     * setting existed).
+     *
+     * ExoPlayer's stock `DefaultHttpDataSource` sits on `HttpURLConnection`,
+     * which offers no proxy hook, so a proxied stream is fetched through
+     * [OkHttpDataSource] instead — same headers, same redirect behaviour, plus
+     * the proxy. Media/API traffic is Dart's business (`HttpOverrides`).
+     */
+    private val streamProxy: Proxy? = null,
 ) : PlaybackEngine {
 
     // Rebindable callbacks (not constructor params) because the engine can outlive
@@ -590,11 +605,17 @@ class ExoPlayerEngine(
     }
 
     init {
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(headers)
+        val dataSourceFactory: DataSource.Factory = if (streamProxy != null) {
+            OkHttpDataSource.Factory(
+                OkHttpClient.Builder().proxy(streamProxy).build(),
+            ).setDefaultRequestProperties(headers)
+        } else {
+            DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(headers)
+        }
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
-            .setDataSourceFactory(httpFactory)
+            .setDataSourceFactory(dataSourceFactory)
         renderersFactory = HdrRenderersFactory(
             context,
             onDynamicRange = { label ->

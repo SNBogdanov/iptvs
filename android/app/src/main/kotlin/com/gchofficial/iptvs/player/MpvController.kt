@@ -24,6 +24,13 @@ class MpvController(
     private val cacheSecs: Int? = null,
     /** Whether the session is live; gates `reconnect_at_eof` in [load]. */
     private val isLive: Boolean = false,
+    /**
+     * `http://host:port` to fetch the **stream** through, or null for direct.
+     * The proxy of Settings -> Proxy, applied per content kind; mpv is the
+     * Dolby-Vision fallback surface and must not quietly leave the route the
+     * user chose for the kind they are watching.
+     */
+    private val httpProxy: String? = null,
     private val onHdrChanged: (Boolean) -> Unit = {},
 ) : MPVLib.EventObserver, SurfaceHolder.Callback {
 
@@ -41,6 +48,9 @@ class MpvController(
             // Set with the other options so it is in effect for the first
             // load rather than applied to an already-running demuxer.
             cacheSecs?.let { setOptionString("cache-secs", it.toString()) }
+            // The stream's own route, set with the other options so it is in
+            // effect for the first load.
+            httpProxy?.let { setOptionString("http-proxy", it) }
             setOptionString("config", "no")
             setOptionString("idle", "yes")
             setOptionString("force-window", "no")

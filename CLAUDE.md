@@ -40,7 +40,15 @@ flutter test           # full suite: release gate (see below), ~30 minutes
 flutter test test/persistence_test.dart   # targeted: the iteration default
 flutter run -d windows
 flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
+flutter build apk --debug --flavor development --dart-define-from-file=dart_define.android.json --dart-define=DISTRIBUTION_CHANNEL=development
 ```
+
+**A local Android build must pass the Supabase defines** (`dart_define.android.json`; CI uses
+repo Variables). Without them `CloudConfig.isConfigured` is false, so the startup profile picker
+shows only local profiles and favorites/watch-state sync is absent — the build still succeeds,
+which is exactly how this gets missed. Keep the flavor on the installed package: `development`
+(`.dev`, debug keystore) for a phone that already runs it; `parallel`/`googlePlay` are different
+applicationIds and cannot update it in place.
 
 **`flutter test` is a release gate, not an iteration step.** The full suite takes about 30
 minutes here and runs in its own process, so any build lock has to wrap the whole command
@@ -504,6 +512,12 @@ dragging a name sort or reading as ancient is worse than admitting the provider 
   dotless names, `.local`, `localhost` and the private IPv4/IPv6 ranges never reach the proxy
   (`ProxyEndpoint.isLocalHost`): a proxy closes a request for `http://transmission/...`, which is
   exactly the "Connection closed before full header was received" failure the panel reported.
+  **The video stream has its own per-kind switches** (`Settings -> Proxy`, "Streams through the
+  proxy: Live / Movies / Series"; `StreamKind`, `streamProxyEndpointFor`). They default off, because a
+  player (ExoPlayer/mpv) never used `HttpOverrides` and every older install fetched streams directly.
+  Every stream-opening path must ask that one function: the Android `open` payload, `SharedEngine`
+  (its proxy is part of the engine-reuse key), the embedded mpv `http-proxy`, and the Linux-native
+  `--http-proxy`. Detail: docs/sources.md "The HTTP proxy".
 - **`lib/theme.dart` carries the design tokens, the breakpoints, and the motion helper.**
   **The wide/narrow choice goes through `isWideLayout(size)`, never a bare width comparison** — a
   television is the two-pane layout whatever its logical width says. Logical width is physical

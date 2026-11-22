@@ -15,6 +15,7 @@ import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.SharedEngine
+import com.gchofficial.iptvs.player.StreamRoute
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -185,6 +186,14 @@ class MainActivity : FlutterActivity() {
                         headers,
                         args["muted"] as? Boolean ?: true,
                         BufferPreset.fromName(args["bufferPreset"] as? String),
+                        // Settings -> Proxy: the preview only ever plays live
+                        // channels, so this is the Live switch's answer. Absent
+                        // means direct.
+                        StreamRoute.of(
+                            args["proxyHost"] as? String,
+                            (args["proxyPort"] as? Number)?.toInt() ?: 0,
+                            args["proxyType"] as? String,
+                        ),
                     )
                     result.success(true)
                 }
@@ -360,6 +369,29 @@ class MainActivity : FlutterActivity() {
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }
+                        // Settings -> Proxy ("Streams: Live / Movies / Series"):
+                        // the stream's own route, decided by Dart for this content
+                        // kind. Absent = direct, the shape every build before the
+                        // setting had; the Activity fails soft to direct for a
+                        // half-filled address.
+                        (args["proxyHost"] as? String)?.let { host ->
+                            putExtra(HdrPlayerActivity.EXTRA_PROXY_HOST, host)
+                            putExtra(
+                                HdrPlayerActivity.EXTRA_PROXY_PORT,
+                                (args["proxyPort"] as? Number)?.toInt() ?: 0,
+                            )
+                            putExtra(
+                                HdrPlayerActivity.EXTRA_PROXY_TYPE,
+                                args["proxyType"] as? String ?: "HTTP",
+                            )
+                        }
+                        // Which side of the picture the volume swipe lives on.
+                        // Without this the Activity always read its compiled-in
+                        // default, so the Settings tile had no effect at all.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_VOLUME_SWIPE_ON_LEFT,
+                            args["volumeSwipeOnLeft"] as? Boolean ?: true,
+                        )
                         // Debug-only integration-test soak: lets a test cycle the
                         // native Activity unattended. Never read outside a debug
                         // build (see HdrPlayerActivity), so gate it here too rather

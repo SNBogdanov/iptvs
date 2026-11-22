@@ -192,6 +192,10 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    // An OkHttp data source, for the one thing the stock HttpURLConnection one
+    // cannot do: fetch a **stream** through the user's proxy (Settings -> Proxy,
+    // per content kind). Media/API traffic from Dart has its own override.
+    implementation("androidx.media3:media3-datasource-okhttp:1.11.1")
 
     // libmpv (gpu-next / libplacebo) is the FALLBACK engine, used only when ExoPlayer
     // can't decode the video track — chiefly Dolby Vision Profile 5 (single-layer, no

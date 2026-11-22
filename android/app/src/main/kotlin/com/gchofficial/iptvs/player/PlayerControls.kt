@@ -74,6 +74,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1324,31 +1325,40 @@ fun TextControlButton(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // Handlers as *updated state*, so the pointer detectors can key on nothing:
+    // they must survive the recomposition that a hold causes (the label changes
+    // to "Catching up ×2"). Keying them on the lambdas — which are rebuilt every
+    // recomposition — restarted the gesture mid-hold and lost the release, which
+    // left the speed raised after the finger lifted.
+    val tapHandler = rememberUpdatedState(onClick)
+    val holdStartHandler = rememberUpdatedState(onHoldStart)
+    val holdEndHandler = rememberUpdatedState(onHoldEnd)
     val press = if (onHoldStart == null) {
-        Modifier.clickable(onClick = onClick)
+        Modifier.clickable(onClick = { tapHandler.value() })
     } else {
         Modifier
-            .pointerInput(onHoldStart, onClick) {
+            .pointerInput(Unit) {
                 detectTapGestures(
-                    onTap = { onClick() },
-                    onLongPress = { onHoldStart() },
+                    onTap = { tapHandler.value() },
+                    onLongPress = { holdStartHandler.value?.invoke() },
                 )
             }
             .then(
                 if (onHoldEnd == null) {
                     Modifier
                 } else {
-                    Modifier.pointerInput(onHoldEnd) {
+                    Modifier.pointerInput(Unit) {
                         // Passive: never consumes, so the tap detector above
                         // still owns the gesture. It only watches for the press
-                        // to end.
+                        // to end — `detectTapGestures` has no "long press ended"
+                        // callback, and the held speed must not outlive the hold.
                         awaitEachGesture {
                             awaitFirstDown(requireUnconsumed = false)
                             while (true) {
                                 val event = awaitPointerEvent()
                                 if (event.changes.all { !it.pressed }) break
                             }
-                            onHoldEnd()
+                            holdEndHandler.value?.invoke()
                         }
                     }
                 },

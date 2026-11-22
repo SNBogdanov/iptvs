@@ -701,3 +701,21 @@ not twenty times. Provider API traffic is *not* direct-first: it follows the pro
 because a panel is either reachable the way the setting says or not at all. Every
 `CachedNetworkImage` in the app passes `cacheManager: artworkCacheManager`, which is the default cache
 key (`libCachedImageData`) so already-downloaded artwork is reused, with that file service behind it.
+
+**A video stream is a different connection, and it has its own switches.** Everything above is Dart's
+`HttpClient` doing work before playback: the catalogue, the resolve, the guides. The stream itself is
+fetched by a **player** - ExoPlayer or mpv - which never consulted `HttpOverrides`, so until now a
+phone behind a proxy fetched its APIs through the proxy and every video directly. `Settings -> Proxy`
+therefore ends with three switches, **Streams through the proxy: Live / Movies / Series** (an episode
+is a series; seasons and episodes both map to it - `lib/data/stream_kind.dart`). They default **off**,
+because every install that predates them fetched streams directly and a new setting must not move
+anyone's video. `streamProxyEndpointFor(kind)` is the single answer every stream-opening path asks
+(`lib/data/proxy_config.dart`): the Android Activity's `open` payload, the shared preview engine
+(`SharedEngine`, whose proxy is part of its engine-reuse key), the embedded mpv surfaces
+(`http-proxy`), and the Linux-native mpv process (`--http-proxy`). `StreamRoute` (`player/
+StreamRoute.kt`) converts the one answer into `java.net.Proxy` and mpv's `socks5://`/`http://` URL, so
+the two engines cannot disagree, and a half-filled address fails soft to direct exactly as it does on
+the Dart side. Unlike the API path, **the platform bypass list is not applied to a switched-on kind**:
+the switch is an explicit instruction about this stream, and silently exempting a LAN provider would
+make it look ignored. The route is read when a stream is opened, so flipping a switch affects the next
+video, never the one playing.

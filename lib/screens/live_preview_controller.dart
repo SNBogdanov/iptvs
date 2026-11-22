@@ -12,6 +12,8 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
+import '../data/proxy_config.dart';
+import '../data/stream_kind.dart';
 import '../player/channel_owner.dart';
 import '../player/buffer_preset.dart';
 import '../player/hwdec_policy.dart';
@@ -651,6 +653,23 @@ class LivePreviewController extends ChangeNotifier {
             'preview mpv stream-lavf-o failed: ${redactText('$error')}',
           );
         }
+        // Settings → Proxy ("Streams: Live"). Set per open, not once at engine
+        // creation: mpv reads the option when it opens the URL, and the user
+        // can flip the switch between two previews. An empty value is mpv's own
+        // "no proxy", so a switch turned back off also takes effect without
+        // rebuilding the player.
+        final route = await streamProxyEndpointFor(StreamKind.live);
+        try {
+          await platform.setProperty(
+            'http-proxy',
+            route == null ? '' : mpvProxyOptionValue(route),
+          );
+        } catch (error) {
+          DiagnosticsLog.instance.add(
+            'player',
+            'preview mpv http-proxy failed: ${redactText('$error')}',
+          );
+        }
       }
       if (_disposed || requestId != _requestId) return;
       await embeddedPlayer.open(
@@ -677,6 +696,9 @@ class LivePreviewController extends ChangeNotifier {
   }
 
   Future<bool> _openNative(StreamInfo resolved, {required bool muted}) async {
+    // Settings → Proxy ("Streams: Live"): the shared preview engine fetches the
+    // stream itself, so it needs the route before it builds or reuses an engine.
+    final route = await streamProxyEndpointFor(StreamKind.live);
     try {
       final opened = await _nativeChannel.invokeMethod<bool>('open', {
         'url': resolved.url,
@@ -686,6 +708,12 @@ class LivePreviewController extends ChangeNotifier {
         // way changed headers do — ExoPlayer's LoadControl is fixed at
         // construction.
         'bufferPreset': _bufferPreset.storageName,
+        // Part of that same reuse key: a route change is a different engine.
+        if (route != null) ...{
+          'proxyHost': route.host,
+          'proxyPort': route.port,
+          'proxyType': route.type,
+        },
       });
       if (opened == true) {
         DiagnosticsLog.instance.add('library', 'preview native engine open');

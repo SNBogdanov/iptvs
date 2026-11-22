@@ -484,7 +484,15 @@ class PlayerUiState(
 
     /** Controls must stay pinned (no auto-hide) while a menu or the info panel is open. */
     val pinned: Boolean
-        get() = openMenu != PlayerMenu.None || infoOpen || dwellMenuOpen
+        get() =
+            openMenu != PlayerMenu.None ||
+                infoOpen ||
+                dwellMenuOpen ||
+                // A **held** "Go to live" is the same kind of state: the user is
+                // pressing this very control, and the chrome hiding under their
+                // finger took the button away mid-hold ("кнопка исчезает, когда
+                // держишь").
+                catchingUp
 
     /** Audio button only when there's a real choice to make. */
     val showAudioButton: Boolean get() = audioTracks.size > 1

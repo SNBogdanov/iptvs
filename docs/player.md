@@ -34,6 +34,18 @@ back to the embedded `media_kit` surface if unavailable. The native player is a 
   `jniLibs.pickFirsts` keeps this `libmpv.so` over media_kit's (verify it has
   `pl_dovi_metadata`).
 
+**The stream's route is a Settings choice, per content kind.** `Settings -> Proxy` ends with
+"Streams through the proxy: Live / Movies / Series" (an episode counts as series,
+`lib/data/stream_kind.dart`), resolved once per route by `streamProxyEndpointFor` and sent to the
+player as `proxyHost`/`proxyPort`/`proxyType`. Both Android engines honour it, and they honour it
+the same way because both read `StreamRoute` (`player/StreamRoute.kt`): ExoPlayer's stock
+`DefaultHttpDataSource` sits on `HttpURLConnection`, which has no proxy hook, so a proxied stream is
+fetched through **`OkHttpDataSource`** with a `java.net.Proxy`; mpv gets `http-proxy` with the scheme
+spelled out (`http://` or `socks5://`). The shared preview engine takes the same route and includes
+it in its engine-reuse key, so toggling the switch cannot leave the next preview on the old path.
+Every switch defaults **off** — a player never used Dart's `HttpOverrides`, so before this setting
+existed every stream went direct. Detail: docs/sources.md "The HTTP proxy".
+
 **Buffer policy (time-to-first-frame).** `ExoPlayerEngine` builds its `ExoPlayer` with an explicit
 `DefaultLoadControl` fed from the pure `ExoBufferPolicy` object (same file, pinned by
 `ExoBufferPolicyTest`). Without it media3's defaults apply, and
@@ -224,6 +236,13 @@ for the press to end (`detectTapGestures` has no "long press ended" callback, an
 stay raised after the user lets go). A zap or a "Go to live" tap calls `stopCatchUp()`, so no new
 stream ever inherits the rate. At the edge the extra speed simply buys nothing — the source cannot be
 outrun — and the button disappears once the session is live again.
+
+**The chrome stays up while the hold is in progress.** `PlayerUiState.pinned` includes `catchingUp`,
+because a catch-up lasts as long as it takes and the normal 4.5 s auto-hide fired *under the finger*
+— the button left the screen mid-hold, which is exactly what a held control must never do. The
+handlers are read through `rememberUpdatedState`, so the recomposition that changes the label to
+`Catching up ×2` cannot restart the pointer detectors: keying them on fresh lambdas restarted the
+gesture mid-hold and dropped the release callback, leaving the speed raised after the finger lifted.
 
 **"Go to live" re-resolves through the same single-flight gate the reconnect watchdog uses**
 (`ResolveGate` in `android/.../player/LiveResolve.kt`, `HdrPlayerActivity.withFreshLiveLocator`):

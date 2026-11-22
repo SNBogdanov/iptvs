@@ -76,6 +76,10 @@ object SharedEngine {
     // The preset the live engine was built with, so a change forces a
     // rebuild rather than being silently ignored.
     private var preset: BufferPreset = BufferPreset.NORMAL
+    // The stream's proxy route (Settings -> Proxy, "Streams: Live"), baked into
+    // the engine's data-source factory and therefore part of the reuse key the
+    // same way headers and the preset are.
+    private var proxy: StreamRoute? = null
 
     /** True while `HdrPlayerActivity` owns the engine's video output. */
     var adoptedByFullscreen = false
@@ -91,6 +95,7 @@ object SharedEngine {
         val headers: Map<String, String>,
         val muted: Boolean,
         val preset: BufferPreset,
+        val proxy: StreamRoute?,
     )
 
     /**
@@ -128,6 +133,7 @@ object SharedEngine {
         requestHeaders: Map<String, String>,
         muted: Boolean,
         bufferPreset: BufferPreset = BufferPreset.NORMAL,
+        streamProxy: StreamRoute? = null,
     ) {
         if (adoptedByFullscreen) {
             // Never steal the surface out from under the Activity — but never
@@ -140,14 +146,22 @@ object SharedEngine {
                 requestHeaders,
                 muted,
                 bufferPreset,
+                streamProxy,
             )
             return
         }
         val existing = engine
         // A changed preset needs a fresh engine for the same reason changed
         // headers do: `LoadControl` is baked in at construction, so reusing the
-        // engine would silently keep the previous source's buffering.
-        if (existing != null && headers == requestHeaders && preset == bufferPreset) {
+        // engine would silently keep the previous source's buffering. The proxy
+        // is baked into the data source, so it joins the key for the same
+        // reason — toggling "Streams: Live" mid-session must not keep the old
+        // route.
+        if (existing != null &&
+            headers == requestHeaders &&
+            preset == bufferPreset &&
+            proxy == streamProxy
+        ) {
             url = streamUrl
             bindPreviewCallbacks(existing)
             previewSurface?.let { existing.attachPreviewSurface(it) }
@@ -163,12 +177,14 @@ object SharedEngine {
                 state,
                 requestHeaders,
                 bufferPreset,
+                streamProxy?.javaProxy,
             )
             bindPreviewCallbacks(fresh)
             engine = fresh
             uiState = state
             headers = requestHeaders
             preset = bufferPreset
+            proxy = streamProxy
             url = streamUrl
             previewSurface?.let { fresh.attachPreviewSurface(it) }
             fresh.load(streamUrl, emptyList())
@@ -282,6 +298,8 @@ object SharedEngine {
         uiState = null
         url = null
         headers = emptyMap()
+        preset = BufferPreset.NORMAL
+        proxy = null
         adoptedByFullscreen = false
         stopAfterDetach = false
         pendingOpen = null
@@ -440,7 +458,7 @@ object SharedEngine {
 
     private fun replayOpen(p: PendingOpen) {
         previewDiagnostics("deferred open replayed")
-        openPreview(p.context, p.url, p.headers, p.muted, p.preset)
+        openPreview(p.context, p.url, p.headers, p.muted, p.preset, p.proxy)
     }
 
     /** Fullscreen released the adopted engine — swapped for mpv because the

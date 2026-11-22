@@ -27,6 +27,8 @@ class MpvEngine(
     bufferPreset: BufferPreset = BufferPreset.NORMAL,
     /** Live session: gates the per-URL `reconnect_at_eof` in [MpvController]. */
     isLive: Boolean = false,
+    /** `http://host:port` for the stream itself, or null for direct. */
+    httpProxy: String? = null,
 ) : PlaybackEngine {
 
     private val controller = MpvController(
@@ -35,6 +37,7 @@ class MpvEngine(
         post,
         cacheSecs = bufferPreset.mpvCacheSecs,
         isLive = isLive,
+        httpProxy = httpProxy,
     )
     // MpvController.destroy() is itself idempotent, but this also guards
     // DebugCounters against a double-decrement if release() is called twice.

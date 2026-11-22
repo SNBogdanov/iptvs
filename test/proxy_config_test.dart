@@ -2,6 +2,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_settings_store.dart';
 import 'package:iptvs/data/proxy_config.dart';
+import 'package:iptvs/data/stream_kind.dart';
 
 /// The proxy choice is three layers again — the keychain, the live notifier the
 /// Settings screen and the artwork fetcher read, and the platform lookup behind
@@ -225,6 +226,93 @@ void main() {
       // The memory expires, so a network change can unblock the host again.
       directFailureWindow = Duration.zero;
       expect(shouldTryDirectFirst('cdn.example.com'), isTrue);
+    });
+  });
+
+  group('streams through the proxy', () {
+    test('defaults off, so an untouched install stays direct', () async {
+      for (final kind in StreamKind.values) {
+        expect(await store.streamProxy(kind), isFalse, reason: kind.name);
+        expect(
+          await streamProxyEndpointFor(kind, store: store),
+          isNull,
+          reason: kind.name,
+        );
+      }
+    });
+
+    test('the switch is per kind and survives a restart', () async {
+      await store.setStreamProxy(StreamKind.movie, true);
+      expect(await store.streamProxy(StreamKind.movie), isTrue);
+      // The other two kinds are untouched: a film user is not a channel user.
+      expect(await store.streamProxy(StreamKind.live), isFalse);
+      expect(await store.streamProxy(StreamKind.series), isFalse);
+      await store.setStreamProxy(StreamKind.movie, false);
+      expect(await store.streamProxy(StreamKind.movie), isFalse);
+    });
+
+    test('a switch with no proxy in effect is still direct', () async {
+      await store.setStreamProxy(StreamKind.live, true);
+      // Mode Off: the switch cannot conjure a route the user turned off.
+      proxyConfig.value = const ProxyConfig(
+        mode: ProxyMode.off,
+        host: '192.168.1.4',
+        port: 8888,
+      );
+      effectiveProxy.value = null;
+      expect(
+        await streamProxyEndpointFor(StreamKind.live, store: store),
+        isNull,
+      );
+    });
+
+    test('a switched-on kind gets the proxy the app already uses', () async {
+      await store.setStreamProxy(StreamKind.series, true);
+      proxyConfig.value = const ProxyConfig(
+        mode: ProxyMode.custom,
+        host: '192.168.1.4',
+        port: 8888,
+      );
+      effectiveProxy.value = null;
+      expect(
+        await streamProxyEndpointFor(StreamKind.series, store: store),
+        const ProxyEndpoint(host: '192.168.1.4', port: 8888),
+      );
+      // And the live switch, still off, stays direct on the same config.
+      expect(
+        await streamProxyEndpointFor(StreamKind.live, store: store),
+        isNull,
+      );
+    });
+
+    test('the resolved endpoint wins over re-resolving the config', () async {
+      // The system proxy is what the app's own client is using, so a stream
+      // must not resolve differently from the API call that led to it.
+      await store.setStreamProxy(StreamKind.live, true);
+      proxyConfig.value = const ProxyConfig(mode: ProxyMode.system);
+      effectiveProxy.value = const ProxyEndpoint(
+        host: '192.168.1.4',
+        port: 8888,
+      );
+      expect(
+        await streamProxyEndpointFor(StreamKind.live, store: store),
+        effectiveProxy.value,
+      );
+    });
+
+    test('mpv gets a scheme-carrying value for both proxy types', () {
+      expect(
+        mpvProxyOptionValue(
+          const ProxyEndpoint(host: '192.168.1.4', port: 8888),
+        ),
+        'http://192.168.1.4:8888',
+      );
+      expect(
+        mpvProxyOptionValue(
+          const ProxyEndpoint(host: '127.0.0.1', port: 1080, type: 'SOCKS'),
+        ),
+        'socks5://127.0.0.1:1080',
+      );
     });
   });
 

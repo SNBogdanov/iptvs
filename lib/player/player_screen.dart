@@ -16,6 +16,8 @@ import 'aspect_mode.dart';
 import 'auto_switch.dart';
 import 'buffer_preset.dart';
 import '../data/net.dart';
+import '../data/proxy_config.dart';
+import '../data/stream_kind.dart';
 import '../sources/source.dart';
 import '../widgets/channel_number_chip.dart';
 import 'channel_number_entry.dart';
@@ -736,6 +738,28 @@ class _PlayerScreenState extends State<PlayerScreen>
   final List<StreamSubscription<dynamic>> _subs = [];
   String? _error;
   late final bool _isLive = widget.stream.isLive;
+
+  /// Which Settings → Proxy stream switch this route answers to.
+  ///
+  /// Fixed for the life of the route: live zapping never changes kind, and VOD
+  /// stepping stays inside the kind it launched in. The item's own kind wins,
+  /// then the playback context's (a route tracks its item), and a plain URL
+  /// with neither falls back to Movies.
+  StreamKind get _streamKind {
+    if (_isLive) return StreamKind.live;
+    final kind = widget.mediaItem?.kind ?? widget.playback?.kind;
+    return kind == null ? StreamKind.movie : streamKindOf(kind);
+  }
+
+  /// The proxy this route's **stream** is fetched through, or null for direct.
+  ///
+  /// Resolved once: Settings is unreachable while the player is open, so the
+  /// answer cannot change underneath a playing stream, and the Android `open`
+  /// payload, the shared preview and the embedded/native mpv surfaces all ask
+  /// this same future.
+  Future<ProxyEndpoint?>? _streamProxyFuture;
+  Future<ProxyEndpoint?> _resolveStreamProxy() =>
+      _streamProxyFuture ??= streamProxyEndpointFor(_streamKind);
 
   // ── Per-channel state, which zapping makes mutable ──────────────────────────
   //
@@ -2154,6 +2178,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       return false;
     }
     final platformName = Platform.isIOS ? 'ios' : 'android';
+    // Settings → Proxy: this kind's stream, opened through the configured
+    // proxy when the user asked for it. Resolved before the payload because the
+    // Activity reads it once at launch.
+    final streamProxy = await _resolveStreamProxy();
     try {
       final opened = await _nativeHdrPlayer
           .invokeMethod<bool>('open', {
@@ -2163,6 +2191,17 @@ class _PlayerScreenState extends State<PlayerScreen>
             'headers': _stream.headers,
             'isLive': _stream.isLive,
             'bufferPreset': _bufferPreset.storageName,
+            // The stream's own route, for the native engines that fetch it
+            // themselves (ExoPlayer's data source, mpv's `http-proxy`). A
+            // direct connection sends nothing — the shape every build before
+            // this setting had.
+            if (Platform.isAndroid && streamProxy != null) ...{
+              'proxyHost': streamProxy.host,
+              'proxyPort': streamProxy.port,
+              // 'HTTP' or 'SOCKS'; the Activity accepts both, mpv's option
+              // spells the scheme out.
+              'proxyType': streamProxy.type,
+            },
             // So the native fullscreen player opens on the same mode the rest
             // of the app is in, rather than its own compiled-in default.
             'aspect': kAspectModes[_aspectModeIndex].label,
@@ -3060,8 +3099,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     StreamInfo stream, {
     Duration? resumeOverride,
   }) async {
+    // Settings → Proxy ("Streams: …"). Resolved before the spawn because this
+    // path is its own mpv process and takes the route as a launch argument.
+    final streamProxy = await _resolveStreamProxy();
     final native = await LinuxNativeSession.start(
       bufferPreset: _bufferPreset,
+      httpProxy: streamProxy == null
+          ? null
+          : mpvProxyOptionValue(streamProxy),
       stream: stream,
       title: _title,
       sourceName: _sourceName,
@@ -4557,6 +4602,15 @@ class _PlayerScreenState extends State<PlayerScreen>
             'keepaspect-window': 'yes',
           };
 
+    // Settings → Proxy ("Streams: Live / Movies / Series"). mpv reads
+    // `http-proxy` when it opens the URL, so it belongs with the other
+    // load-time options; absent means direct, which is what every build did
+    // before the switch existed.
+    final streamProxy = await _resolveStreamProxy();
+    if (streamProxy != null) {
+      _logPlayback('stream proxy ${streamProxy.label} (${streamProxy.type})');
+    }
+
     // Order matters: options apply sequentially, and `wid` must land before
     // `vo`/`force-window`. Setting `vo=gpu-next` on an already-playing player
     // (the preview hot-swap) with no `wid` yet makes mpv create the VO in its
@@ -4568,6 +4622,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       ...nativeWindowOptions,
       ...videoOptions,
       ...overrideOptions,
+      if (streamProxy != null) 'http-proxy': mpvProxyOptionValue(streamProxy),
       // Last, so it can't be shadowed by the maps above and lands on the
       // player whatever the live/VOD split decided.
       ...kMpvLogFilter,

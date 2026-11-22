@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../data/app_settings_store.dart';
 import '../data/local_profile_store.dart';
 import '../data/proxy_config.dart';
+import '../data/stream_kind.dart';
 import '../data/vod_card_orientation.dart';
 import '../player/double_tap_action.dart';
 import '../player/next_video_policy.dart';
@@ -48,6 +49,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   DoubleTapAction? _doubleTap;
   ProfilePickerStartup? _pickerStartup;
 
+  /// Per content kind, whether its **stream** is opened through the proxy.
+  /// Absent until [_load] answers; the tiles read `?? false`, the stored
+  /// default.
+  final Map<StreamKind, bool> _streamProxy = {};
+
   @override
   void initState() {
     super.initState();
@@ -70,6 +76,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final nextBehavior = await widget.store.nextVideoPlayedBehavior();
     final seekStep = await widget.store.seekStepSeconds();
     final proxyRaw = await widget.store.rawProxyConfig();
+    final streamProxy = {
+      for (final kind in StreamKind.values)
+        kind: await widget.store.streamProxy(kind),
+    };
     final doubleTap = DoubleTapAction.parse(
       await widget.store.rawDoubleTapAction(),
     );
@@ -90,6 +100,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _seekStep = seekStep;
         _doubleTap = doubleTap;
         _pickerStartup = pickerStartup;
+        _streamProxy
+          ..clear()
+          ..addAll(streamProxy);
         _proxy = ProxyConfig(
           mode: ProxyMode.parse(proxyRaw?['mode']),
           host: proxyRaw?['host'] ?? '',
@@ -400,7 +413,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'System follows this device\'s own proxy (the Wi-Fi network on '
                   'a phone, Internet options on Windows). Custom uses the server '
                   'below, Off connects directly. Artwork always tries a direct '
-                  'connection first and only falls back to this proxy.',
+                  'connection first and only falls back to this proxy. Video '
+                  'streams follow the three switches below, which need this '
+                  'mode to be on.',
               trailing: (_proxy ?? const ProxyConfig()).mode.label,
               onTap: _cycleProxyMode,
             ),
@@ -415,6 +430,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
               trailing: _proxyServerLabel(),
               onTap: _editProxyServer,
             ),
+            // The proxy above describes how the app reaches a provider's API
+            // and guides. A video stream is a different connection — opened by
+            // the player, not by the app's own HTTP client — so it gets its own
+            // switch, per kind, and defaults off (the direct route every build
+            // had before these existed).
+            for (final kind in StreamKind.values)
+              _SettingTile(
+                icon: switch (kind) {
+                  StreamKind.live => Icons.live_tv_outlined,
+                  StreamKind.movie => Icons.movie_outlined,
+                  StreamKind.series => Icons.video_library_outlined,
+                },
+                title: 'Streams through the proxy: ${kind.label}',
+                subtitle: switch (kind) {
+                  StreamKind.live =>
+                    'Fetch the channel stream itself through the proxy above. '
+                        'Off opens channels directly.',
+                  StreamKind.movie =>
+                    'Fetch film streams through the proxy above. Off opens '
+                        'them directly.',
+                  StreamKind.series =>
+                    'Fetch episode streams through the proxy above. Off opens '
+                        'them directly.',
+                },
+                trailing: (_streamProxy[kind] ?? false) ? 'On' : 'Off',
+                onTap: () => _toggleStreamProxy(kind),
+              ),
             _SettingTile(
               icon: Icons.tune,
               title: 'Player controls',
@@ -474,6 +516,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     volumeSwipeOnLeft.value = next;
     setState(() {});
     await widget.store.setPlayerVolumeSwipeOnLeft(next);
+  }
+
+  /// Flips whether [kind]'s **stream** itself is fetched through the proxy.
+  ///
+  /// Takes effect on the next stream opened: the value is read when a player
+  /// route resolves its stream, so a playing video never changes route mid-way.
+  Future<void> _toggleStreamProxy(StreamKind kind) async {
+    final next = !(_streamProxy[kind] ?? false);
+    setState(() => _streamProxy[kind] = next);
+    await widget.store.setStreamProxy(kind, next);
   }
 
   Future<void> _openPlayerControls() async {
