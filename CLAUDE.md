@@ -43,12 +43,13 @@ flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=d
 flutter build apk --debug --flavor development --dart-define-from-file=dart_define.android.json --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
-**A local Android build must pass the Supabase defines** (`dart_define.android.json`; CI uses
-repo Variables). Without them `CloudConfig.isConfigured` is false, so the startup profile picker
-shows only local profiles and favorites/watch-state sync is absent — the build still succeeds,
-which is exactly how this gets missed. Keep the flavor on the installed package: `development`
-(`.dev`, debug keystore) for a phone that already runs it; `parallel`/`googlePlay` are different
-applicationIds and cannot update it in place.
+**A local build for the user's own machine must pass the Supabase defines** (`dart_define.json` on
+Windows, `dart_define.android.json` on Android; CI uses repo Variables). Without them
+`CloudConfig.isConfigured` is false, so the startup profile picker shows only local profiles and
+favorites/watch-state sync is absent — the build still succeeds, which is exactly how this gets
+missed. Keep the flavor on the installed package: `development` (`.dev`, debug keystore) for a
+phone that already runs it; `parallel`/`googlePlay` are different applicationIds and cannot update
+it in place.
 
 **`flutter test` is a release gate, not an iteration step.** The full suite takes about 30
 minutes here and runs in its own process, so any build lock has to wrap the whole command
@@ -1103,10 +1104,30 @@ have an `oldV < N` repair branch**, or fresh installs miss it (the v7 `external_
 created only in an `oldV >= 3 && oldV < 7` branch, fresh installs crashed on every metadata
 query; v8 fixed it both ways). `AppDatabase.openAt(path)` is the `@visibleForTesting` seam used
 by `test/persistence_test.dart`. Connection tuning lives in `onConfigure` (WAL, `synchronous =
-NORMAL`, an 8 MB `cache_size`); `sqflite` runs it outside the migration transaction, which is
+NORMAL`, an 8 MB `cache_size`, `journal_size_limit = 64 MiB`); `sqflite` runs it outside the
+migration transaction, which is
 what makes `journal_mode` legal there. `temp_store` is deliberately left at the default —
 `readChannels` sorts by `number, name` unindexed, so `MEMORY` would move an unbounded sorter
-into RAM on a 250k-channel source. **Supported upgrades are the publicly shipped schemas only**
+into RAM on a 250k-channel source. **The guide cache is the biggest thing in the file, so it is
+bounded on purpose:** `programmes` keeps `AppDatabase.kEpgKeepPast` (36 h) back and
+`kEpgKeepFuture` (7 d) ahead, applied by `pruneExpiredProgrammes()` from `main()` (unawaited, one
+indexed delete per bound per source via `idx_prog_source_start`; filtering on `stop` instead would
+scan the whole guide). A 15-day provider guide was 538 MiB of a 792 MiB phone database — 69% — and
+half of that was the same provider stored under two duplicate sources. The write path deliberately
+does **not** prune: a replace already bounds a source to the provider's own window, and pruning
+inside that transaction made historical-date fixtures (and any replayed old guide) disappear.
+**Deleting a source's config does not delete its cache** — that gap left 554 MiB of an unreachable
+guide in the field — so `SourcesScreen._delete` calls `purgeSourceData` and `main()` runs
+`pruneOrphanedSources(configuredIds)` (empty list ignored, so a failed keychain read cannot wipe the
+cache) to cover cloud removals too. Both deletes go through `_deleteInChunks` (5000 rows, a 5 ms
+yield between batches) and the whole housekeeping pass is scheduled **3 s after the first frame**:
+the first cut deleted 343k guide rows in one transaction and blocked the only database connection
+for ~50 s (`sqflite`'s "database has been locked for 0:00:10" × 5). It ends with `checkpointWal()`.
+**The WAL is capped too:** a starved checkpoint left 278 MB of `iptv.db-wal` in the field, which
+every open then scans for recovery. `checkpointWal()` runs `PRAGMA wal_checkpoint(TRUNCATE)` after a
+guide write and on `AppLifecycleState.paused` (where no reader can block it); a non-zero `busy`
+is logged and retried, not thrown. Shrinking an already-bloated file still needs a one-off
+`VACUUM` — the retention only stops it growing. **Supported upgrades are the publicly shipped schemas only**
 (8–12 → current; tag ranges in docs/validation-baseline.md), pinned by
 `test/released_schema_fixtures_test.dart` — per released version: fixture → migrate →
 pragma-based schema parity with a fresh install → seeded-data checks → stable second open. Keep

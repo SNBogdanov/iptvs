@@ -200,6 +200,12 @@ class _SourcesScreenState extends State<SourcesScreen> {
       // age out on its own, but a re-added source can reuse nothing here (ids
       // are freshly minted) so there is no reason to keep it around.
       await const ExpiryCache().forget(c.id);
+      // Dropping the config is not dropping the cache: without this the
+      // guide and catalogue stay in the database forever, unreachable and
+      // dominantly the largest thing in the file (554 MiB for a 688k-row
+      // guide). Cloud-managed sources are re-added by the panel; the boot
+      // sweep (`pruneOrphanedSources`) covers that path.
+      await widget.db.purgeSourceData(c.id);
       await _reload();
     }
   }

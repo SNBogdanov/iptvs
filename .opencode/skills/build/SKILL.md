@@ -84,25 +84,35 @@ flutter build apk --release
 flutter build linux --release
 ```
 
-## Локальная сборка Android: облако и flavor
+## Локальная сборка: облачный конфиг (Windows и Android)
 
 Ключевое, что легко потерять: **Supabase-конфиг приходит только через
 `--dart-define`**. Без него `CloudConfig.isConfigured == false`, и в приложении
 пропадают облачный профиль (на старте остаются только локальные), синхронизация
 избранного и watch-state. Сборка при этом успешна — просто без облака.
 
-Локальная debug-сборка Android должна повторять CI (`build.yml`):
+Поэтому **любая локальная сборка для установки пользователю** (Windows, Android)
+должна повторять CI (`build.yml`):
 
 ```powershell
+# Windows
+flutter build windows --release `
+  --dart-define-from-file=dart_define.json `
+  --dart-define=DISTRIBUTION_CHANNEL=development
+
+# Android (debug, dev-пакет)
 flutter build apk --debug --flavor development `
   --dart-define-from-file=dart_define.android.json `
   --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
-`dart_define.android.json` (gitignored, рядом `dart_define.json`) содержит
-`SUPABASE_URL`, `SUPABASE_ANON_KEY` и локальный `PANEL_URL`. Если файла нет —
-**не собирай молча без облака**: сообщи, что облачные функции будут недоступны,
-и спроси, нужен ли такой артефакт.
+`dart_define.json` / `dart_define.android.json` — gitignored, лежат в корне
+репозитория; содержат `SUPABASE_URL`, `SUPABASE_ANON_KEY` и локальный
+`PANEL_URL`. Если файла нет — **не собирай молча без облака**: сообщи, что
+облачные функции будут недоступны, и спроси, нужен ли такой артефакт.
+
+`DISTRIBUTION_CHANNEL` по умолчанию и так `development`, но передавай явно —
+на нём завязаны обновления и подпись канала.
 
 Release-сборка для установки на телефон — `--flavor development` (пакет
 `.dev`, debug-подпись `android/app/debug.keystore`), а не `parallel`/`googlePlay`:

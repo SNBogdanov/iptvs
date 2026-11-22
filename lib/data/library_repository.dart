@@ -443,6 +443,10 @@ class LibraryRepository {
           await spool.dispose();
         }
         db.notifyEpgChanged(source.id);
+        // A guide write is the biggest burst this app does; checkpoint here,
+        // while the transaction is closed and the caller is not waiting on a
+        // read, or the WAL keeps the whole guide until the app is backgrounded.
+        unawaited(db.checkpointWal());
         return;
       }
     }
@@ -471,6 +475,7 @@ class LibraryRepository {
       databaseDuration: databaseWatch.elapsed,
     );
     db.notifyEpgChanged(source.id);
+    unawaited(db.checkpointWal());
   }
 
   Future<({Map<String, Programme> now, Map<String, Programme> next})>

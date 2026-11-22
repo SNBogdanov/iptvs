@@ -166,6 +166,41 @@ Future<void> main() async {
           );
         }),
   );
+  // Cache housekeeping: trim guide rows outside the retention window
+  // (`kEpgKeepPast`/`kEpgKeepFuture`) and drop the cache of sources the
+  // configuration no longer has. Deliberately **after** the first frame plus a
+  // short settle delay: the deletes are chunked (`_deleteInChunks`), but on a
+  // 600 MiB phone database they still queue the channel list's first queries
+  // behind a write, and a boot stall is worse than a stale cache for a couple
+  // of seconds. The checkpoint at the end keeps their pages out of the WAL.
+  unawaited(
+    Future<void>.delayed(const Duration(seconds: 3), () async {
+      try {
+        final purged = await db.pruneOrphanedSources(
+          sources.map((source) => source.id).toSet(),
+        );
+        if (purged > 0) {
+          DiagnosticsLog.instance.addAndPrint(
+            'boot',
+            'orphaned source cache purged sources=$purged',
+          );
+        }
+        final rows = await db.pruneExpiredProgrammes();
+        if (rows > 0) {
+          DiagnosticsLog.instance.addAndPrint(
+            'boot',
+            'expired guide rows pruned rows=$rows',
+          );
+        }
+        if (purged > 0 || rows > 0) await db.checkpointWal();
+      } catch (error) {
+        DiagnosticsLog.instance.addAndPrint(
+          'boot',
+          'cache housekeeping skipped: ${error.runtimeType}',
+        );
+      }
+    }),
+  );
   // Remembered tab categories (movie, series, live), read before the first list
   // can open so the controllers/screens can restore theirs synchronously (a
   // `load()` with an awaited keychain read would delay the first provider

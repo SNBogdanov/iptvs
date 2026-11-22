@@ -197,6 +197,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       // the next launch — on Android a backgrounded app may never get another
       // turn.
       unawaited(_watchAutoSync?.flush() ?? Future<void>.value());
+      // The one moment a checkpoint is guaranteed to be able to run: the
+      // screen is off, nothing is reading pages, and `journal_size_limit`
+      // then truncates the WAL instead of leaving a 278 MB scan for the next
+      // launch.
+      unawaited(widget.db.checkpointWal());
       return;
     }
     if (state != AppLifecycleState.resumed || !mounted) return;

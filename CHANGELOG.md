@@ -98,9 +98,18 @@ each release's notes also appear on GitHub Releases. New work lands under
 - Settings → **Ask for a profile at startup**: off boots straight into the last used
   profile (a profile with a PIN still asks for it); on shows the picker whenever there
   is a real choice. Replaces the cycle row that lived at the top of the Sources screen.
+- Settings → Proxy: **per-content-kind stream proxying** — the Live / Movies / Series
+  switches send the player's own video stream (ExoPlayer, mpv, the shared preview
+  engine and the Linux-native process) through the configured proxy, instead of only
+  API and artwork traffic. Off by default.
 
 ### Changed
 
+- **The guide cache is bounded.** Programmes more than 36 hours back or a week ahead are
+  pruned, deleting a source now also deletes its cached channels/guide/catalogue (it used
+  to leave them unreachable in the file forever), and the write-ahead log is capped at
+  64 MiB and checkpointed on pause and after a guide write. A phone database that had
+  grown to 792 MiB (69% of it a duplicated, 15-day guide) settled at 188 MiB.
 - Player chrome: the clock, VOD time readout and channel name are device-wide
   preferences; the name persists as a top-left HUD pill while the controls are hidden.
 - Playback volume and mute are a device-wide session, preserved across every player

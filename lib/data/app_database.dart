@@ -12,6 +12,7 @@ import '../sources/release_date.dart';
 import '../sources/source.dart';
 import '../sources/source_identity.dart';
 import 'epg_ingest.dart';
+import 'diagnostics_log.dart';
 import 'load_token.dart';
 import 'media_order.dart';
 import 'secret_locator_vault.dart';
@@ -99,6 +100,15 @@ class AppDatabase {
   /// branch must be idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`, the
   /// `_isDuplicateColumn` guard).
   static const schemaVersion = 17;
+
+  /// Largest the write-ahead log is allowed to stay after a checkpoint.
+  ///
+  /// SQLite keeps the WAL file at whatever length the last checkpoint reached
+  /// unless told otherwise, and a starved checkpoint left 278 MB of it in the
+  /// field. 64 MB is enough headroom for a guide write burst and small enough
+  /// that the recovery scan at open is a few milliseconds. Enforced by
+  /// [checkpointWal] and [_configure].
+  static const int kWALSizeLimitBytes = 64 * 1024 * 1024;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -408,14 +418,19 @@ class AppDatabase {
     // Concurrent reads during a write, and far cheaper commits. `setJournalMode`
     // exists because Android's `execSQL` rejects a value-returning pragma
     // unless WAL is declared in the manifest; it falls back to `rawQuery`.
-    await db.setJournalMode('WAL');
-    // WAL + NORMAL is durable across an app crash; only an OS crash or power
+    await db.setJournalMode('WAL');    // WAL + NORMAL is durable across an app crash; only an OS crash or power
     // loss can cost the most recent commits. This database is a rebuildable
     // provider cache plus small user state (favorites, resume positions), so
     // that trade is the same one the Android framework makes by default.
     await db.execute('PRAGMA synchronous = NORMAL');
     // 8 MB of page cache (negative = KiB) instead of sqlite's 2 MB default.
     await db.execute('PRAGMA cache_size = -8000');
+    // Cap what a checkpoint may leave behind. Without it the WAL grew to
+    // 278 MB in the field: a long-running app with concurrent reads starves
+    // the automatic checkpoint, and every later open scans the whole file
+    // before the first query. A value-returning pragma, so `rawQuery` — see
+    // [checkpointWal].
+    await db.rawQuery('PRAGMA journal_size_limit = $kWALSizeLimitBytes');
     // Deliberately NOT setting `temp_store = MEMORY`: `readChannels` sorts by
     // `number, name` with no index to serve it, so a 250k-channel source would
     // move an unbounded sorter into RAM on exactly the low-memory TV boxes
@@ -1857,8 +1872,108 @@ class AppDatabase {
     );
   }
 
-  Future<DateTime?> _readTime(String column, String sourceId) async {
-    final rows = await _db.query(
+  /// Every table that stores per-source rows, deleted together when a source is
+  /// forgotten.
+  ///
+  /// `sources` is not here: it is keyed by `id`, not `source_id`, and is
+  /// deleted separately.
+  static const List<String> _sourceScopedTables = [
+    'categories',
+    'channels',
+    'external_metadata',
+    'favorites',
+    'favorites_outbox',
+    'media_categories',
+    'media_enrichment',
+    'media_items',
+    'media_page_state',
+    'media_sync',
+    'playback_positions',
+    'programmes',
+    'watch_outbox',
+    'watched_media',
+  ];
+
+  /// Deletes every cached row of [sourceId], including its `sources` record.
+  ///
+  /// **Deleting a source config is not deleting its cache.** `SourcesScreen`
+  /// dropped only the config, leaving the guide behind: with a 688k-row guide
+  /// that was 554 MiB of a 792 MiB database still sitting in a file no screen
+  /// could reach, and no `VACUUM` could reclaim it because the rows were still
+  /// live.
+  ///
+  /// Favourites, positions and watched marks go too: they are cloud-synced
+  /// (the profile keeps them), and a removed source is not one the UI can
+  /// reach. One transaction, so a kill cannot leave half a source behind.
+  Future<void> purgeSourceData(String sourceId, {int chunk = 5000}) async {
+    for (final table in _sourceScopedTables) {
+      await _deleteInChunks(
+        table,
+        'source_id = ?',
+        [sourceId],
+        chunk: chunk,
+      );
+    }
+    await _db.delete('sources', where: 'id = ?', whereArgs: [sourceId]);
+  }
+
+  /// Deletes rows matching [where] in bounded transactions, yielding between
+  /// them.
+  ///
+  /// A single `DELETE` of a 343k-row guide held the app's only database
+  /// connection for ~50 s at boot (`sqflite`'s "database has been locked for
+  /// 0:00:10" warnings): every screen read queued behind it. Chunking keeps
+  /// each transaction short enough to sit between frames, and the tiny delay
+  /// lets a queued reader through instead of losing the race repeatedly.
+  Future<int> _deleteInChunks(
+    String table,
+    String where,
+    List<Object?> args, {
+    int chunk = 5000,
+  }) async {
+    var total = 0;
+    while (true) {
+      final removed = await _db.delete(
+        table,
+        where: '$where AND rowid IN '
+            '(SELECT rowid FROM $table WHERE $where LIMIT $chunk)',
+        whereArgs: [...args, ...args],
+      );
+      total += removed;
+      if (removed < chunk) return total;
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+  }
+
+  /// Purges cached data for sources that are no longer configured.
+  ///
+  /// Covers every path that drops a config without touching the cache — the
+  /// cloud pull replacing a panel's source list, an old build's delete, a
+  /// source removed on another device. [liveIds] is the configured source list
+  /// read at boot; **an empty list is ignored**, so a failed keychain read
+  /// cannot wipe the cache of a working install.
+  ///
+  /// Unawaited from `main` (see `pruneExpiredProgrammes`): housekeeping must
+  /// never hold the first frame.
+  Future<int> pruneOrphanedSources(Set<String> liveIds) async {
+    if (liveIds.isEmpty) return 0;
+    final rows = await _db.rawQuery(
+      'SELECT id FROM sources '
+      'UNION SELECT DISTINCT source_id FROM channels '
+      'UNION SELECT DISTINCT source_id FROM media_items '
+      'UNION SELECT DISTINCT source_id FROM programmes',
+    );
+    var purged = 0;
+    for (final row in rows) {
+      final id = row['id'] as String?;
+      if (id == null || liveIds.contains(id)) continue;
+      await purgeSourceData(id);
+      purged++;
+    }
+    return purged;
+  }
+
+  Future<DateTime?> _readTime(String column, String sourceId) async {    final rows = await _db.query(
       'sources',
       columns: [column],
       where: 'id = ?',
@@ -2893,6 +3008,92 @@ class AppDatabase {
   /// transaction — `batch.commit` here does not COMMIT, it just executes the
   /// pending statements against the open transaction.
   static const _epgInsertChunk = 1000;
+
+  /// How far **back** a cached programme is kept.
+  ///
+  /// The EPG grid is a 25-hour window starting an hour ago, so a day and a
+  /// half covers every screen that reads this cache even when the grid is
+  /// opened just before midnight. Everything older is dead weight: a guide
+  /// that reaches a week into the past was the single largest consumer of the
+  /// phone's database (268 MiB of duplicated programme rows in the field).
+  static const Duration kEpgKeepPast = Duration(hours: 36);
+
+  /// How far **ahead** a cached programme is kept.
+  ///
+  /// The grid shows a day, the quick list "today", and `nowNext` one slot, so
+  /// a week is already generous — while a provider's two-week guide is not
+  /// free to store.
+  static const Duration kEpgKeepFuture = Duration(days: 7);
+
+  /// Applies the retention window to every cached guide.
+  ///
+  /// Runs once at boot (unawaited, see `main.dart`) rather than inside every
+  /// guide replace: the replace already bounds a source's cache to the
+  /// provider's own guide window, and trimming here keeps the *stale* sources
+  /// — ones that are not refreshing — from holding a month of programmes
+  /// forever. Fast enough to be housekeeping: one indexed delete per bound per
+  /// source, because both bounds filter on `start`, which
+  /// `idx_prog_source_start` leads with. (Filtering on `stop` instead would
+  /// scan the whole 688k-row guide this exists to shrink.)
+  Future<int> pruneExpiredProgrammes({DateTime? now}) async {
+    final at = now ?? DateTime.now();
+    // A source row is written by a library load, so a cache can outlive it
+    // (a settings-only edit, a test, a failed load). The programmes themselves
+    // are therefore the other half of the source list, and the union is a
+    // covering scan of `idx_prog_source_start`.
+    final rows = await _db.rawQuery(
+      'SELECT id FROM sources UNION SELECT DISTINCT source_id FROM programmes',
+    );
+    var removed = 0;
+    for (final row in rows) {
+      final id = row['id'] as String?;
+      if (id == null) continue;
+      removed += await _deleteInChunks(
+        'programmes',
+        'source_id = ? AND start < ?',
+        [id, at.subtract(kEpgKeepPast).millisecondsSinceEpoch],
+      );
+      removed += await _deleteInChunks(
+        'programmes',
+        'source_id = ? AND start > ?',
+        [id, at.add(kEpgKeepFuture).millisecondsSinceEpoch],
+      );
+    }
+    return removed;
+  }
+
+  /// Checkpoints the write-ahead log back into the database and truncates it.
+  ///
+  /// A long-lived app with concurrent reads can starve SQLite's automatic
+  /// checkpoint: the field log had `Scanning a huge (278 MB) wal file`, and
+  /// every later open pays that scan before the first query. `journal_size_limit`
+  /// (`_configure`) caps the file after a checkpoint; this is what runs the
+  /// checkpoint at the two moments it can succeed — after a bulk guide write
+  /// and when the app goes to the background.
+  ///
+  /// Best-effort: [`PRAGMA wal_checkpoint`] returns a row, so it goes through
+  /// `rawQuery` (Android's `execSQL` rejects value-returning pragmas), and a
+  /// non-zero `busy` — a reader was mid-page — is reported, not thrown. The
+  /// next call tries again.
+  Future<int?> checkpointWal() async {
+    try {
+      final rows = await _db.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+      final busy = rows.isEmpty ? null : (rows.first['busy'] as int?);
+      if (busy != null && busy != 0) {
+        DiagnosticsLog.instance.add(
+          'db',
+          'wal checkpoint busy (a reader held a page)',
+        );
+      }
+      return busy;
+    } catch (error) {
+      DiagnosticsLog.instance.add(
+        'db',
+        'wal checkpoint failed: ${error.runtimeType}',
+      );
+      return null;
+    }
+  }
 
   /// Replaces every cached programme for [sourceId] with [programmes] and
   /// advances `epg_synced_at`, all in one transaction — including the
