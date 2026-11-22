@@ -25,11 +25,14 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/app_settings_store.dart';
+import 'package:iptvs/data/last_channel_store.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/source_refresh_store.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/screens/media_category_cache.dart';
+import 'package:iptvs/screens/media_tab_controller.dart'
+    show kAllSourcesFavoritesCategoryId;
 import 'package:iptvs/widgets/image_utils.dart'
     show debugDisableNetworkChannelLogos;
 import 'package:iptvs/sources/source.dart';
@@ -37,6 +40,22 @@ import 'package:iptvs/sources/source_config.dart';
 
 void main() {
   const sourceId = 'groups';
+
+  group('liveTabCategoryForZapRange', () {
+    test('maps the quick list vocabulary back to the tab filter', () {
+      // The quick list's "everything" row is the tab's "All channels".
+      expect(liveTabCategoryForZapRange(''), isNull);
+      // A provider category id is one and the same on both sides.
+      expect(liveTabCategoryForZapRange('7'), '7');
+      // A per-source row inside the cross-source view has no per-source filter
+      // in the tab, so it lands on the whole cross-source view - the widest
+      // thing that still draws the channel.
+      expect(
+        liveTabCategoryForZapRange('zapsrc:abc'),
+        kAllSourcesFavoritesCategoryId,
+      );
+    });
+  });
 
   group('AppSettingsStore.liveCategory', () {
     setUp(() => FlutterSecureStorage.setMockInitialValues({}));
@@ -148,6 +167,24 @@ void main() {
       }
     }
 
+    /// Unmounts the screen and lets its in-flight work settle **inside** the
+    /// test.
+    ///
+    /// A screen left mounted until teardown can still have a database
+    /// transaction open when the framework disposes the tree, and sqflite's
+    /// transaction timer then trips the "a Timer is still pending" assertion —
+    /// the flake this file had under load. Unmounting here cancels the
+    /// controllers' own timers and gives the real I/O a moment to finish.
+    Future<void> unmount(WidgetTester tester) async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      for (var i = 0; i < 10; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+    }
+
     testWidgets('opens on the remembered category', (tester) async {
       await const AppSettingsStore().setLiveCategory(sourceId, 'news');
       await preloadTabCategoryPrefs([sourceId]);
@@ -158,6 +195,7 @@ void main() {
       expect(find.text('2 - News Two'), findsOneWidget);
       // The other group did not load into this view.
       expect(find.text('3 - Sport One'), findsNothing);
+      await unmount(tester);
     });
 
     testWidgets('a category the source no longer offers falls back to All', (
@@ -171,6 +209,7 @@ void main() {
 
       expect(find.text('1 - News One'), findsOneWidget);
       expect(find.text('3 - Sport One'), findsOneWidget);
+      await unmount(tester);
       expect(
         await const AppSettingsStore().liveCategory(sourceId),
         isNull,
@@ -185,6 +224,36 @@ void main() {
 
       expect(find.text('1 - News One'), findsOneWidget);
       expect(find.text('3 - Sport One'), findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets('the restored category outranks the last-channel resume', (
+      tester,
+    ) async {
+      // The reported bug: the tab opened on the remembered category and, a
+      // couple of seconds later, fell back to "All channels" — the resume had
+      // picked the last played channel, which this category does not draw, and
+      // re-ranged the whole tab to reach it.
+      await const LastChannelStore().write(
+        kNoProfileResumeKey,
+        const LastChannel(sourceId: sourceId, channelId: 's1'),
+      );
+      await const AppSettingsStore().setLiveCategory(sourceId, 'news');
+      await preloadTabCategoryPrefs([sourceId]);
+
+      await pumpNarrow(tester, find.text('1 - News One'));
+      // The resume's keychain reads and its post-frame reveal land here.
+      for (var i = 0; i < 15; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+
+      expect(find.text('1 - News One'), findsOneWidget);
+      expect(
+        find.text('3 - Sport One'),
+        findsNothing,
+        reason: 'the filter must stay on the restored category',
+      );
+      await unmount(tester);
     });
   });
 }

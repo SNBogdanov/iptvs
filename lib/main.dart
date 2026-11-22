@@ -142,6 +142,30 @@ Future<void> main() async {
           '${redactText('$error')}',
     );
   }
+  // The release-date sort key for rows ingested before v17. Deliberately
+  // **unawaited**: the column is an ordering optimisation, never a prerequisite
+  // for the UI, and a 60k-row backfill must not hold the first frame. Until a
+  // row's turn comes it sorts as undated (the documented behaviour for a row
+  // whose provider gave no date), and the pass is resumable, so a kill mid-way
+  // costs nothing but a restart.
+  unawaited(
+    db
+        .backfillMediaSortDates()
+        .then((count) {
+          if (count > 0) {
+            DiagnosticsLog.instance.addAndPrint(
+              'boot',
+              'media sort keys backfilled rows=$count',
+            );
+          }
+        })
+        .catchError((Object error) {
+          DiagnosticsLog.instance.addAndPrint(
+            'boot',
+            'media sort backfill skipped: ${error.runtimeType}',
+          );
+        }),
+  );
   // Remembered tab categories (movie, series, live), read before the first list
   // can open so the controllers/screens can restore theirs synchronously (a
   // `load()` with an awaited keychain read would delay the first provider

@@ -10,6 +10,7 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.util.Rational
 import android.view.KeyEvent
@@ -39,6 +40,7 @@ import com.gchofficial.iptvs.player.PlayerBackAction
 import com.gchofficial.iptvs.player.PlayerBackGuard
 import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerOrientation
+import com.gchofficial.iptvs.player.SwipeLevel
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
 import com.gchofficial.iptvs.player.QuickListState
@@ -517,6 +519,11 @@ class HdrPlayerActivity : ComponentActivity() {
         // pre-`onCreate` race as the two modes above: Dart seeds them on `open`.
         pendingDwellSeconds?.let { uiState.dwellSeconds = it }
         pendingDwellOptions?.let { uiState.dwellOptions = it }
+        // Which side of the picture owns the volume swipe; the other owns
+        // brightness (Settings → "Volume and brightness swipes", sent on `open`).
+        uiState.volumeSwipeOnLeft =
+            intent.getBooleanExtra(EXTRA_VOLUME_SWIPE_ON_LEFT, true)
+        uiState.brightness = currentScreenBrightness()
         // Orientation is a **player-only device preference** (native prefs, not
         // Dart's settings store): it survives a channel change and applies to
         // the next player open. Default off = the manifest's `fullSensor`.
@@ -531,7 +538,16 @@ class HdrPlayerActivity : ComponentActivity() {
         // close result can report it with RESULT_MUTED and unmuting restores
         // that level rather than full volume.
         uiState.audibleVolume = initialAudibleVolume
-        if (initialMuted) uiState.muted = true
+        if (initialMuted) {
+          uiState.muted = true
+          // A mute restored from the previous session counts as the **button's**:
+          // the user silenced the player deliberately, and the volume swipe must
+          // not override that any more than it overrides a press made a second
+          // ago. Without this the gesture was live on the very session that
+          // opened muted, and its first pixel of travel unmuted the player —
+          // which made the restored mute look broken.
+          uiState.mutedByButton = true
+        }
 
         if (shared != null) {
             val sharedEngine = shared.first
@@ -1021,6 +1037,8 @@ class HdrPlayerActivity : ComponentActivity() {
     fun applyZap(args: Map<*, *>): Map<String, Any> {
         val refused = mapOf<String, Any>("engineRebuilt" to false)
         if (!::uiState.isInitialized || isFinishing || isDestroyed) return refused
+        // A zap is a new stream: it never inherits a raised catch-up speed.
+        stopCatchUp()
         val nextUrl = (args["url"] as? String)?.takeIf { it.isNotBlank() } ?: return refused
         val nextHeaders = headerMapFrom(args["headers"])
         val nextPreset = BufferPreset.fromName(args["bufferPreset"] as? String)
@@ -1198,7 +1216,16 @@ class HdrPlayerActivity : ComponentActivity() {
             if (value > 0f) uiState.audibleVolume = value
             engine?.setVolume(value)
         },
-        onToggleMute = { engine?.toggleMute() },
+        onToggleMute = {
+            // The mute **button** owns silence; the swipe owns the level. Which
+            // one produced it is remembered here, because the engine reports a
+            // zero volume as "muted" either way — and a swipe must never mute
+            // (nor get stuck behind a mute it did not cause).
+            val willMute = !uiState.muted && uiState.volume > 0f
+            engine?.toggleMute()
+            uiState.mutedByButton = willMute
+        },
+        onSetBrightness = { value -> setWindowBrightness(value) },
         onSelectAudio = { engine?.selectAudio(it) },
         onSelectSubtitle = { engine?.selectSubtitle(it) },
         onSetSpeed = { engine?.setSpeed(it) },
@@ -1220,8 +1247,30 @@ class HdrPlayerActivity : ComponentActivity() {
         // `create_link` calls would exceed a single-connection account.
         onGoLive = {
             if (uiState.isLive) {
+                stopCatchUp()
                 val started = withFreshLiveLocator { engine?.load(url, subtitles) }
                 if (started) uiState.liveSynced = true
+            }
+        },
+        // Held "Go to live": **catch up at speed instead of reloading.**
+        //
+        // The chip only exists while the session is behind the edge (paused, or
+        // the buffer fell back), and the engine is paused there — a raised speed
+        // on a paused player would move nothing, so this resumes first. Releasing
+        // restores 1×; at the edge the speed simply stops buying anything, and
+        // the next tap still jumps by reload.
+        onCatchUpStart = {
+            if (uiState.isLive) {
+                if (!uiState.isPlaying) engine?.playPause()
+                engine?.setSpeed(CATCH_UP_SPEED)
+                uiState.catchingUp = true
+                logNative("catch-up start speed=$CATCH_UP_SPEED")
+            }
+        },
+        onCatchUpStop = {
+            if (uiState.catchingUp) {
+                stopCatchUp()
+                logNative("catch-up stop")
             }
         },
         // Toggled locally **and** reported straight away.
@@ -1325,9 +1374,58 @@ class HdrPlayerActivity : ComponentActivity() {
         applyOrientationLock(locked)
     }
 
+    /**
+     * Writes the brightness a swipe asked for **onto this window only**.
+     *
+     * `WindowManager.LayoutParams.screenBrightness` is a per-window override: the
+     * system brightness (and every other app) keeps the value the user set, and
+     * the override dies with this Activity — which is exactly what a player
+     * gesture should do. Never stored: a brightness that outlived the session
+     * would be a device setting changed from a picture.
+     */
+    private fun setWindowBrightness(value: Float) {
+        val level = value.coerceIn(SwipeLevel.BRIGHTNESS_MIN, SwipeLevel.MAX)
+        uiState.brightness = level
+        window.attributes = window.attributes.apply { screenBrightness = level }
+    }
+
+    /**
+     * What the panel starts from: the window's own override if this session
+     * already set one, else the system's current brightness, else a mid level.
+     *
+     * Reading `Settings.System.SCREEN_BRIGHTNESS` needs no permission on any
+     * supported API and is the only way to start a swipe from where the screen
+     * actually is — starting at a fixed 50 % would dim or flash the picture on
+     * the first pixel of travel.
+     */
+    private fun currentScreenBrightness(): Float {
+        val override = window.attributes.screenBrightness
+        if (override >= 0f) {
+            return override.coerceIn(SwipeLevel.BRIGHTNESS_MIN, SwipeLevel.MAX)
+        }
+        val system = try {
+            Settings.System.getInt(
+                contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+            )
+        } catch (_: Exception) {
+            128
+        }
+        return (system / 255f).coerceIn(SwipeLevel.BRIGHTNESS_MIN, SwipeLevel.MAX)
+    }
+
+    /**
+     * Drops any catch-up speed, so a zap, a "Go to live" tap or a new stream
+     * never inherits the doubled rate. Idempotent.
+     */
+    private fun stopCatchUp() {
+        if (!uiState.catchingUp && uiState.speed == 1f) return
+        uiState.catchingUp = false
+        engine?.setSpeed(1f)
+    }
+
     /** Enters PiP if currently eligible; also invoked from a manual overlay button so entry
-     *  doesn't depend solely on the OS calling [onUserLeaveHint] (inconsistent across OEMs). */
-    private fun enterPip() {
+     *  doesn't depend solely on the OS calling [onUserLeaveHint] (inconsistent across OEMs). */    private fun enterPip() {
         if (uiState.inPip || isFinishing || !uiState.isPlaying) return
         if (!supportsPip()) return
         try {
@@ -1777,6 +1875,13 @@ class HdrPlayerActivity : ComponentActivity() {
         /** Level to restore after unmuting (see [PlayerUiState.audibleVolume]). */
         const val EXTRA_AUDIBLE_VOLUME = "audibleVolume"
 
+  /**
+   * Which half of the picture changes the **volume** on a vertical swipe; the
+   * other half changes the brightness. Absent (an older Dart build) reads as
+   * `true`, the layout every release so far had.
+   */
+  const val EXTRA_VOLUME_SWIPE_ON_LEFT = "volumeSwipeOnLeft"
+
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
 
@@ -1871,5 +1976,12 @@ class HdrPlayerActivity : ComponentActivity() {
          */
         private const val MAX_HANDOFF_REBUILDS = 1
         private const val TAG = "iptvs.hdr"
+
+        /**
+         * Speed a held "Go to live" plays at: double, because a viewer catching
+         * up wants the wait halved, and anything faster makes the picture
+         * unwatchable as a preview of where they are heading.
+         */
+        const val CATCH_UP_SPEED = 2f
     }
 }

@@ -1040,7 +1040,13 @@ position, the same row the alphabetical read would have shown. Pinned by `persis
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 16` (v16: `watch_outbox`, the pending local
+`AppDatabase` is at `schemaVersion = 17` (v17: `media_items.sort_date`, the release-date sort key
+(`releaseSortKey` as `yyyyMMdd`, `NULL` until computed, `0` for a row with no usable date) that lets
+the **paged** catalogue read order in SQL — the VOD tab no longer reads a 29k-item catalogue in one
+query, which encoded 162 MB into a single platform-channel message and killed the process with
+`OutOfMemoryError`; written by `_mediaItemRow`/`updateMediaDisplayFields`, backfilled for existing
+rows in bounded batches by `AppDatabase.backfillMediaSortDates` (run from `main`, unawaited and
+resumable, so it can never hold the first frame or be lost to a kill); v16: `watch_outbox`, the pending local
 resume-point/watched-mark changes a cloud *delta* push sends — one row per title, replaced on
 every position write, `watched` / `position_ms` / neither being the three mutually exclusive
 states, and "neither" meaning a clear the server must hear about; written by the playback writers

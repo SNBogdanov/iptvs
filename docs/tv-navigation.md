@@ -473,9 +473,19 @@ and `autofocusFor(i)` are gated on the same `railTakesFocus`, and the rail's sli
 closure (`railSliverFor(autofocusFirst:)`) rather than once above the `LayoutBuilder`, precisely
 because the answer is only known inside it.
 
+**A pending "jump to the first unwatched" outranks every candidate above.** The jump's own widget
+(`_MediaJumpTargetScroll`) scrolls to the target and calls `requestFocus` on it, so while a
+`jumpTargetId` is pending `autofocusFor(i)` is false for every tile, the rail does not take focus,
+and `focusNodeFor(i)` hands `jumpFocusNode` to the target alone. Before that, "hide watched" + jump
+put the target and the last-played tile into the same frame as two requesters, and — after the list
+re-windowed — several tiles kept the accent ring. `FocusableCard` therefore paints its ring from its
+node's **current** `hasFocus`, not from the last `onFocusChange`, so a card re-parented by a
+rebuild can never keep a ring it no longer owns.
+
 Pinned by `test/media_tab_focus_test.dart`, which asserts the autofocus set as a *list* (so "two of
-them" fails), checks real `hasFocus` on the rail tile rather than only the flag, and sweeps all five
-rows of the table above.
+them" fails), checks real `hasFocus` on the rail tile rather than only the flag, sweeps all five
+rows of the table above, and pins the pending-jump case (no autofocus at all, one tile carrying
+`jumpFocusNode`).
 
 ## Per-row favorite button + intra-row action cursor
 

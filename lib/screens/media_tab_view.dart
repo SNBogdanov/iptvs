@@ -586,7 +586,9 @@ class MediaTabView extends StatelessWidget {
               'shown=${shown.length} snapshotHasMore=${snapshot?.hasMore}',
         );
         final hasMoreToShow =
-            shown.length < visible.length || (snapshot?.hasMore == true);
+            shown.length < visible.length ||
+            (snapshot?.hasMore == true) ||
+            (snapshot?.hasMoreItems == true);
         final showLoadMore =
             !showingSearch && !autoLoadMore && (loadingMore || hasMoreToShow);
         final hasLastVisible =
@@ -603,19 +605,25 @@ class MediaTabView extends StatelessWidget {
         // Deliberately *not* overriding [hasLastVisible]: coming back from a
         // details sheet should still land on the exact tile you left (and its
         // own rail entry too, since it is by construction the newest one).
-        final railTakesFocus = showRail && !hasLastVisible;
-        // Exactly one autofocus candidate per tab, or the two widgets race on
-        // first frame and the winner depends on tree order.
+        // **Exactly one autofocus candidate per tab, and a pending jump wins.**
+        // The jump's own widget (`_MediaJumpTargetScroll`) requests focus on the
+        // target explicitly after scrolling, so handing the last-played tile an
+        // `autofocus` at the same time gave the tab two requesters in one frame —
+        // and a list rebuild can leave more than one tile drawing the ring. While
+        // a jump is pending nothing else may autofocus, and the rail does not
+        // take focus either.
+        final hasJump = hasJumpTarget && jumpFocusNode != null;
+        final railTakesFocus = showRail && !hasLastVisible && !hasJump;
         FocusNode? focusNodeFor(int i) {
-          if (hasJumpTarget && i == targetIndex && jumpFocusNode != null) {
-            return jumpFocusNode;
-          }
+          if (hasJump) return i == targetIndex ? jumpFocusNode : null;
           return hasLastVisible
               ? (shown[i].id == lastPlayedId ? firstFocusNode : null)
               : (i == 0 && !railTakesFocus ? firstFocusNode : null);
         }
 
-        bool autofocusFor(int i) => hasLastVisible
+        bool autofocusFor(int i) => hasJump
+            ? false
+            : hasLastVisible
             ? shown[i].id == lastPlayedId
             : (i == 0 && !railTakesFocus);
         final railSliver = railSliverFor(autofocusFirst: railTakesFocus);

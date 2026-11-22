@@ -19,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/data/media_order.dart';
 import 'package:iptvs/screens/media_category_cache.dart';
 import 'package:iptvs/screens/media_tab_controller.dart';
 import 'package:iptvs/screens/media_sort.dart';
@@ -72,6 +73,7 @@ class _GatedRepo extends LibraryRepository {
     MediaItem? parent,
     bool forceRefresh = false,
     bool loadAll = false,
+    MediaOrder? order,
   }) async {
     final key = '$kind:$categoryId:${parent?.id}:$forceRefresh:$loadAll';
     final completer = _next(_loadGates, key);
@@ -84,6 +86,8 @@ class _GatedRepo extends LibraryRepository {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+    MediaOrder? order,
+    int offset = 0,
   }) {
     loadMoreCallCount++;
     return _next(_loadMoreGates, categoryId ?? '<all>').future;

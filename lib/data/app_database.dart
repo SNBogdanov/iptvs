@@ -8,10 +8,12 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart' as mobile_sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import '../sources/release_date.dart';
 import '../sources/source.dart';
 import '../sources/source_identity.dart';
 import 'epg_ingest.dart';
 import 'load_token.dart';
+import 'media_order.dart';
 import 'secret_locator_vault.dart';
 import 'watch_state.dart';
 
@@ -96,7 +98,7 @@ class AppDatabase {
   /// branch in between over a schema that may already have the change, so each
   /// branch must be idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`, the
   /// `_isDuplicateColumn` guard).
-  static const schemaVersion = 16;
+  static const schemaVersion = 17;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -361,6 +363,31 @@ class AppDatabase {
               [now],
             );
           }
+          if (oldV < 17) {
+            // `sort_date`: the release-date sort key, so the **paged**
+            // catalogue read can order in SQL (see `MediaOrder`). `year` holds
+            // the provider's own string (`2026-09-29`, `29.09.2026`, `2026`),
+            // which no query can order chronologically; the key is the same
+            // `releaseSortKey` the Dart comparator used, written at ingest
+            // from now on, and backfilled for existing rows in bounded batches
+            // by `backfillMediaSortDates` (run from `main`, unawaited: NULL
+            // means "not computed yet" and sorts as an undated row until its
+            // turn comes).
+            //
+            // Guarded on the table existing: a fixture (or damaged) database can
+            // reach this branch without the media tables at all — the v7 repair
+            // case in `persistence_test` is exactly that — and
+            // `_createMediaTables` builds the column for a real fresh install.
+            if (await _hasTable(db, 'media_items')) {
+              try {
+                await db.execute(
+                  'ALTER TABLE media_items ADD COLUMN sort_date INTEGER',
+                );
+              } on DatabaseException catch (e) {
+                if (!_isDuplicateColumn(e)) rethrow;
+              }
+            }
+          }
         },
       ),
     );
@@ -527,6 +554,7 @@ class AppDatabase {
         provider_id TEXT,
         extra       TEXT,
         display_order INTEGER NOT NULL DEFAULT 0,
+        sort_date   INTEGER,
         PRIMARY KEY (source_id, kind, id)
       )
     ''');
@@ -657,6 +685,17 @@ class AppDatabase {
     } on DatabaseException catch (e) {
       if (!_isDuplicateColumn(e)) rethrow;
     }
+  }
+
+  /// Whether [table] exists. Used by migration branches that must not fail on a
+  /// database whose older tables were never created (a fixture, a damaged file,
+  /// an upgrade path from before the table existed).
+  static Future<bool> _hasTable(Database db, String table) async {
+    final rows = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      [table],
+    );
+    return rows.isNotEmpty;
   }
 
   static bool _isDuplicateColumn(DatabaseException e) {
@@ -2073,6 +2112,117 @@ class AppDatabase {
       _mediaItemFromRow(row, kind, _decodeExtra(row['extra'])),
   ];
 
+  /// A **window** of the cached catalogue, in the grid's own order.
+  ///
+  /// This is the lazy read the VOD tab pages with. One query for the whole
+  /// catalogue is not a read, it is an allocation: sqflite encodes the entire
+  /// result into a single platform-channel message, and a 29k-item catalogue
+  /// (descriptions, artwork, provider `extra`) reached 162 MB and took the
+  /// process down inside `StandardMessageCodec` (`OutOfMemoryError`, "the app
+  /// vanished on the VOD tab with All categories"). A window keeps every
+  /// message a few megabytes, and the count beside it tells the caller when to
+  /// stop.
+  ///
+  /// The order is SQL's, not Dart's, because a comparator over the loaded
+  /// window would sort each page separately — see [MediaOrder]. Undated rows
+  /// sort **last in both directions**, exactly as `_byRelease` documents: a row
+  /// with no date is neither the oldest nor the newest, so flipping the control
+  /// must not move it to the other end. `sort_date IS NULL` (a row ingested
+  /// before v17) is treated as undated until `backfillMediaSortDates` reaches
+  /// it.
+  Future<({List<MediaItem> items, int total})> readMediaItemsPage(
+    String sourceId,
+    ContentKind kind, {
+    String? categoryId,
+    String? parentId,
+    required MediaOrder order,
+    required int offset,
+    required int limit,
+  }) async {
+    final where = StringBuffer('source_id = ? AND kind = ?');
+    final args = <Object?>[sourceId, kind.name];
+    if (categoryId != null) {
+      where.write(' AND category_id = ?');
+      args.add(categoryId);
+    }
+    if (parentId != null) {
+      where.write(' AND parent_id = ?');
+      args.add(parentId);
+    }
+    final whereSql = where.toString();
+    return _db.transaction((txn) async {
+      final counted = await txn.rawQuery(
+        'SELECT COUNT(*) AS n FROM media_items WHERE $whereSql',
+        args,
+      );
+      final total = (counted.first['n'] as num?)?.toInt() ?? 0;
+      final rows = await txn.query(
+        'media_items',
+        where: whereSql,
+        whereArgs: args,
+        orderBy: _mediaOrderBy(order),
+        limit: limit,
+        offset: offset,
+      );
+      return (items: _readMediaItems(rows, kind), total: total);
+    });
+  }
+
+  /// The SQL for [MediaOrder]. `COALESCE(sort_date, 0) = 0` puts both "no date"
+  /// and "not backfilled yet" last **in either direction** — a 0 is never a
+  /// date, and `ORDER BY x DESC` alone would float it to the top.
+  static String _mediaOrderBy(MediaOrder order) => switch (order) {
+    MediaOrder.releaseDateDesc =>
+      'CASE WHEN COALESCE(sort_date, 0) = 0 THEN 1 ELSE 0 END, '
+          'sort_date DESC, display_order, title, id',
+    MediaOrder.releaseDateAsc =>
+      'CASE WHEN COALESCE(sort_date, 0) = 0 THEN 1 ELSE 0 END, '
+          'sort_date ASC, display_order, title, id',
+    // `NOCASE` matches the grid's case-insensitive name order for the Latin
+    // titles panels overwhelmingly ship; Cyrillic case still differs from
+    // Dart's `toLowerCase`, which is why the sort *direction* is applied here
+    // rather than by re-sorting a page with the comparator.
+    MediaOrder.titleAsc => 'title COLLATE NOCASE ASC, display_order, id',
+    MediaOrder.titleDesc => 'title COLLATE NOCASE DESC, display_order, id',
+    MediaOrder.providerOrder => 'display_order, title, id',
+  };
+
+  /// Fills `sort_date` for rows written before v17, in bounded batches.
+  ///
+  /// Deliberately **not** part of `onUpgrade`: a 60k-row backfill inside the
+  /// open transaction would hold the first frame for seconds on a phone, and a
+  /// migration that long is a migration that can be killed half way. Running it
+  /// from `main()` unawaited makes it resumable (rows are selected by
+  /// `sort_date IS NULL`), cheap per batch, and harmless if it never finishes:
+  /// an uncomputed row sorts as an undated one, which is the documented
+  /// behaviour for a row whose provider gave no date.
+  ///
+  /// Undated rows are written as `0`, not NULL, so the selection terminates.
+  Future<int> backfillMediaSortDates({int batch = 2000}) async {
+    var updated = 0;
+    while (true) {
+      final rows = await _db.query(
+        'media_items',
+        columns: ['source_id', 'kind', 'id', 'year'],
+        where: 'sort_date IS NULL',
+        limit: batch,
+      );
+      if (rows.isEmpty) return updated;
+      final updates = _db.batch();
+      for (final row in rows) {
+        updates.update(
+          'media_items',
+          {'sort_date': releaseSortKey(row['year'] as String?) ?? 0},
+          where: 'source_id = ? AND kind = ? AND id = ?',
+          whereArgs: [row['source_id'], row['kind'], row['id']],
+        );
+      }
+      await updates.commit(noResult: true);
+      updated += rows.length;
+      if (rows.length < batch) return updated;
+    }
+  }
+
   /// The [MediaItem] counterpart of [revealChannel]: decrypts the sealed
   /// playback locator so the model can be handed to the owning [Source]. A
   /// no-op when the item already carries plaintext locators.
@@ -2163,6 +2313,24 @@ class AppDatabase {
           where: 'source_id = ? AND kind = ?',
           whereArgs: [sourceId, kind.name],
         );
+        // **A full refresh supersedes every per-category snapshot.** Each
+        // category keeps its own `media_page_state` row, and `loadMedia` treats
+        // that row as "the cache answers for this category" — so after a full
+        // refresh the app kept serving a category from before it, and the films
+        // the provider had just added appeared only once the user forced that
+        // category's own refresh. Dropping these rows makes the next visit to a
+        // category re-read it from the (already refreshed) provider.
+        //
+        // Only the top-level category snapshots: `parent_id != ''` rows belong
+        // to season/episode lists, which this replace does not touch (they are
+        // other `ContentKind`s).
+        await txn.delete(
+          'media_page_state',
+          where:
+              "source_id = ? AND kind = ? AND parent_id = '' "
+              "AND category_id <> ''",
+          whereArgs: [sourceId, kind.name],
+        );
       } else {
         final where = StringBuffer('source_id = ? AND kind = ?');
         final args = <Object?>[sourceId, kind.name];
@@ -2207,13 +2375,20 @@ class AppDatabase {
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
-      batch.insert('media_sync', {
-        'source_id': sourceId,
-        'kind': kind.name,
-        'synced_at': DateTime.now().millisecondsSinceEpoch,
-        'loaded_pages': loadedPages,
-        'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      // `media_sync` answers for the **whole kind** ("how much of the catalogue
+      // do we hold"), so only an unfiltered write stamps it. A category load
+      // used to put its own page counts here, and a phone showed a 2104-page
+      // movie catalogue reporting `424/424` — "fully loaded" — off one
+      // category's numbers.
+      if (categoryId == null && parentId == null) {
+        batch.insert('media_sync', {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'synced_at': DateTime.now().millisecondsSinceEpoch,
+          'loaded_pages': loadedPages,
+          'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
       batch.insert('media_page_state', {
         'source_id': sourceId,
         'kind': kind.name,
@@ -2313,13 +2488,20 @@ class AppDatabase {
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
-      batch.insert('media_sync', {
-        'source_id': sourceId,
-        'kind': kind.name,
-        'synced_at': DateTime.now().millisecondsSinceEpoch,
-        'loaded_pages': loadedPages,
-        'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      // `media_sync` answers for the **whole kind** ("how much of the catalogue
+      // do we hold"), so only an unfiltered write stamps it. A category load
+      // used to put its own page counts here, and a phone showed a 2104-page
+      // movie catalogue reporting `424/424` — "fully loaded" — off one
+      // category's numbers.
+      if (categoryId == null && parentId == null) {
+        batch.insert('media_sync', {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'synced_at': DateTime.now().millisecondsSinceEpoch,
+          'loaded_pages': loadedPages,
+          'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
       batch.insert('media_page_state', {
         'source_id': sourceId,
         'kind': kind.name,
@@ -2387,6 +2569,10 @@ class AppDatabase {
         ? null
         : jsonEncode(protectedExtra ?? item.extra),
     'display_order': displayOrder,
+    // The release-date key the paged read orders by (MediaOrder). Written
+    // here, at the one place every media row is built, so an ingest can never
+    // leave a row unsorted.
+    'sort_date': releaseSortKey(item.year),
   };
 
   Future<void> updateMediaDisplayFields(
@@ -2405,6 +2591,7 @@ class AppDatabase {
           'backdrop': item.backdrop,
           'description': item.description,
           'year': item.year,
+          'sort_date': releaseSortKey(item.year),
           'rating': item.rating,
           'provider_id': item.providerId,
           'extra': extra.isEmpty ? null : jsonEncode(extra),

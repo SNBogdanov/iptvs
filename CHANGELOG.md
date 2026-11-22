@@ -68,6 +68,22 @@ each release's notes also appear on GitHub Releases. New work lands under
   channel-list button opens the list on its categories (current one selected), and a long
   press on the zapping button opens the **auto-switch pace** menu with the current value
   checked — the chosen pace is stored per source.
+- Android player: **volume by a vertical swipe** anywhere on the picture — up is louder, a
+  full height is the whole range up to 100 % — with a level panel on the left edge that
+  follows the current level. The swipe never mutes (its floor is 1 %): silence is the mute
+  button's alone.
+- Android player: the **other half of the picture adjusts the brightness** the same way (a
+  per-window override, so the rest of the system keeps its own), with Settings → "Volume and
+  brightness swipes" choosing which side does what.
+- Android player: a swipe now has to be **clearly vertical** (1.5× its horizontal travel) before
+  it changes a level — a horizontal swipe with a little vertical wobble no longer raises the
+  volume or the brightness, and is left for the system's own gestures.
+- Android player: **holding "Go to live"** plays at double speed to catch up with the stream
+  (resuming it first if paused); releasing restores normal speed, and a tap still reloads to the
+  edge.
+- VOD/series: "hide watched" followed by **jump to the first unwatched** no longer draws the focus
+  ring on several tiles — a pending jump is the only autofocus candidate, and a card paints its ring
+  from its node's current focus instead of the last focus event.
 - Windows: the picture-in-picture window's restore button shows where it returns to
   (fullscreen or a normal window), with the same icon pair the full bar uses.
 - Cloud sync: VOD/series **watch progress and watched marks** now follow the paired
@@ -144,8 +160,22 @@ each release's notes also appear on GitHub Releases. New work lands under
   the viewport on a phone, which left nothing to scroll and made the catalogue
   unreachable); when a window is shorter than the viewport the next one is now
   revealed from the window report, not only from a scroll event.
+- VOD/series: the catalogue is read **lazily**, a window at a time, with the grid's
+  order applied in SQL (`media_items.sort_date`); a 29k-item catalogue used to be
+  read in one query whose 162 MB platform-channel message killed the app on Android
+  when a tab opened on "All categories".
 - Android: Page Up/Down page the open quick list by a windowful again instead of
   stepping one row.
+- VOD/series: a full catalogue refresh now also drops the per-category page caches,
+  so a category shows the titles the refresh brought without its own manual refresh.
+- Android: a player opened with a **saved mute** keeps the volume swipe inert — the
+  restore counts as the mute button's, so the gesture cannot unmute it.
+- Live TV: the remembered category is no longer abandoned seconds after launch — the
+  last-channel resume applies only **inside** that category, instead of re-ranging the
+  whole tab to "All channels" to reach a channel the category does not list.
+- Live TV: Back from a session whose in-player channel list switched groups now returns to
+  **that** group with the watched channel selected, instead of the group the tab had before
+  the player opened.
 - Windows: a failed VOD open now shows a native "Playback error" panel with Retry
   (and OK/Enter/Space) instead of a black screen — the Flutter error overlay was
   behind the native video surface.

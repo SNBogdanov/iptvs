@@ -8,6 +8,7 @@ import '../sources/source.dart';
 import 'app_database.dart';
 import 'diagnostics_log.dart';
 import 'load_token.dart';
+import 'media_order.dart';
 import 'metadata_provider.dart';
 import 'net.dart' show formatBytes, redactText;
 import 'programme_spool.dart';
@@ -37,6 +38,13 @@ class MediaLibrarySnapshot {
   final int loadedPages;
   final int totalPages;
 
+  /// How many cached rows the paged read can serve in total, `0` when the whole
+  /// set came back in one read (a small catalogue, a season list, the provider-
+  /// paged mode). The grid's paging reads this: `hasMoreItems` is what makes
+  /// "Next page" scroll into the next DB window instead of stopping at the
+  /// loaded one.
+  final int itemsTotal;
+
   const MediaLibrarySnapshot({
     required this.kind,
     this.categoryId,
@@ -47,9 +55,13 @@ class MediaLibrarySnapshot {
     required this.syncedAt,
     this.loadedPages = 1,
     this.totalPages = 1,
+    this.itemsTotal = 0,
   });
 
   bool get hasMore => loadedPages < totalPages;
+
+  /// More cached rows exist beyond [items] in this order.
+  bool get hasMoreItems => itemsTotal > items.length;
 
   MediaLibrarySnapshot copyWith({List<MediaItem>? items}) =>
       MediaLibrarySnapshot(
@@ -62,6 +74,7 @@ class MediaLibrarySnapshot {
         syncedAt: syncedAt,
         loadedPages: loadedPages,
         totalPages: totalPages,
+        itemsTotal: itemsTotal,
       );
 }
 
@@ -491,12 +504,24 @@ class LibraryRepository {
     Programme programme,
   ) async => source.resolveArchive(await db.revealChannel(channel), programme);
 
+  /// Items per lazy catalogue window (~ten screens of a 24-cell grid).
+  ///
+  /// The VOD tab reads windows now, not the whole catalogue: one query for
+  /// everything encoded 162 MB into a single platform message on a 29k-item
+  /// catalogue and killed the process (see `readMediaItemsPage`).
+  static const int kMediaWindow = 240;
+
   Future<MediaLibrarySnapshot> loadMedia(
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
     bool forceRefresh = false,
     bool loadAll = false,
+
+    /// Serve this read in SQL order and only the first window of it. The
+    /// controller passes one for every sort it can page (MediaOrder), and
+    /// null for the provider-paged mode, where paging belongs to the source.
+    MediaOrder? order,
   }) async {
     final token = loadToken;
     await source.connect();
@@ -521,11 +546,35 @@ class LibraryRepository {
         parentId: parentId,
       );
       if (sync != null) {
-        final items = await db.readMediaItems(
-          source.id,
-          kind,
-          categoryId: categoryId,
-          parentId: parentId,
+        // Lazy window: the cache already holds the whole catalogue (or the
+        // provider pages fetched so far), so read only what the grid can show
+        // now. `order` IS the sort — it is applied by SQL — so nothing here has
+        // to load the rest to order it.
+        final window = order == null || parentId != null
+            ? null
+            : await db.readMediaItemsPage(
+                source.id,
+                kind,
+                categoryId: categoryId,
+                order: order,
+                offset: 0,
+                limit: kMediaWindow,
+              );
+        final items =
+            window?.items ??
+            await db.readMediaItems(
+              source.id,
+              kind,
+              categoryId: categoryId,
+              parentId: parentId,
+            );
+        DiagnosticsLog.instance.addAndPrint(
+          'library',
+          'media cache lookup kind=${kind.name} '
+              'category=${categoryId ?? '<all>'} order=${order?.name ?? '-'} '
+              'sync=${sync.loadedPages}/${sync.totalPages} '
+              'window=${window?.items.length ?? -1} total=${window?.total ?? 0} '
+              'items=${items.length}',
         );
         if (items.isNotEmpty) {
           var mergedItems = await _mergeCachedMetadata(items);
@@ -547,12 +596,19 @@ class LibraryRepository {
             syncedAt: sync.syncedAt,
             loadedPages: sync.loadedPages,
             totalPages: sync.totalPages,
+            itemsTotal: window?.total ?? 0,
           );
         }
       }
     }
 
     final categories = await source.mediaCategories(kind);
+    DiagnosticsLog.instance.addAndPrint(
+      'library',
+      'media cache miss kind=${kind.name} '
+          'category=${categoryId ?? '<all>'} order=${order?.name ?? '-'} '
+          'force=$forceRefresh',
+    );
     final fetched = await _fetchMediaItems(
       kind,
       categories,
@@ -589,6 +645,34 @@ class LibraryRepository {
         'library',
         'superseded ${kind.name} seed for ${source.id} failed: '
             '${error.runtimeType}',
+      );
+    }
+    // A cold fetch has the whole catalogue in hand, but the caller asked for a
+    // **window** — the sorted tab reads pages from the cache, and the first
+    // paint is the first window either way. Reading it back is one bounded
+    // query instead of handing over (and holding) every row.
+    final window = order == null || parentId != null
+        ? null
+        : await db.readMediaItemsPage(
+            source.id,
+            kind,
+            categoryId: categoryId,
+            order: order,
+            offset: 0,
+            limit: kMediaWindow,
+          );
+    if (window != null && window.items.isNotEmpty) {
+      return MediaLibrarySnapshot(
+        kind: kind,
+        categoryId: categoryId,
+        parentId: parentId,
+        categories: categories,
+        items: await _mergeCachedMetadata(window.items),
+        fromCache: false,
+        syncedAt: DateTime.now(),
+        loadedPages: fetched.loadedPages,
+        totalPages: fetched.totalPages,
+        itemsTotal: window.total,
       );
     }
     return MediaLibrarySnapshot(
@@ -685,6 +769,13 @@ class LibraryRepository {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+
+    /// Read the next cached window in this order (the lazy path), or null for
+    /// the provider-paged mode.
+    MediaOrder? order,
+
+    /// How many rows the caller already holds; the next window starts here.
+    int offset = 0,
   }) async {
     final token = loadToken;
     await source.connect();
@@ -698,6 +789,36 @@ class LibraryRepository {
       categoryId: categoryId,
       parentId: parentId,
     );
+    // **Lazy window, before the provider is asked for anything.** A sorted tab
+    // has already fetched the whole catalogue (that is why it can sort it
+    // globally); what it has *not* done is read it into memory. As long as the
+    // provider pages are complete this is a pure display step, and the read is
+    // the next SQL window — the same rows, in the same order, a few hundred at
+    // a time.
+    if (order != null &&
+        parentId == null &&
+        (sync == null || sync.loadedPages >= sync.totalPages)) {
+      final window = await db.readMediaItemsPage(
+        source.id,
+        kind,
+        categoryId: categoryId,
+        order: order,
+        offset: offset,
+        limit: kMediaWindow,
+      );
+      return MediaLibrarySnapshot(
+        kind: kind,
+        categoryId: categoryId,
+        parentId: parentId,
+        categories: await db.readMediaCategories(source.id, kind),
+        items: await _mergeCachedMetadata(window.items),
+        fromCache: true,
+        syncedAt: sync?.syncedAt,
+        loadedPages: sync?.loadedPages ?? 1,
+        totalPages: sync?.totalPages ?? 1,
+        itemsTotal: window.total,
+      );
+    }
     if (sync == null || sync.loadedPages >= sync.totalPages) {
       return MediaLibrarySnapshot(
         kind: kind,

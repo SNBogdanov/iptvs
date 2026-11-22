@@ -141,6 +141,23 @@ class AppSettingsStore {
       ? _storage.write(key: _kMovieQuickPlay, value: 'true')
       : _storage.delete(key: _kMovieQuickPlay);
 
+  /// Which side of the Android player's picture adjusts the volume; the other
+  /// side adjusts the screen brightness.
+  ///
+  /// Default **true** (volume left), and the default is stored by *deleting* the
+  /// key like every other device preference here, so an untouched install keeps
+  /// a clean keychain. The native player reads it synchronously from the `open`
+  /// payload, which is why the value also lives in
+  /// `player/player_chrome_prefs.dart`'s [volumeSwipeOnLeft] notifier.
+  static const _kVolumeSwipeOnLeft = 'app_player_volume_swipe_on_left';
+
+  Future<bool> playerVolumeSwipeOnLeft() async =>
+      (await _storage.read(key: _kVolumeSwipeOnLeft)) != 'false';
+
+  Future<void> setPlayerVolumeSwipeOnLeft(bool value) => value
+      ? _storage.delete(key: _kVolumeSwipeOnLeft)
+      : _storage.write(key: _kVolumeSwipeOnLeft, value: 'false');
+
   /// Last category browsed in a media tab, per source and kind ("movie" /
   /// "series"). Category ids are provider-specific, so the source id is part of
   /// the key: switching providers must not land in a category that only exists

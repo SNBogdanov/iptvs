@@ -78,6 +78,18 @@ enum class DoubleTapAction(val wire: String) {
  */
 const val ZAP_BANNER_VISIBLE_MS = 3_000L
 
+/**
+ * How long the swipe level panel stays up after the last change.
+ *
+ * Shorter than the banner's: the panel is feedback for a gesture the user is
+ * still performing, not information to read once they stop. Long enough to
+ * confirm the final level after the finger lifts.
+ */
+const val LEVEL_PANEL_VISIBLE_MS = 1_200L
+
+/** Which level the picture's panel is showing. */
+enum class LevelPanelKind { Volume, Brightness }
+
 /** Sentinel id for the "Off" subtitle option. */
 const val SUBTITLE_OFF_ID = "off"
 
@@ -404,7 +416,58 @@ class PlayerUiState(
     var orientationLocked by mutableStateOf(false)
 
     /**
-     * Whether this device can meaningfully lock its orientation at all. False on
+     * True when the **mute button** silenced this session, as opposed to the
+     * level simply sitting at the swipe's floor.
+     *
+     * The engine couples the two (a zero volume *is* muted), so without this
+     * flag the gesture could not tell "the user pressed mute" from "the user
+     * swiped all the way down" — and the second case must stay adjustable,
+     * because the swipe is a level control and never a mute. Set by the mute
+     * button's own callback and cleared by it again.
+     */
+    var mutedByButton by mutableStateOf(false)
+
+    /**
+     * The level panel the picture is showing, and at what value.
+     *
+     * One pair of fields for both gestures: volume and brightness differ in the
+     * icon, the side and what the value is written to, not in how the feedback
+     * behaves — and a single panel means the two can never be up at once with
+     * two countdowns racing each other. `null` is "hidden".
+     *
+     * Keyed on a monotonic timestamp rather than a boolean flag so each swipe
+     * restarts the hide countdown instead of stacking timers: a second swipe as
+     * the panel is fading must keep it up, not leave it disappearing under the
+     * finger. Deliberately independent of `controlsVisible` — the gesture is used
+     * with the chrome down, which is when a viewer adjusts the sound or the
+     * picture.
+     */
+    var levelPanelKind by mutableStateOf<LevelPanelKind?>(null)
+    var levelPanelValue by mutableStateOf(0f)
+    var levelPanelAtMs by mutableStateOf(0L)
+
+    /**
+     * Which side of the picture owns the **volume** swipe; the other side owns
+     * brightness. Pushed by Dart on `open` (Settings → "Volume and brightness
+     * swipes"), default volume left.
+     */
+    var volumeSwipeOnLeft by mutableStateOf(true)
+
+    /**
+     * The brightness this session has asked for (0..1), for the panel's readout.
+     * The window attribute is the truth; this mirrors it so Compose can draw the
+     * level without reading the window from a composable.
+     */
+    var brightness by mutableStateOf(0.5f)
+
+    /**
+     * "Go to live" is being held: the stream is playing at catch-up speed to
+     * reach the live edge. Drawn by the chip's label, so a raised speed is
+     * visible rather than a mystery.
+     */
+    var catchingUp by mutableStateOf(false)
+
+    /** Whether this device can meaningfully lock its orientation at all. False on
      * a TV (no accelerometer): the chrome would otherwise draw a rotation button
      * that can never change anything.
      */

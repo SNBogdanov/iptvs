@@ -7,6 +7,7 @@ import '../data/app_database.dart';
 import '../data/app_settings_store.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/media_order.dart';
 import '../data/load_token.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
@@ -116,6 +117,19 @@ class MediaTabController extends ChangeNotifier {
   /// The screen's visible-list memo keys on this, so changing it re-sorts
   /// without touching the snapshot or the database.
   MediaSort sort = kDefaultMediaSort;
+
+  /// The SQL order for [sort], or null where the provider owns the paging.
+  ///
+  /// `As provided` is null on purpose: there the catalogue is fetched one page
+  /// at a time and `loadMore` must ask the **provider** for the next page, not
+  /// read a cached window (which does not exist yet).
+  MediaOrder? get _orderForSort => switch (sort) {
+    MediaSort.providerOrder => null,
+    MediaSort.releaseDateDesc => MediaOrder.releaseDateDesc,
+    MediaSort.releaseDateAsc => MediaOrder.releaseDateAsc,
+    MediaSort.titleAsc => MediaOrder.titleAsc,
+    MediaSort.titleDesc => MediaOrder.titleDesc,
+  };
 
   /// First-item focus node (the D-pad "home" of the grid) and the grid's own
   /// scroll controller — per-tab so scroll position is independent.
@@ -386,6 +400,7 @@ class MediaTabController extends ChangeNotifier {
           categoryId: categoryToLoad,
           forceRefresh: forceRefresh,
           loadAll: sort != MediaSort.providerOrder,
+          order: _orderForSort,
         ),
         onRetry: (error, nextAttempt) {
           DiagnosticsLog.instance.add(
@@ -443,14 +458,29 @@ class MediaTabController extends ChangeNotifier {
       // one — it doesn't bump `_loadGeneration`, so it isn't itself a fresh
       // dataset load, just an extension of the one already in flight.
       repo.loadToken = _loadToken;
-      final snap = await repo.loadMoreMedia(kind, categoryId: categoryToLoad);
+      // Two kinds of "more" live here: the next **cached window** (a sorted tab
+      // already holds the whole catalogue in SQL) and the next **provider
+      // page** (the As-provided mode, which never fetched the rest). The first
+      // is a read, the second is a fetch — one entry point, opposite costs.
+      final lazy = snapshot?.hasMoreItems == true;
+      final snap = await repo.loadMoreMedia(
+        kind,
+        categoryId: categoryToLoad,
+        order: lazy ? _orderForSort : null,
+        offset: lazy ? snapshot!.items.length : 0,
+      );
       if (_disposed || gen != _loadGeneration) return;
       DiagnosticsLog.instance.add(
         'library',
         'load more ${kind.name} source=${repo.source.name} items=${snap.items.length} category=${categoryToLoad ?? '<all>'} pages=${snap.loadedPages}/${snap.totalPages}',
       );
       _set(() {
-        snapshot = snap;
+        final previous = snapshot;
+        // Lazy windows arrive one at a time and are appended; a provider page
+        // already carries the fetched set, so it replaces.
+        snapshot = lazy && previous != null
+            ? snap.copyWith(items: [...previous.items, ...snap.items])
+            : snap;
         loadingMore = false;
       });
       if (repo.autoEnrichMetadata) {
@@ -570,11 +600,12 @@ class MediaTabController extends ChangeNotifier {
       sort = value;
       shownCountFloor = 0;
     });
-    // When changing to a non-provider sort, load all pages to get correct global sort
-    // without reshuffling on loadMore. If already fully loaded, no need.
-    if (value != MediaSort.providerOrder && snapshot?.hasMore == true) {
-      unawaited(load());
-    }
+    // A sort change re-orders a **paged** catalogue in SQL, so the loaded window
+    // is no longer the first page of the new order — reload it. The read behind
+    // this is a cached window, not a fetch, so the cost is one query; the
+    // provider's own order still comes back through the same path when the tab
+    // is in `providerOrder`.
+    if (snapshot != null) unawaited(load());
   }
 
   /// Explicit "refresh displayed metadata" action over the given visible items.

@@ -11,6 +11,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/data/media_order.dart';
 import 'package:iptvs/data/secret_locator_vault.dart';
 import 'package:iptvs/data/source_identity_migration.dart';
 import 'package:iptvs/data/watch_state.dart';
@@ -218,6 +219,111 @@ void main() {
       expect(sync, isNotNull);
       expect(sync!.loadedPages, 1);
       expect(sync.totalPages, 3);
+      await db.close();
+    });
+
+    test(
+      'a paged read serves windows in SQL order, undated last both ways',
+      () async {
+        // The VOD tab reads windows, not the catalogue: ordering therefore lives
+        // in SQL (`sort_date`), and these are the three things a window must get
+        // right — the order itself, the direction of the two ends, and the fact
+        // that a second window continues where the first stopped.
+        final db = await AppDatabase.openAt(dbPath());
+        const kind = ContentKind.movie;
+        await db.replaceMediaLibrary('src1', kind, const [], [
+          const MediaItem(
+            id: 'a',
+            title: 'Alpha',
+            kind: kind,
+            year: '2024-05-01',
+          ),
+          const MediaItem(
+            id: 'b',
+            title: 'Beta',
+            kind: kind,
+            year: '2026-01-10',
+          ),
+          const MediaItem(id: 'c', title: 'Charlie', kind: kind),
+          const MediaItem(id: 'd', title: 'Delta', kind: kind, year: '2025'),
+        ]);
+
+        Future<List<String>> window(MediaOrder order, {int offset = 0}) async {
+          final page = await db.readMediaItemsPage(
+            'src1',
+            kind,
+            order: order,
+            offset: offset,
+            limit: 2,
+          );
+          expect(page.total, 4);
+          return [for (final item in page.items) item.id];
+        }
+
+        expect(await window(MediaOrder.releaseDateDesc), ['b', 'd']);
+        expect(
+          await window(MediaOrder.releaseDateDesc, offset: 2),
+          ['a', 'c'],
+          reason: 'the undated row is last, and the window continues the order',
+        );
+        expect(await window(MediaOrder.releaseDateAsc), ['a', 'd']);
+        expect(await window(MediaOrder.releaseDateAsc, offset: 2), [
+          'b',
+          'c',
+        ], reason: 'undated stays last in both directions');
+        expect(await window(MediaOrder.titleAsc), ['a', 'b']);
+        expect(await window(MediaOrder.titleDesc), ['d', 'c']);
+        expect(await window(MediaOrder.providerOrder), ['a', 'b']);
+
+        // A write fills the key, so a row ingested after v17 needs no backfill.
+        final page = await db.readMediaItemsPage(
+          'src1',
+          kind,
+          order: MediaOrder.releaseDateDesc,
+          offset: 0,
+          limit: 10,
+        );
+        expect(page.items.first.year, '2026-01-10');
+        await db.close();
+      },
+    );
+
+    test('backfill computes the sort key for rows written before v17', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      const kind = ContentKind.movie;
+      await db.replaceMediaLibrary('src1', kind, const [], [
+        const MediaItem(
+          id: 'a',
+          title: 'Alpha',
+          kind: kind,
+          year: '2024-05-01',
+        ),
+        const MediaItem(id: 'b', title: 'Beta', kind: kind, year: '2026-01-10'),
+      ]);
+      // Simulate a pre-v17 row: the column exists but was never filled. A second
+      // connection is the only seam — `AppDatabase` keeps its own private — and
+      // it must not be a single-instance one, or closing it would close the
+      // AppDatabase's connection too (sqflite caches by path).
+      final raw = await databaseFactoryFfi.openDatabase(
+        dbPath(),
+        options: OpenDatabaseOptions(singleInstance: false),
+      );
+      await raw.rawUpdate('UPDATE media_items SET sort_date = NULL');
+      await raw.close();
+
+      final updated = await db.backfillMediaSortDates(batch: 1);
+      expect(updated, 2);
+
+      final page = await db.readMediaItemsPage(
+        'src1',
+        kind,
+        order: MediaOrder.releaseDateDesc,
+        offset: 0,
+        limit: 10,
+      );
+      expect([for (final item in page.items) item.id], ['b', 'a']);
+      // Idempotent and terminating: a second pass finds nothing to do.
+      expect(await db.backfillMediaSortDates(), 0);
       await db.close();
     });
   });
@@ -693,19 +799,27 @@ void main() {
       await db.close();
     });
 
-    test('a catalog under a different source id does not block the seed', () async {
-      final db = await AppDatabase.openAt(dbPath());
-      await db.replaceLibrary('other', 'Other', cats, seeded);
+    test(
+      'a catalog under a different source id does not block the seed',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.replaceLibrary('other', 'Other', cats, seeded);
 
-      expect(
-        await db.replaceLibrary('src1', 'Src', cats, fresh,
-            onlyIfAbsent: true),
-        isTrue,
-      );
-      expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
-      expect((await db.readChannels('other')).map((c) => c.id), ['old']);
-      await db.close();
-    });
+        expect(
+          await db.replaceLibrary(
+            'src1',
+            'Src',
+            cats,
+            fresh,
+            onlyIfAbsent: true,
+          ),
+          isTrue,
+        );
+        expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
+        expect((await db.readChannels('other')).map((c) => c.id), ['old']);
+        await db.close();
+      },
+    );
 
     test('seeds when synced_at is set but no channel rows survive', () async {
       // The boundary that makes the guard the exact complement of
@@ -1072,12 +1186,7 @@ void main() {
 
       // A non-positive "duration" is never stored — a paused-at-zero read
       // must not blank 6300.
-      await db.updateLearnedMediaDuration(
-        'src',
-        kind,
-        'm1',
-        Duration.zero,
-      );
+      await db.updateLearnedMediaDuration('src', kind, 'm1', Duration.zero);
       expect((await db.readMediaItems('src', kind))[0].durationSeconds, 6300);
 
       // Unknown ids / other kinds match nothing and no-op.
@@ -1093,7 +1202,10 @@ void main() {
         'ghost',
         const Duration(minutes: 5),
       );
-      expect((await db.readMediaItems('src', kind)).map((i) => i.id), ['m1', 'm2']);
+      expect((await db.readMediaItems('src', kind)).map((i) => i.id), [
+        'm1',
+        'm2',
+      ]);
       await db.close();
     });
 
@@ -1199,8 +1311,10 @@ void main() {
           await db.readPlaybackProgress('src', ContentKind.episode),
           contains('e1'),
         );
-        expect(await db.readPlaybackProgress('other', ContentKind.movie),
-            contains('m9'));
+        expect(
+          await db.readPlaybackProgress('other', ContentKind.movie),
+          contains('m9'),
+        );
         await db.close();
       },
     );
@@ -1247,34 +1361,36 @@ void main() {
     );
 
     group('watched marks (played to the end)', () {
-      test('finishing a title marks it watched and keeps the no-bar contract',
-          () async {
-        final db = await AppDatabase.openAt(dbPath());
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'done',
-          position: const Duration(minutes: 88),
-          duration: const Duration(minutes: 90),
-        );
-        // The resume row is gone (the rail drops finished titles)...
-        expect(
-          await db.readPlaybackPosition('src', ContentKind.movie, 'done'),
-          isNull,
-        );
-        // ...but the finished *fact* survives, separately, for the card's bar.
-        expect(
-          await db.readWatchedIds('src', ContentKind.movie),
-          contains('done'),
-        );
-        // And the partial-bar read stays clean of it: the full bar comes from
-        // the watched set, so the two maps answer different questions.
-        expect(
-          await db.readPlaybackProgress('src', ContentKind.movie),
-          isNot(contains('done')),
-        );
-        await db.close();
-      });
+      test(
+        'finishing a title marks it watched and keeps the no-bar contract',
+        () async {
+          final db = await AppDatabase.openAt(dbPath());
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'done',
+            position: const Duration(minutes: 88),
+            duration: const Duration(minutes: 90),
+          );
+          // The resume row is gone (the rail drops finished titles)...
+          expect(
+            await db.readPlaybackPosition('src', ContentKind.movie, 'done'),
+            isNull,
+          );
+          // ...but the finished *fact* survives, separately, for the card's bar.
+          expect(
+            await db.readWatchedIds('src', ContentKind.movie),
+            contains('done'),
+          );
+          // And the partial-bar read stays clean of it: the full bar comes from
+          // the watched set, so the two maps answer different questions.
+          expect(
+            await db.readPlaybackProgress('src', ContentKind.movie),
+            isNot(contains('done')),
+          );
+          await db.close();
+        },
+      );
 
       test('a new in-progress session clears the watched mark', () async {
         final db = await AppDatabase.openAt(dbPath());
@@ -1318,101 +1434,106 @@ void main() {
           position: const Duration(seconds: 5),
           duration: Duration.zero,
         );
-        expect(
-          await db.readWatchedIds('src', ContentKind.movie),
-          {'m1'},
-        );
-        await db.close();
-      });
-
-      test('re-finishing an already-watched title stays a single mark', () async {
-        final db = await AppDatabase.openAt(dbPath());
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'm1',
-          position: const Duration(minutes: 88),
-          duration: const Duration(minutes: 90),
-        );
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'm1',
-          position: const Duration(minutes: 90),
-          duration: const Duration(minutes: 90),
-        );
         expect(await db.readWatchedIds('src', ContentKind.movie), {'m1'});
         await db.close();
       });
 
-      test('an explicit completion marks watched regardless of position',
-          () async {
-        final db = await AppDatabase.openAt(dbPath());
-        // A clean server-side EOF (`completed: true`) is the ground truth that
-        // the title played out, even when the last polled position never
-        // reached the 95% threshold — a native closed-relay or a final tick
-        // well under it must still finish the film.
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'eof',
-          position: const Duration(minutes: 10),
-          duration: const Duration(minutes: 90),
-          completed: true,
-        );
-        expect(await db.readWatchedIds('src', ContentKind.movie), {'eof'});
-        expect(
-          await db.readPlaybackPosition('src', ContentKind.movie, 'eof'),
-          isNull,
-        );
-        // It reaches past an unknown duration too: EOF is the fact, so a
-        // zero-length report can't block the mark the way the fraction can.
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'eof-nolen',
-          position: Duration.zero,
-          duration: Duration.zero,
-          completed: true,
-        );
-        expect(
-          await db.readWatchedIds('src', ContentKind.movie),
-          {'eof', 'eof-nolen'},
-        );
-        await db.close();
-      });
+      test(
+        're-finishing an already-watched title stays a single mark',
+        () async {
+          final db = await AppDatabase.openAt(dbPath());
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'm1',
+            position: const Duration(minutes: 88),
+            duration: const Duration(minutes: 90),
+          );
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'm1',
+            position: const Duration(minutes: 90),
+            duration: const Duration(minutes: 90),
+          );
+          expect(await db.readWatchedIds('src', ContentKind.movie), {'m1'});
+          await db.close();
+        },
+      );
+
+      test(
+        'an explicit completion marks watched regardless of position',
+        () async {
+          final db = await AppDatabase.openAt(dbPath());
+          // A clean server-side EOF (`completed: true`) is the ground truth that
+          // the title played out, even when the last polled position never
+          // reached the 95% threshold — a native closed-relay or a final tick
+          // well under it must still finish the film.
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'eof',
+            position: const Duration(minutes: 10),
+            duration: const Duration(minutes: 90),
+            completed: true,
+          );
+          expect(await db.readWatchedIds('src', ContentKind.movie), {'eof'});
+          expect(
+            await db.readPlaybackPosition('src', ContentKind.movie, 'eof'),
+            isNull,
+          );
+          // It reaches past an unknown duration too: EOF is the fact, so a
+          // zero-length report can't block the mark the way the fraction can.
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'eof-nolen',
+            position: Duration.zero,
+            duration: Duration.zero,
+            completed: true,
+          );
+          expect(await db.readWatchedIds('src', ContentKind.movie), {
+            'eof',
+            'eof-nolen',
+          });
+          await db.close();
+        },
+      );
     });
 
     group('watch state outbox (cloud delta)', () {
-      test('a position write queues one row, a completion replaces it', () async {
-        final db = await AppDatabase.openAt(dbPath());
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'm1',
-          position: const Duration(minutes: 12),
-          duration: const Duration(minutes: 90),
-        );
-        var pending = await db.readWatchOutbox();
-        expect(pending.single.itemId, 'm1');
-        expect(pending.single.watched, isFalse);
-        expect(pending.single.positionMs, 12 * 60 * 1000);
+      test(
+        'a position write queues one row, a completion replaces it',
+        () async {
+          final db = await AppDatabase.openAt(dbPath());
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'm1',
+            position: const Duration(minutes: 12),
+            duration: const Duration(minutes: 90),
+          );
+          var pending = await db.readWatchOutbox();
+          expect(pending.single.itemId, 'm1');
+          expect(pending.single.watched, isFalse);
+          expect(pending.single.positionMs, 12 * 60 * 1000);
 
-        // The same title finishing is still one row, carrying the final state:
-        // a title has one state, not a history of them.
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'm1',
-          position: const Duration(minutes: 90),
-          duration: const Duration(minutes: 90),
-        );
-        pending = await db.readWatchOutbox();
-        expect(pending.single.itemId, 'm1');
-        expect(pending.single.watched, isTrue);
-        expect(pending.single.cleared, isFalse);
-        await db.close();
-      });
+          // The same title finishing is still one row, carrying the final state:
+          // a title has one state, not a history of them.
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'm1',
+            position: const Duration(minutes: 90),
+            duration: const Duration(minutes: 90),
+          );
+          pending = await db.readWatchOutbox();
+          expect(pending.single.itemId, 'm1');
+          expect(pending.single.watched, isTrue);
+          expect(pending.single.cleared, isFalse);
+          await db.close();
+        },
+      );
 
       test('removing an entry queues a clear, not a silent absence', () async {
         final db = await AppDatabase.openAt(dbPath());
@@ -1450,7 +1571,10 @@ void main() {
         expect(await db.readWatchOutbox(), isEmpty);
         // The local marks themselves still land: only the cloud copy is
         // restricted to resumable kinds.
-        expect(await db.readWatchedIds('src', ContentKind.live), contains('ch1'));
+        expect(
+          await db.readWatchedIds('src', ContentKind.live),
+          contains('ch1'),
+        );
         await db.close();
       });
 
@@ -1498,21 +1622,16 @@ void main() {
 
       test('the push snapshot comes from the catalogue by id', () async {
         final db = await AppDatabase.openAt(dbPath());
-        await db.replaceMediaLibrary(
-          'src',
-          ContentKind.movie,
-          const [],
-          const [
-            MediaItem(
-              id: 'm1',
-              title: 'A film',
-              kind: ContentKind.movie,
-              year: '2026',
-              poster: 'https://cdn.example/p.jpg',
-              backdrop: 'https://cdn.example/w.jpg',
-            ),
-          ],
-        );
+        await db.replaceMediaLibrary('src', ContentKind.movie, const [], const [
+          MediaItem(
+            id: 'm1',
+            title: 'A film',
+            kind: ContentKind.movie,
+            year: '2026',
+            poster: 'https://cdn.example/p.jpg',
+            backdrop: 'https://cdn.example/w.jpg',
+          ),
+        ]);
         final meta = await db.readWatchMetadata([
           WatchState(
             sourceId: 'src',
@@ -1538,24 +1657,27 @@ void main() {
         await db.close();
       });
 
-      test('readWatchStates merges both tables, newest stamp winning', () async {
-        final db = await AppDatabase.openAt(dbPath());
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'm1',
-          position: const Duration(minutes: 3),
-          duration: const Duration(minutes: 90),
-        );
-        await db.markWatched('src', ContentKind.movie, 'm2');
-        final states = await db.readWatchStates(['src', 'other']);
-        expect(states, hasLength(2));
-        final byId = {for (final s in states) s.itemId: s};
-        expect(byId['m1']!.positionMs, 3 * 60 * 1000);
-        expect(byId['m1']!.watched, isFalse);
-        expect(byId['m2']!.watched, isTrue);
-        await db.close();
-      });
+      test(
+        'readWatchStates merges both tables, newest stamp winning',
+        () async {
+          final db = await AppDatabase.openAt(dbPath());
+          await db.savePlaybackPosition(
+            'src',
+            ContentKind.movie,
+            'm1',
+            position: const Duration(minutes: 3),
+            duration: const Duration(minutes: 90),
+          );
+          await db.markWatched('src', ContentKind.movie, 'm2');
+          final states = await db.readWatchStates(['src', 'other']);
+          expect(states, hasLength(2));
+          final byId = {for (final s in states) s.itemId: s};
+          expect(byId['m1']!.positionMs, 3 * 60 * 1000);
+          expect(byId['m1']!.watched, isFalse);
+          expect(byId['m2']!.watched, isTrue);
+          await db.close();
+        },
+      );
 
       test('delivered rows are cleared only when still unchanged', () async {
         final db = await AppDatabase.openAt(dbPath());
@@ -2270,10 +2392,9 @@ void main() {
       expect(await db.readCategories(legacy), isEmpty);
       expect(await db.readFavoriteIds(stable, ContentKind.live), {'42'});
       // The outbox rides along (it used to be left behind under the dead id).
-      expect(
-        (await db.readFavoritesOutbox()).map((e) => e.sourceId).toSet(),
-        {stable},
-      );
+      expect((await db.readFavoritesOutbox()).map((e) => e.sourceId).toSet(), {
+        stable,
+      });
       // The collided channel keeps the stable row but the (non-colliding) EPG
       // moves, so the stable namespace ends up with a working guide.
       expect((await db.nowNext(stable, now)).now['42']?.title, 'Legacy Now');
@@ -2725,23 +2846,26 @@ void main() {
       await db.close();
     });
 
-    test('a fresh guide is not re-fetched, and reports nothing pending', () async {
-      // `pendingEpgRefresh` is what the status line reads to say "updating
-      // guide", so a load with no work to do must leave it null rather than
-      // hand back an already-completed future.
-      final db = await AppDatabase.openAt(dbPath());
-      final source = _FakeSource();
-      final repo = LibraryRepository(source: source, db: db);
+    test(
+      'a fresh guide is not re-fetched, and reports nothing pending',
+      () async {
+        // `pendingEpgRefresh` is what the status line reads to say "updating
+        // guide", so a load with no work to do must leave it null rather than
+        // hand back an already-completed future.
+        final db = await AppDatabase.openAt(dbPath());
+        final source = _FakeSource();
+        final repo = LibraryRepository(source: source, db: db);
 
-      await repo.load(forceRefresh: true);
-      await repo.pendingEpgRefresh;
-      expect(source.epgStarted.isCompleted, isTrue);
+        await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
+        expect(source.epgStarted.isCompleted, isTrue);
 
-      final second = LibraryRepository(source: _FakeSource(), db: db);
-      await second.load();
-      expect(second.pendingEpgRefresh, isNull);
-      await db.close();
-    });
+        final second = LibraryRepository(source: _FakeSource(), db: db);
+        await second.load();
+        expect(second.pendingEpgRefresh, isNull);
+        await db.close();
+      },
+    );
 
     test('a newer load supersedes the guide refresh still running', () async {
       // Two repositories, one database — the shape of a source switch. The
@@ -2768,22 +2892,25 @@ void main() {
       await db.close();
     });
 
-    test('a failed refresh is recorded, and a later good one clears it', () async {
-      // The verdict the live status line reads to say "guide unavailable".
-      final db = await AppDatabase.openAt(dbPath());
-      final source = _FakeSource()..epgThrow = StateError('guide refused');
-      final repo = LibraryRepository(source: source, db: db);
+    test(
+      'a failed refresh is recorded, and a later good one clears it',
+      () async {
+        // The verdict the live status line reads to say "guide unavailable".
+        final db = await AppDatabase.openAt(dbPath());
+        final source = _FakeSource()..epgThrow = StateError('guide refused');
+        final repo = LibraryRepository(source: source, db: db);
 
-      await repo.load(forceRefresh: true);
-      await repo.pendingEpgRefresh;
-      expect(repo.lastEpgRefreshFailed, isTrue);
+        await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
+        expect(repo.lastEpgRefreshFailed, isTrue);
 
-      source.epgThrow = null;
-      await repo.load(forceRefresh: true);
-      await repo.pendingEpgRefresh;
-      expect(repo.lastEpgRefreshFailed, isFalse);
-      await db.close();
-    });
+        source.epgThrow = null;
+        await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
+        expect(repo.lastEpgRefreshFailed, isFalse);
+        await db.close();
+      },
+    );
 
     test('a superseded refresh leaves the previous verdict standing', () async {
       // Cancelled is not an outcome. Recording one as a *success* cleared a

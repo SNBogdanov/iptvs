@@ -2222,6 +2222,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             // What a double tap on the picture does (Settings → "Double tap on
             // the picture"). Same fail-open shape: absent reads as the default.
             'doubleTap': doubleTapAction.value.storageValue,
+            // Which side of the picture changes the volume on a vertical swipe;
+            // the other side changes the brightness (Android). Read once at
+            // launch, from the notifier the Settings tile writes.
+            'volumeSwipeOnLeft': volumeSwipeOnLeft.value,
             if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
               'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),

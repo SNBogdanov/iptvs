@@ -215,6 +215,16 @@ hiding the slider left mute alone on a row of its own — "a whole strip of pict
 `VolumeSlider` is the track alone; landscape draws it inline after the transport at the same 120 dp.
 The compact breakpoint is unchanged at 560 dp (`PlayerDimens.compactWidth`).
 
+**Holding "Go to live" catches up at double speed (Android).** A tap keeps the shipped behaviour —
+reload to the edge. A hold **resumes** the stream if it is paused (a raised speed on a paused player
+would move nothing), plays at `CATCH_UP_SPEED` (2×) while the finger stays down, and restores 1× on
+release; the chip's label becomes `Catching up ×2` for as long as the speed is raised, so the state
+is visible. The hold is the tap detector's `onLongPress` plus a passive pointer loop that only waits
+for the press to end (`detectTapGestures` has no "long press ended" callback, and the speed must not
+stay raised after the user lets go). A zap or a "Go to live" tap calls `stopCatchUp()`, so no new
+stream ever inherits the rate. At the edge the extra speed simply buys nothing — the source cannot be
+outrun — and the button disappears once the session is live again.
+
 **"Go to live" re-resolves through the same single-flight gate the reconnect watchdog uses**
 (`ResolveGate` in `android/.../player/LiveResolve.kt`, `HdrPlayerActivity.withFreshLiveLocator`):
 the currently-held locator may already be spent (a Stalker `play_token` the portal killed), and
@@ -1776,6 +1786,52 @@ plus `RESULT_MUTED`, which Dart feeds to `PlaybackAudioSession.recordReported`; 
 restores the level the user had, not 100%. The level is never invented from the engine's 0 while
 muted.
 
+**Vertical swipes on the picture change two levels, one per side** (Android): volume on one half,
+screen brightness on the other. Which half is which is the Settings tile "Volume and brightness
+swipes" (`volumeSwipeOnLeft`, a device-wide preference pushed on `open`); the default is volume left,
+and the pairing survives a restart because it describes the hand, not the catalogue.
+
+Everything about the arithmetic is shared and pure (`SwipeLevel.apply`): up is more, a full picture
+height sweeps the whole range, the same travel means the same change on a phone and on a big panel,
+and an unmeasured viewport cannot return `NaN`. The gestures share the tap layer's conditions (no
+PiP, no quick list), sit **ahead of** it in the modifier chain, and consume their movement: a tap
+never reaches the drag slop, a drag never also toggles the chrome, and the chrome's own controls (the
+volume slider included) still receive their own pointers because they are drawn above the layer.
+**The side the finger starts on owns the whole gesture** (`SwipeSides.targetFor`), not where it
+travels to: raising the volume cannot silently turn into raising the brightness as the finger
+crosses the middle. **And the drag has to be clearly vertical** (`SwipeAxisRule`): a swipe counts
+only when its vertical travel exceeds the touch slop *and* is at least 1.5× its horizontal travel —
+the plain vertical-drag detector claimed the gesture (and consumed it) on any vertical drift, so a
+horizontal swipe with a few pixels of wobble raised the volume. A mostly-horizontal drag is left
+unconsumed from the moment it passes the slop, so the system's own edge gestures and the tap layer
+still see it.
+
+Volume writes through the same `onSetVolume` the slider uses, so the bar and the panel can never
+disagree. Brightness writes `WindowManager.LayoutParams.screenBrightness` on the player's **own
+window**: the system brightness and every other app keep the value the user set, and the override
+dies with the Activity — a picture gesture must not change a device setting. Its first swipe starts
+from the window's override if this session has one, else the system brightness, never from a fixed
+50 %.
+
+**Volume's swipe is a level control, never a mute.** Its range is one percent to full
+(`SwipeLevel.VOLUME_MIN`) because this engine treats a zero volume *as* the muted state — a swipe to
+the bottom would therefore mute the player, paint the mute glyph and leave the gesture looking like a
+button press. The floor also makes the swipe reversible: from the bottom it always climbs back to
+100 %, with no unmute step in between. Silence belongs to the mute button alone: it sets
+`PlayerUiState.mutedByButton`, and only that flag makes the volume half inert (`state.muted` alone
+would also match a `0` the engine produced on its own). **A mute restored from the previous session
+counts as the button's** — the same flag is seeded when the session opens muted, which is what stops
+the gesture's first pixel of travel from unmuting a player the user had deliberately silenced. The
+brightness half has no such rule; it floors at `SwipeLevel.BRIGHTNESS_MIN` (five percent) for the
+other reason: a black screen cannot be swiped back by someone who cannot see the picture.
+
+The feedback is one slim **vertical panel** (`LevelPanel`), filled from the bottom, with the
+percentage above and the glyph below, drawn on the side that owns the level being changed (the
+speaker for volume, the brightness glyph for light). It prints the swipe's range, so it never shows
+the button's silence, and it is deliberately independent of `controlsVisible` — the gesture is used
+with the chrome down — hiding on its own `LEVEL_PANEL_VISIBLE_MS` countdown keyed on the last change,
+so a continuous swipe keeps it up and it leaves shortly after the finger does.
+
 ### Persisted media tab category
 
 The last browsed category of each media tab is remembered per **source and kind**
@@ -1808,11 +1864,14 @@ filtered to nothing with no row to move off.
 
 **Two ordering rules on a switch.**
 
-- **The last-channel resume runs after the category is settled.** The filter is applied in
-  `initState`/on the restored id and validated before `_maybeResumeLastChannel`, so a stored
-  channel this category lists is revealed *inside* it, and only a channel from another group moves
-  the filter. Reversed, the late category switch would reset the cursor to the top and throw the
-  resumed row away.
+- **The last-channel resume runs after the category is settled — and stays inside it.** The filter
+  is applied in `initState`/on the restored id and validated before `_maybeResumeLastChannel`, so a
+  stored channel this category lists is revealed *inside* it. A channel the restored filter does not
+  draw is **not** a reason to re-range the tab: reaching it means switching to the group that draws
+  it (usually "All channels"), which is what made the remembered category look like it had never
+  been restored ("opens on my category, then drops to All a couple of seconds later"). The choice is
+  the more deliberate state — a filter the user picked against a channel they happened to be on — so
+  the resume is skipped there and the filter stands.
 - **A switch keeps the selected channel when the new view still lists it.** A channel that appears
   in both views (listed in two groups, or seen through Favorites) keeps the cursor and its scroll
   position; `ChannelListScreen._selectCategory` keeps it by id, and the coordinator's
@@ -2093,6 +2152,39 @@ Pinned by `test/clock_format_test.dart`.
 **Outstanding:** the Android Compose, iOS and Linux Lua overlays still print their own clock; only
 the Windows pair reads the regional format so far.
 
+### Lazy catalogue reads (the VOD tab)
+
+The VOD tab does **not** load the catalogue into memory. `LibraryRepository.loadMedia` reads the
+first window (`kMediaWindow` = 240 rows) and reports `itemsTotal`; `loadMoreMedia` reads the next
+window from the cache (`offset` = what the controller already holds) and the controller **appends**
+it. On a real phone this was not an optimisation: one query for a 29k-item catalogue encoded 162 MB
+into a single platform-channel message and the process died inside `StandardMessageCodec`
+(`OutOfMemoryError`, "the app vanished on the VOD tab with All categories"), which is why the fix is
+a paged read and not a bigger heap.
+
+**The order is SQL's, not Dart's**, and that is the load-bearing part: `sortedMedia` over the loaded
+window would order each page separately. `MediaOrder` (the data-layer twin of the screen's
+`MediaSort`) is applied in `readMediaItemsPage`'s `ORDER BY`, and the release modes need
+`media_items.sort_date` — `year` carries the provider's own format (`2026-09-29`, `29.09.2026`,
+`2026`), which no query can compare chronologically. `sort_date` is written at ingest from
+`releaseSortKey`, `0` for a row with no usable date, and backfilled for pre-v17 rows by
+`backfillMediaSortDates` (from `main`, unawaited, bounded batches, resumable). Undated rows sort
+last **in both directions**, like the Dart comparator documents — a row with no date is neither the
+oldest nor the newest, so flipping the control must not move it to the other end.
+
+Two consequences worth knowing. A **sort change reloads the first window** (`setSort`) because the
+loaded page is no longer the head of the new order. And a season/episode list (`parentId != null`)
+still reads in full: those are bounded by construction, and the lazy path is for the catalogue.
+
+**A full refresh invalidates every per-category cache.** Each category keeps its own
+`media_page_state` row and `loadMedia` treats that row as "the cache answers for this category", so a
+category kept serving the list from before the refresh and the provider's new titles appeared only
+after that category's own refresh. `replaceMediaLibrary` now deletes those rows (top-level only —
+season/episode states are other `ContentKind`s) whenever it replaces the whole catalogue, and the
+next visit re-reads the category from the already-refreshed provider. `media_sync` is likewise
+written **only** by an unfiltered replace: it describes the whole kind, and a category load used to
+stamp it with its own page counts (a 2104-page catalogue reported `424/424` after one category).
+
 ### Infinite scroll in the media grid
 
 `ChannelListScreen._maybeAutoLoadMedia` listens to each media tab's
@@ -2117,6 +2209,15 @@ fill 432 px, nothing scrolled, and the handset has no "Next page" button, so the
 catalogue was unreachable. Touch layouts now use the full `p * screen - 1` window
 (the rail subtraction only ever existed to place that card, which touch does not
 draw), which is why `MediaTabView.pageLimit` branches on `autoLoadMore`.
+
+**A pending "jump to the first unwatched" is the only focus candidate.** `MediaTabView` hands
+`autofocus` to **at most one** card, and while a `jumpTargetId` is pending that card is the target —
+the jump's own widget (`_MediaJumpTargetScroll`) scrolls to it and calls `requestFocus`, so letting
+the last-played tile autofocus as well gave the tab two requesters in one frame and, after "hide
+watched" narrowed the grid and a jump re-windowed it, more than one tile kept the accent ring. The
+rail does not take focus either while a jump is pending. `FocusableCard` now paints its ring from
+its node's **current** `hasFocus` rather than from the last `onFocusChange` event, so a card whose
+node was re-parented by a list rebuild can never keep a ring it no longer owns.
 
 ### VOD/series card shape
 
@@ -3616,6 +3717,13 @@ deliberate:
 - The playing channel is tracked as a **value** (`_playingEntry`), not an index, because a re-range
   renumbers everything. `playingIndex` becomes `-1` when the new range doesn't contain it; playback
   is untouched either way.
+- **The tab follows the range back.** `ZapRecall` already carried the range; on return the channel
+  list reads it (`LiveZapController.reRanged` + `rangeCategoryId`) and, when the session's list
+  left the group it launched from, switches its own filter to that group before restoring the row
+  (`liveTabCategoryForZapRange` maps the quick list's vocabulary back: `''` → "All channels",
+  `zapsrc:<id>` → the cross-source view). Without it, Back landed in the group the tab had *before*
+  the player opened and, since the watched channel is not drawn there, on the first row of that old
+  group.
 - "Last channel" is likewise a channel — **plus the range it was played from**
   (`_previousRange`, rotated with `_playingRange` on every settle). Recalling a previous channel
   that has fallen outside the current range **restores that range with it** (never a widened one),

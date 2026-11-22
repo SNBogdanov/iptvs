@@ -87,7 +87,6 @@ class _FocusableCardState extends State<FocusableCard> {
     AppColors.panel,
   );
 
-  bool _focused = false;
   late final FocusNode _ownedFocusNode = RoutedFocusNode(
     widget.debugLabel ?? 'FocusableCard',
   );
@@ -108,7 +107,8 @@ class _FocusableCardState extends State<FocusableCard> {
   /// `autofocus: true` does show its ring on a phone — deliberately, exactly
   /// like the live list's resting cursor row.
   void _onFocusChange(bool value) {
-    if (mounted) setState(() => _focused = value);
+    // Only a rebuild trigger: what is painted reads the node itself.
+    if (mounted) setState(() {});
     if (!value || !widget.scrollOnFocus) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -131,6 +131,14 @@ class _FocusableCardState extends State<FocusableCard> {
 
   @override
   Widget build(BuildContext context) {
+    // The ring is drawn from the node's **current** focus, not only from the
+    // last change callback. A lazy list re-parents these cards as its window
+    // grows (the media grid hands a different `focusNode` to a slot when the
+    // jump target is revealed), and a state that only remembered the *last
+    // event* could keep a ring it no longer owns — which is how several tiles
+    // ended up looking selected at once. `onFocusChange` still drives the
+    // rebuild; this makes what is painted the truth.
+    final focused = _effectiveFocusNode.hasFocus;
     return Padding(
       padding: const EdgeInsets.symmetric(
         vertical: kFocusableCardVerticalPadding,
@@ -162,7 +170,7 @@ class _FocusableCardState extends State<FocusableCard> {
               child: AnimatedContainer(
                 duration: appMotion(context, const Duration(milliseconds: 120)),
                 decoration: BoxDecoration(
-                  color: _focused ? _focusedFill : AppColors.panel,
+                  color: focused ? _focusedFill : AppColors.panel,
                   borderRadius: BorderRadius.circular(AppRadius.tile),
                   // Transparent and fixed-width: this border exists only to
                   // reserve the ring's space, so the child's constraints are
@@ -179,8 +187,8 @@ class _FocusableCardState extends State<FocusableCard> {
                 foregroundDecoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(AppRadius.tile),
                   border: Border.all(
-                    color: _focused ? AppColors.accent : AppColors.line,
-                    width: _focused ? 2 : 1,
+                    color: focused ? AppColors.accent : AppColors.line,
+                    width: focused ? 2 : 1,
                   ),
                 ),
                 child: Material(

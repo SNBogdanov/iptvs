@@ -64,6 +64,9 @@ Future<ScrollController> _mount(
   required List<MediaItem> items,
   List<ContinueWatchingEntry> rail = const [],
   String? lastPlayedId,
+  String? jumpTargetId,
+  int? jumpTargetIndex,
+  FocusNode? jumpFocusNode,
   bool showingSearch = false,
   bool loading = false,
   bool failed = false,
@@ -83,6 +86,9 @@ Future<ScrollController> _mount(
           error: failed ? 'boom' : null,
           showingSearch: showingSearch,
           lastPlayedId: lastPlayedId,
+          jumpTargetId: jumpTargetId,
+          jumpTargetIndex: jumpTargetIndex,
+          jumpFocusNode: jumpFocusNode,
           scrollController: scroll,
           firstFocusNode: focus,
           isFavorite: (_) => false,
@@ -112,14 +118,17 @@ Future<ScrollController> _mount(
 /// as a *list* so "two of them" fails, which is the race the priority rule
 /// exists to prevent.
 List<String> _autofocusLabels(WidgetTester tester) => [
-  for (final card in tester.widgetList<FocusableCard>(find.byType(FocusableCard)))
+  for (final card in tester.widgetList<FocusableCard>(
+    find.byType(FocusableCard),
+  ))
     if (card.autofocus) card.debugLabel ?? '<unlabelled>',
 ];
 
 void main() {
   group('the media tab opens its focus on the right thing', () {
-    testWidgets('recents present, nothing played this session: the rail',
-        (tester) async {
+    testWidgets('recents present, nothing played this session: the rail', (
+      tester,
+    ) async {
       final items = _items(8);
       await _mount(
         tester,
@@ -129,11 +138,9 @@ void main() {
         rail: [_entry(items[5]), _entry(items[2]), _entry(items[7])],
       );
 
-      expect(
-        _autofocusLabels(tester),
-        ['media.continue.m5'],
-        reason: 'the newest entry is the first rail tile',
-      );
+      expect(_autofocusLabels(tester), [
+        'media.continue.m5',
+      ], reason: 'the newest entry is the first rail tile');
       expect(
         find.byWidgetPredicate(
           (w) => w is FocusableCard && w.debugLabel == 'media.continue.m5',
@@ -151,32 +158,69 @@ void main() {
       expect(focused.hasFocus, isTrue);
     });
 
-    testWidgets('recents present and last-played visible: that grid tile wins',
-        (tester) async {
-      final items = _items(8);
-      await _mount(
-        tester,
-        items: items,
-        rail: [_entry(items[5]), _entry(items[2])],
-        lastPlayedId: items[3].id,
-      );
+    testWidgets(
+      'recents present and last-played visible: that grid tile wins',
+      (tester) async {
+        final items = _items(8);
+        await _mount(
+          tester,
+          items: items,
+          rail: [_entry(items[5]), _entry(items[2])],
+          lastPlayedId: items[3].id,
+        );
 
-      expect(
-        _autofocusLabels(tester),
-        ['media.item.m3'],
-        reason: 'returning from the details sheet must land where you left, '
-            'not at the top of the tab',
-      );
-    });
+        expect(
+          _autofocusLabels(tester),
+          ['media.item.m3'],
+          reason:
+              'returning from the details sheet must land where you left, '
+              'not at the top of the tab',
+        );
+      },
+    );
 
-    testWidgets('no recents, nothing played: the first grid item',
-        (tester) async {
+    testWidgets('no recents, nothing played: the first grid item', (
+      tester,
+    ) async {
       await _mount(tester, items: _items(8));
       expect(_autofocusLabels(tester), ['media.item.m0']);
     });
 
-    testWidgets('searching hides the rail, so the results take the focus',
-        (tester) async {
+    testWidgets('a pending jump is the only focus candidate', (tester) async {
+      // The reported bug: "hide watched" + "jump to the first unwatched" drew
+      // the accent ring on several tiles. The jump widget requests focus on its
+      // target explicitly, so the last-played tile must not also autofocus —
+      // two requesters in one frame, decided by tree order.
+      final items = _items(30);
+      final jump = FocusNode();
+      addTearDown(jump.dispose);
+      await _mount(
+        tester,
+        items: items,
+        rail: [_entry(items[5]), _entry(items[2])],
+        lastPlayedId: items[5].id,
+        jumpTargetId: items[20].id,
+        jumpTargetIndex: 20,
+        jumpFocusNode: jump,
+      );
+
+      expect(
+        _autofocusLabels(tester),
+        isEmpty,
+        reason: 'the jump scroll focuses the target itself',
+      );
+      expect(
+        tester
+            .widgetList<FocusableCard>(find.byType(FocusableCard))
+            .where((card) => card.focusNode == jump),
+        hasLength(1),
+        reason: 'exactly one tile carries the jump node',
+      );
+    });
+
+    testWidgets('searching hides the rail, so the results take the focus', (
+      tester,
+    ) async {
       final items = _items(8);
       await _mount(
         tester,
@@ -185,19 +229,18 @@ void main() {
         showingSearch: true,
       );
 
-      expect(
-        _autofocusLabels(tester),
-        ['media.item.m0'],
-        reason: 'the rail is not drawn while searching',
-      );
+      expect(_autofocusLabels(tester), [
+        'media.item.m0',
+      ], reason: 'the rail is not drawn while searching');
     });
 
     for (final (label, loading, failed) in const [
       ('loading', true, false),
       ('failed', false, true),
     ]) {
-      testWidgets('$label body: the rail leaves the focus alone',
-          (tester) async {
+      testWidgets('$label body: the rail leaves the focus alone', (
+        tester,
+      ) async {
         final items = _items(8);
         await _mount(
           tester,
@@ -210,7 +253,8 @@ void main() {
         expect(
           _autofocusLabels(tester),
           isEmpty,
-          reason: 'a status line is not reachable by D-pad; the retry action '
+          reason:
+              'a status line is not reachable by D-pad; the retry action '
               'owns the focus here (docs/tv-navigation.md)',
         );
       });

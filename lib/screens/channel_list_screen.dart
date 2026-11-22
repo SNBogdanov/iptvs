@@ -527,6 +527,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// actually pushed, and dropped with the repository it was played through.
   ZapRecall? _zapRecall;
 
+  /// Where the last fullscreen session **ended**, when its in-player quick list
+  /// re-ranged away from the filter this tab launched it with.
+  ///
+  /// [ZapRecall] carries the range internally, but only exposes the channel;
+  /// this is the part the tab needs on return: watch a channel from another
+  /// group and Back must land in *that* group, on *that* channel, not in the
+  /// group the tab happened to have before the player opened.
+  ({String id, String label})? _playedRange;
+
   /// Records that a channel started playing: this screen's own zap bookkeeping,
   /// and — through the device-local [LastChannelStore] — the next launch.
   ///
@@ -669,6 +678,22 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             'enabled=${widget.config.autoResumeLastChannel}',
       );
       if (action == ResumeAction.none || channel == null) return;
+      // **The restored category outranks the resume.** Reaching a channel the
+      // current filter does not draw means switching the tab's category (the
+      // number-jump planner picks the first group that draws it, usually "All
+      // channels"), and doing that seconds after launch makes the remembered
+      // category look like it was never restored — the reported "shows my
+      // category, then drops to All". The choice is the more deliberate state:
+      // the channel is a place the user happened to be, the category is a
+      // filter they picked. So resume inside the filter, and skip it otherwise.
+      if (!_draws(channel)) {
+        DiagnosticsLog.instance.add(
+          'resume',
+          'start resume kept category=${_categoryId ?? '<all>'} '
+              'channel=${channel.id} (not drawn by it)',
+        );
+        return;
+      }
       // Deliberately *not* `_revealAndPreview`: that helper only ever
       // retargets an already-running preview, because a selection move must
       // never start one (see the typed-number jump). The boot resume is the one
@@ -1381,7 +1406,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final scroll = controller.scrollController;
     if (!scroll.hasClients || scroll.position.extentAfter > 400) return;
     final visibleCount = _visibleMedia(kind).length;
-    if (controller.shownCountFloor >= visibleCount && !snap.hasMore) return;
+    if (controller.shownCountFloor >= visibleCount &&
+        !snap.hasMore &&
+        !snap.hasMoreItems) {
+      return;
+    }
     final now = DateTime.now().millisecondsSinceEpoch;
     if (!fill && now - (_mediaAutoLoadAt[kind] ?? 0) < 500) return;
     _mediaAutoLoadAt[kind] = now;
@@ -1402,10 +1431,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final controller = _media(kind);
     final snap = controller.snapshot;
     if (snap == null) return;
+    // The "Next page" press reveals one more screenful, and pulls the next page
+    // of whatever backs the tab: a cached window (a sorted tab) or a provider
+    // page (As provided). Both are "more", and the reveal must not stall at the
+    // loaded window's end.
     setState(() {
       _mediaDisplayPages[kind] = (_mediaDisplayPages[kind] ?? 1) + 1;
     });
-    if (snap.hasMore) {
+    if (snap.hasMore || snap.hasMoreItems) {
       unawaited(controller.loadMore());
     }
     // Reveal the new "Next page" control and put the D-pad on it. It moved to a
@@ -1567,6 +1600,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void _restoreListFocusAfterPlayback() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // Consumed unconditionally: a session that ended while another route
+      // owned the return (the EPG grid case below) must not leave its range
+      // waiting to re-filter the tab on some later, unrelated return.
+      final played = _playedRange;
+      _playedRange = null;
       // Only the visible top route may own the D-pad. When playback was
       // launched from a *pushed* route (e.g. the EPG grid), that route is
       // still on top after the player pops — requesting focus on the covered
@@ -1575,6 +1613,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // Flutter's own route focus restoration re-focuses that route's node.
       if (ModalRoute.of(context)?.isCurrent == false) return;
       if (_tab == ContentKind.live) {
+        // Back from a session whose quick list re-ranged: land in the group the
+        // user was actually watching, then restore the row. Without this the
+        // tab stayed on the filter it had *before* the player opened, and the
+        // watched channel — not drawn by it — was replaced by the first row of
+        // the old group, which reads as "Back went to the wrong place".
+        if (played != null) {
+          final target = liveTabCategoryForZapRange(played.id);
+          final offered =
+              target == null ||
+              target == kAllSourcesFavoritesCategoryId ||
+              _liveCategoriesForUi.any((category) => category.id == target);
+          if (offered && target != _categoryId) {
+            _selectCategory(target, scrollToTop: false);
+          }
+        }
         _focus.restoreSelectionToChannel(_lastPlayedLiveChannelId);
         return;
       }
@@ -2521,7 +2574,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         }
       } finally {
         pendingCatchup = zap.pendingCatchup;
-        if (opened) _zapRecall = zap.recall;
+        if (opened) {
+          _zapRecall = zap.recall;
+          // Where the session ended, **if its quick list left the launch
+          // range**: the tab has to come back to the group the user actually
+          // watched. `reRanged` is the guard that keeps this inert for a session
+          // that only zapped inside the group it opened from (and for the
+          // cross-source view, whose launch range id is `''` like "All").
+          _playedRange = zap.reRanged
+              ? (id: zap.rangeCategoryId, label: zap.rangeLabel)
+              : null;
+        }
         zap.dispose();
         if (mounted) setState(() => _resolving = false);
       }
@@ -4624,6 +4687,22 @@ class _ChannelListZapCatalog implements ZapCatalog {
 /// [_ChannelListZapCatalog], and only for a range that has no provider
 /// categories at all.
 const String _kZapSourcePrefix = 'zapsrc:';
+
+/// The tab category a zap range's id maps back to, when a player session ends.
+///
+/// The quick list speaks the zap range's vocabulary: `''` is its "everything"
+/// row, a provider category id is itself, and a `zapsrc:<id>` row is one source
+/// inside the cross-source Favorites view. The tab's own filter has no
+/// per-source favorites entry, so a source row lands on the whole cross-source
+/// view - the widest thing that still draws the channel. `null` is "All
+/// channels".
+///
+/// Pure and top-level so the mapping is pinned by a unit test: getting it wrong
+/// sends the user back to a group their channel is not in.
+String? liveTabCategoryForZapRange(String id) {
+  if (id.isEmpty) return null;
+  return id.startsWith(_kZapSourcePrefix) ? kAllSourcesFavoritesCategoryId : id;
+}
 
 /// Window title composed like the channel-list rows: a provider-assigned
 /// channel number first when one exists, then the name (and an optional

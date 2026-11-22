@@ -40,6 +40,16 @@ final ValueNotifier<bool> showChannelName = ValueNotifier<bool>(true);
 final ValueNotifier<int> seekStepSeconds =
     ValueNotifier<int>(kDefaultSeekStepSeconds);
 
+/// Which side of the Android player's picture adjusts the **volume** on a
+/// vertical swipe; the other side adjusts the **brightness**.
+///
+/// Default true (volume left), and a notifier for the same reason the chrome
+/// toggles above are: the native player reads it **synchronously** when it is
+/// handed the `open` payload, and the Settings tile has to agree with what the
+/// next session will do. Session-wide and device-wide — not per source — because
+/// it describes the hand, not the catalogue.
+final ValueNotifier<bool> volumeSwipeOnLeft = ValueNotifier<bool>(true);
+
 /// Reads the persisted preferences into the notifiers, so the chrome reflects
 /// the saved values from the first frame.
 ///
@@ -55,4 +65,5 @@ Future<void> loadPlayerChromePrefs({AppSettingsStore? store}) async {
   showPlaybackTimes.value = await settings.showPlaybackTimes();
   showChannelName.value = await settings.showChannelName();
   seekStepSeconds.value = await settings.seekStepSeconds();
+  volumeSwipeOnLeft.value = await settings.playerVolumeSwipeOnLeft();
 }

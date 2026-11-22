@@ -438,6 +438,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
               trailing: (_doubleTap ?? DoubleTapAction.previousNext).label,
               onTap: _cycleDoubleTap,
             ),
+            if (Platform.isAndroid)
+              _SettingTile(
+                icon: Icons.swap_horiz_outlined,
+                title: 'Volume and brightness swipes',
+                subtitle:
+                    'A vertical swipe on the picture changes one level per side. '
+                    'Muting is still the button, and the brightness applies to '
+                    'this player only.',
+                trailing: volumeSwipeOnLeft.value
+                    ? 'Volume left'
+                    : 'Brightness left',
+                onTap: _toggleSwipeSides,
+              ),
           ],
         ),
       ),
@@ -449,6 +462,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final next = current.other;
     setState(() => _doubleTap = next);
     await setDoubleTapAction(next, store: widget.store);
+  }
+
+  /// Flips which side of the picture the volume swipe lives on.
+  ///
+  /// The tile's trailing label reads [volumeSwipeOnLeft] directly, so a
+  /// `setState` is only there to repaint this route; the notifier is what the
+  /// next player session reads from the `open` payload.
+  Future<void> _toggleSwipeSides() async {
+    final next = !volumeSwipeOnLeft.value;
+    volumeSwipeOnLeft.value = next;
+    setState(() {});
+    await widget.store.setPlayerVolumeSwipeOnLeft(next);
   }
 
   Future<void> _openPlayerControls() async {

@@ -8,6 +8,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,6 +40,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Forward30
@@ -86,12 +90,15 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import android.view.View
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.os.SystemClock
+import kotlin.math.roundToInt
 
 /** Player actions the overlay invokes; implemented by the Activity over ExoPlayer. */
 class PlayerCallbacks(
@@ -100,11 +107,23 @@ class PlayerCallbacks(
     val onSeekBy: (Long) -> Unit,
     val onSetVolume: (Float) -> Unit,
     val onToggleMute: () -> Unit,
+    /**
+     * A brightness swipe's level (0..1) — Android only, and session-scoped: the
+     * Activity writes it to its own window, so the rest of the system keeps the
+     * brightness the user set.
+     */
+    val onSetBrightness: (Float) -> Unit,
     val onSelectAudio: (String) -> Unit,
     val onSelectSubtitle: (String) -> Unit,
     val onSetSpeed: (Float) -> Unit,
     val onCycleAspect: () -> Unit,
     val onGoLive: () -> Unit,
+    /**
+     * "Go to live" held down: resume if paused and play at double speed until
+     * the finger lifts ([onCatchUpStop]), instead of reloading at the edge.
+     */
+    val onCatchUpStart: () -> Unit,
+    val onCatchUpStop: () -> Unit,
     val onToggleFavorite: () -> Unit,
     val onBack: () -> Unit,
     val onEnterPip: () -> Unit,
@@ -173,6 +192,16 @@ fun PlayerScreen(
         state.zapBannerVisible = false
     }
 
+    // The swipe level panel hides on the same rule: its own countdown, keyed on
+    // the last change, so a continuous gesture keeps it up and it leaves shortly
+    // after the finger does. Shorter than the banner's: the level is not
+    // information to read, only feedback to confirm.
+    LaunchedEffect(state.levelPanelAtMs) {
+        if (state.levelPanelAtMs == 0L) return@LaunchedEffect
+        kotlinx.coroutines.delay(LEVEL_PANEL_VISIBLE_MS)
+        state.levelPanelKind = null
+    }
+
     // Move focus to the controls when shown; park it on the root when hidden so a
     // D-pad press can reveal them again.
     LaunchedEffect(state.controlsVisible) {
@@ -227,6 +256,108 @@ fun PlayerScreen(
             Box(
                 Modifier
                     .fillMaxSize()
+                    // **Two level gestures, one per side.** The side the finger
+                    // *starts* on decides what the whole gesture changes —
+                    // volume on one half, brightness on the other (which half is
+                    // which is the Settings tile's choice, `volumeSwipeOnLeft`).
+                    // Up is more; a full height is the whole range
+                    // (`SwipeLevel`), so the same travel means the same change
+                    // on a phone and on a TV panel. Attached ahead of the tap
+                    // layer and under the same conditions: a tap never travels
+                    // past the drag slop, and a drag consumes its movement, so
+                    // the two cannot both fire.
+                    //
+                    // Volume is a **level** control, never a mute: its range
+                    // stops at one percent, so swiping to the bottom cannot
+                    // silence the player, and only a mute the *button* made
+                    // keeps the volume half out (`mutedByButton`) — the engine
+                    // reports a zero volume as muted too, and a swipe must not
+                    // be trapped by its own floor. Brightness floors at five
+                    // percent for the other reason: a black screen cannot be
+                    // swiped back by someone who cannot see the picture.
+                    .pointerInput(state.mutedByButton, state.volumeSwipeOnLeft) {
+                        var target = SwipeTarget.Volume
+                        var level = 0f
+                        // **A custom drag, not `detectVerticalDragGestures`.** That
+                        // detector claims a gesture as soon as the vertical
+                        // movement passes the slop, so a horizontal swipe with a
+                        // few pixels of drift was read as "raise the volume" —
+                        // and consumed, so nothing else could have it. Here the
+                        // axis is decided once, from the ratio of both movements
+                        // (`SwipeAxisRule`), and a mostly-horizontal drag is left
+                        // untouched from the moment it passes the slop.
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            target = SwipeSides.targetFor(
+                                down.position.x,
+                                size.width.toFloat(),
+                                state.volumeSwipeOnLeft,
+                            )
+                            var dx = 0f
+                            var dy = 0f
+                            var claimed = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                    ?: break
+                                if (!change.pressed) break
+                                dx += change.positionChange().x
+                                dy += change.positionChange().y
+                                if (!claimed) {
+                                    when (
+                                        SwipeAxisRule.decide(
+                                            dx,
+                                            dy,
+                                            viewConfiguration.touchSlop,
+                                        )
+                                    ) {
+                                        SwipeAxis.Horizontal -> break
+                                        SwipeAxis.Undecided -> continue
+                                        SwipeAxis.Vertical -> {
+                                            if (target == SwipeTarget.Volume &&
+                                                state.mutedByButton
+                                            ) {
+                                                break
+                                            }
+                                            claimed = true
+                                            level = when (target) {
+                                                SwipeTarget.Volume -> state.volume
+                                                SwipeTarget.Brightness -> state.brightness
+                                            }
+                                        }
+                                    }
+                                }
+                                change.consume()
+                                val kind = when (target) {
+                                    SwipeTarget.Volume -> LevelPanelKind.Volume
+                                    SwipeTarget.Brightness -> LevelPanelKind.Brightness
+                                }
+                                level = SwipeLevel.apply(
+                                    level,
+                                    dy,
+                                    size.height.toFloat(),
+                                    if (target == SwipeTarget.Brightness) {
+                                        SwipeLevel.BRIGHTNESS_MIN
+                                    } else {
+                                        SwipeLevel.VOLUME_MIN
+                                    },
+                                )
+                                when (target) {
+                                    SwipeTarget.Volume -> callbacks.onSetVolume(level)
+                                    SwipeTarget.Brightness ->
+                                        callbacks.onSetBrightness(level)
+                                }
+                                // A timestamp, not a flag: a second swipe while
+                                // the panel is fading restarts its countdown.
+                                state.levelPanelKind = kind
+                                state.levelPanelValue = level
+                                state.levelPanelAtMs = SystemClock.elapsedRealtime()
+                                // The accumulated delta has been applied; the
+                                // next frame's movement is what comes next.
+                                dy = 0f
+                            }
+                        }
+                    }
                     .pointerInput(state.doubleTapAction, state.isLive, state.stepEnabled) {
                         val half = size.width / 2f
                         detectTapGestures(
@@ -277,6 +408,19 @@ fun PlayerScreen(
                 reason = state.videoUnsupportedReason,
                 modifier = Modifier.align(Alignment.Center),
             )
+        }
+
+        // The swipe's own level indicator, drawn over the picture and
+        // independent of the chrome: a viewer adjusts the sound or the picture
+        // with the bars down, and the panel is the only feedback the gesture
+        // would otherwise have. One panel for both gestures, on the side that
+        // owns the level being changed.
+        AnimatedVisibility(
+            visible = state.levelPanelKind != null && !state.inPip,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            LevelPanel(state)
         }
 
         if (state.reconnecting) {
@@ -420,6 +564,83 @@ private fun ControlsOverlay(
  * Sits at the same edge geometry as [TopBar]/[BottomBar] — including the TV
  * overscan insets — so the pills line up with the badges they replace.
  */
+/**
+ * The swipe's level indicator: a slim vertical bar on the side that owns the
+ * level being changed — volume's side by default on the left, brightness on the
+ * right, or swapped by the Settings tile ([PlayerUiState.volumeSwipeOnLeft]).
+ *
+ * Drawn over the picture and independently of the chrome, because the gesture is
+ * used with the bars down — a viewer adjusts the sound or the picture while
+ * watching. The fill grows from the bottom (the direction the finger has to
+ * move), the percentage sits above it and the glyph below, so the panel reads the
+ * same way upright and in landscape. Nothing here is interactive: it is feedback
+ * for a gesture, never a control, and the on-screen volume control stays the
+ * slider in the bar.
+ */
+@Composable
+private fun LevelPanel(state: PlayerUiState) {
+    val kind = state.levelPanelKind ?: return
+    val level = state.levelPanelValue.coerceIn(SwipeLevel.BRIGHTNESS_MIN, SwipeLevel.MAX)
+    // Volume sits on the side it owns; brightness takes the other one, so the
+    // panel is always under the finger that moved it.
+    val volumeSideLeft = state.volumeSwipeOnLeft
+    val onLeft = if (kind == LevelPanelKind.Volume) volumeSideLeft else !volumeSideLeft
+    val edge = PlayerDimens.edgePadding(state.isTv)
+    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .align(if (onLeft) Alignment.CenterStart else Alignment.CenterEnd)
+                .padding(
+                    start = if (onLeft) edge else 0.dp,
+                    end = if (onLeft) 0.dp else edge,
+                )
+                .width(56.dp)
+                .height(196.dp)
+                .clip(RoundedCornerShape(PlayerDimens.MenuCorner))
+                .background(PlayerColors.Panel)
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+        ) {
+            Text(
+                text = "${(level * 100).roundToInt()}%",
+                color = PlayerColors.TextHi,
+                fontFamily = InterFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            Box(
+                Modifier
+                    .weight(1f)
+                    .width(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(PlayerColors.PanelHi),
+            ) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(level)
+                        .background(PlayerColors.Accent),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Icon(
+                imageVector = when (kind) {
+                    // The volume glyph is always the speaker: the panel is a
+                    // level readout, and the gesture it reports can never be the
+                    // mute.
+                    LevelPanelKind.Volume -> Icons.Filled.VolumeUp
+                    LevelPanelKind.Brightness -> Icons.Filled.BrightnessHigh
+                },
+                contentDescription = null,
+                tint = PlayerColors.TextHi,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun PersistentHud(state: PlayerUiState, nowMillis: Long) {
     // Mirrors the shared Flutter overlay's `_persistentHud`: clock top-right,
@@ -870,9 +1091,24 @@ private fun RightCluster(
             }
         }
         TextControlButton(
-            label = "Go to live",
-            contentDescription = "Go to live",
+            // The label is the mode while holding: the chip already says what a
+            // tap does, and a raised speed that says nothing reads as a broken
+            // player. Otherwise it is the action, as everywhere else.
+            label = if (state.catchingUp) "Catching up ×2" else "Go to live",
+            contentDescription = if (state.catchingUp) {
+                "Catching up to live at double speed"
+            } else {
+                "Go to live"
+            },
             onFocusChanged = { goLiveFocused = it },
+            // Tap jumps to the edge (reload); hold plays at double speed until
+            // the finger lifts, which is how a viewer behind the live edge
+            // catches up without losing the buffer.
+            onHoldStart = {
+                onInteract()
+                callbacks.onCatchUpStart()
+            },
+            onHoldEnd = { callbacks.onCatchUpStop() },
         ) {
             onInteract()
             callbacks.onGoLive()
@@ -1069,6 +1305,13 @@ fun IconControlButton(
  * It exists for controls that can *remove themselves* while focused — "Go to
  * live" is the only one — so the caller can hand focus somewhere else before it
  * goes; see [RightCluster].
+ *
+ * [onHoldStart] / [onHoldEnd] add **press-and-hold** to a text chip. "Go to
+ * live" is the one caller: a tap jumps to the edge by reloading, a hold plays the
+ * stream faster until it catches up. The hold is detected by the tap detector's
+ * own `onLongPress`; a second, passive pointer loop only reports when the finger
+ * lifts, because `detectTapGestures` has no "long press ended" callback and the
+ * speed must not stay raised after the user lets go.
  */
 @Composable
 fun TextControlButton(
@@ -1076,9 +1319,41 @@ fun TextControlButton(
     contentDescription: String,
     modifier: Modifier = Modifier,
     onFocusChanged: ((Boolean) -> Unit)? = null,
+    onHoldStart: (() -> Unit)? = null,
+    onHoldEnd: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val press = if (onHoldStart == null) {
+        Modifier.clickable(onClick = onClick)
+    } else {
+        Modifier
+            .pointerInput(onHoldStart, onClick) {
+                detectTapGestures(
+                    onTap = { onClick() },
+                    onLongPress = { onHoldStart() },
+                )
+            }
+            .then(
+                if (onHoldEnd == null) {
+                    Modifier
+                } else {
+                    Modifier.pointerInput(onHoldEnd) {
+                        // Passive: never consumes, so the tap detector above
+                        // still owns the gesture. It only watches for the press
+                        // to end.
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.all { !it.pressed }) break
+                            }
+                            onHoldEnd()
+                        }
+                    }
+                },
+            )
+    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
@@ -1089,7 +1364,7 @@ fun TextControlButton(
                 focused = it.isFocused
                 onFocusChanged?.invoke(it.isFocused)
             }
-            .clickable(onClick = onClick)
+            .then(press)
             .padding(horizontal = 14.dp),
     ) {
         Text(
