@@ -62,6 +62,8 @@ class MpvEngine(
     override fun seekBy(deltaMs: Long) = controller.seekBy(deltaMs)
     override fun seekTo(positionMs: Long) = controller.seekTo(positionMs)
     override fun setVolume(value: Float) = controller.setVolume(value)
+    /** See [MpvController.setMuted]: the flag the observer reports as muted. */
+    fun setMuted(value: Boolean) = controller.setMuted(value)
     override fun toggleMute() = controller.toggleMute()
     override fun setSpeed(value: Float) = controller.setSpeed(value)
     override fun selectAudio(id: String) = controller.selectAudio(id)

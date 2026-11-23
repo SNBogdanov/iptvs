@@ -83,6 +83,7 @@ void main() {
               onPlayPause: () async => onPlayPause?.call(),
               onGoLive: () async {},
               onCycleAspect: () async {},
+                  onPinAspect: (_) async {},
               onToggleFullscreen: onToggleFullscreen ?? () {},
             ),
           ),

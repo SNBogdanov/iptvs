@@ -1510,12 +1510,23 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   so the two native surfaces can't disagree when neither was told. It keys off
   `isTelevision`/`Platform`/the window, **never off which rendering surface is in use**: on Windows
   the native and embedded surfaces are chosen purely by HDR, so keying off the surface would frame
-  the same channel differently depending on its dynamic range. **The choice persists**, per source, in
-  `settings['aspectMode']` (`SourceConfig.aspectModeLabel`, saved by
-  `channel_list_screen._persistAspectMode` against the *owning* config, so a cross-source favorite
-  stores against its own provider) — a broad key, not a secret, riding the existing blob. It
-  round-trips through the native players too (`EXTRA_ASPECT` in, `RESULT_ASPECT` out on Android),
-  so a change made in the native overlay persists exactly like one made on the Flutter side, and a
+  the same channel differently depending on its dynamic range. **The mode is device-wide; a channel can be pinned.**
+  `AppSettingsStore.playerAspectMode()` holds one label for the whole device (`playerAspectLabel`
+  is the synchronous mirror the routes read), so opening a second source no longer re-frames the
+  picture for no visible reason. A short press cycles and saves that global value; a **long press**
+  opens a menu (Flutter overlay and Android's `ListMenu` panel, the same dark surface as the
+  track/speed menus) whose choice pins the mode to the
+  current item in the owning source's `settings['aspectPins']` (channel or media id → label;
+  cloud-synced, key removed when the last pin goes), and whose "Use global" clears it. Cycling on a
+  pinned channel moves **its pin**, not the global — the button must change the picture on screen —
+  and a zap resolves pin → global through `ZapCatalog.aspectLabelFor`/`aspectPinnedFor`. The old
+  per-source `settings['aspectMode']` is a legacy fallback only. A pinned item shows it on the
+  chip — accent border and accent label (`_textButton(active:)`, Compose
+  `TextControlButton(active = …)`) — and the menu's checkmark sits on the current mode when pinned,
+  on "Use global" otherwise. It
+  round-trips through the native players too (`EXTRA_ASPECT`/`EXTRA_ASPECT_PINNED`/
+  `EXTRA_GLOBAL_ASPECT` in, `RESULT_ASPECT` out on Android), so a change made in the native overlay
+  persists exactly like one made on the Flutter side, and a
   label this build doesn't know is dropped rather than stored. The Windows native surface's
   initial `panscan`/`keepaspect`/`video-aspect-override` are **derived from the resolved index**,
   not hardcoded — they are halves of one statement, and the chip previously said "Fill" while

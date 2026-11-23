@@ -277,6 +277,14 @@ class MainActivity : FlutterActivity() {
                         )
                         putExtra(HdrPlayerActivity.EXTRA_ASPECT, args["aspect"] as? String)
                         putExtra(
+                            HdrPlayerActivity.EXTRA_ASPECT_PINNED,
+                            args["aspectPinned"] as? Boolean ?: false,
+                        )
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_GLOBAL_ASPECT,
+                            args["globalAspect"] as? String ?: "",
+                        )
+                        putExtra(
                             HdrPlayerActivity.EXTRA_STEP_ENABLED,
                             args["stepEnabled"] as? Boolean ?: false,
                         )
@@ -696,6 +704,30 @@ class MainActivity : FlutterActivity() {
     fun reportAspect(label: String) {
         if (!::nativeHdrChannel.isInitialized) return
         nativeHdrChannel.invokeMethod("nativeAspect", mapOf("label" to label))
+    }
+
+    /**
+     * Live audio level/mute report from the native player (the mute button),
+     * so Dart's session is right even if the process dies before `finish`.
+     */
+    fun reportVolume(volume: Float, muted: Boolean) {
+        if (!::nativeHdrChannel.isInitialized) return
+        nativeHdrChannel.invokeMethod(
+            "nativeVolume",
+            mapOf("volume" to volume.toDouble(), "muted" to muted),
+        )
+    }
+
+    /** The long-press menu pinned [label] to the channel on screen. */
+    fun reportAspectPin(label: String) {
+        if (!::nativeHdrChannel.isInitialized) return
+        nativeHdrChannel.invokeMethod("nativeAspectPin", mapOf("label" to label))
+    }
+
+    /** The long-press menu's "Use global": drop the channel's pin. */
+    fun reportAspectGlobal() {
+        if (!::nativeHdrChannel.isInitialized) return
+        nativeHdrChannel.invokeMethod("nativeAspectGlobal", null)
     }
 
     /**

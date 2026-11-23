@@ -570,13 +570,21 @@ class PlayerScreen extends StatefulWidget {
     this.iosEngineKey,
     this.bufferPreset = BufferPreset.normal,
     this.initialAspectLabel,
+    this.initialAspectPinned = false,
     this.onAspectChanged,
+    this.onAspectPinned,
   });
 
-  /// The aspect mode this player opens on, as a [AspectMode.label] — the value
-  /// the user last chose for this source. Null (or a label this build no longer
-  /// has) falls back to [defaultAspectModeIndex].
+  /// The aspect mode this player opens on, as an [AspectMode.label] — the
+  /// channel's own pin when it has one, otherwise the device-wide choice. Null
+  /// (or a label this build no longer has) falls back to
+  /// [defaultAspectModeIndex].
   final String? initialAspectLabel;
+
+  /// Whether [initialAspectLabel] is a **pin for this item** rather than the
+  /// device-wide mode. A pinned item keeps its framing while the global mode
+  /// changes all the others; the aspect menu's "Use global" clears the pin.
+  final bool initialAspectPinned;
 
   /// Called with the new [AspectMode.label] whenever the user cycles the mode,
   /// so the choice outlives the player.
@@ -584,6 +592,12 @@ class PlayerScreen extends StatefulWidget {
   /// Without this the mode reset on every open and anyone who preferred the
   /// non-default re-pressed the button for every channel they started.
   final void Function(String label)? onAspectChanged;
+
+  /// Called when the user pins [label] to this item (a long press on the
+  /// aspect button), or with null when they choose "Use global". [itemKey] is
+  /// the current VOD item's id (null for live, where the zap controller knows
+  /// which channel is playing).
+  final Future<void> Function(String? label, String? itemKey)? onAspectPinned;
 
   /// How much media to hold ahead, chosen per source. Reaches ExoPlayer as a
   /// name on the native `open` payload (its `LoadControl` is a build-time
@@ -895,15 +909,34 @@ class _PlayerScreenState extends State<PlayerScreen>
     await widget.onSetFavorite?.call(value);
   }
 
-  /// Persists an aspect-mode label against the *owning* source of the channel
-  /// currently playing, for the same reason.
+  /// Persists the aspect label that is now in effect: the item's **pin** when
+  /// the item has one, otherwise the **device-wide** mode.
+  ///
+  /// Cycling on a pinned channel moves its pin, not the global mode — the
+  /// button has to do something to the picture the viewer is looking at.
   void _persistAspectLabel(String label) {
+    if (_aspectPinned) {
+      _persistAspectPin(label);
+      return;
+    }
     final zap = _zap;
     if (zap != null) {
       unawaited(zap.persistAspect(label));
       return;
     }
     widget.onAspectChanged?.call(label);
+  }
+
+  /// Persists a pin for the item on screen: through the zap controller for a
+  /// live channel (it knows which channel a zap moved to), else the route's own
+  /// callback with the current VOD item id.
+  void _persistAspectPin(String? label) {
+    final zap = _zap;
+    if (zap != null) {
+      unawaited(zap.persistAspectPin(label));
+      return;
+    }
+    unawaited(widget.onAspectPinned?.call(label, _aspectPinKey));
   }
 
   // Live-edge sync for the Windows overlay: false once the user pauses live (and
@@ -1017,6 +1050,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// rather than hardcoded, so the overlay's chip can never name a mode the
   /// picture isn't in.
   late int _aspectModeIndex = resolveAspectModeIndex(widget.initialAspectLabel);
+
+  /// Whether the framing in effect is this item's own pin rather than the
+  /// device-wide mode. Cycling while pinned moves the **pin** (the picture must
+  /// respond to the button); the menu's "Use global" drops it.
+  late bool _aspectPinned = widget.initialAspectPinned;
+
+  /// The id the current item's aspect pin belongs to: null for live (the zap
+  /// controller resolves the channel), else the sibling now on screen.
+  String? get _aspectPinKey =>
+      _isLive ? null : (_currentVodItem ?? widget.mediaItem)?.id;
 
   static const List<double> _speedOptions = <double>[
     0.5,
@@ -1606,6 +1649,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     _favorite = _zap?.isFavorite ?? _favorite;
     _aspectModeIndex = resolveAspectModeIndex(_zap?.aspectLabel);
+    _aspectPinned = _zap?.aspectPinned ?? false;
     // Live-only, unlike a VOD step: `media_kit`'s `completed` handling and the
     // reconnect banner are properties of a live stream, and there is no VOD
     // equivalent to reset.
@@ -1640,6 +1684,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         'isLive': true,
         'bufferPreset': _bufferPreset.storageName,
         'aspect': kAspectModes[_aspectModeIndex].label,
+        'aspectPinned': _aspectPinned,
+        'globalAspect': playerAspectLabel.value ?? '',
         'canFavorite': _canFavorite,
         'isFavorite': _favorite,
         ..._epgPayload(),
@@ -1668,6 +1714,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         'isLive': stream.isLive,
         'bufferPreset': _bufferPreset.storageName,
         'aspect': kAspectModes[_aspectModeIndex].label,
+        'aspectPinned': _aspectPinned,
+        'globalAspect': playerAspectLabel.value ?? '',
         'canFavorite': false,
         'isFavorite': false,
       });
@@ -2032,6 +2080,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           ? (widget.preferLinuxNative ? 'linux-native-attempt' : 'linux-embedded')
           : 'embedded'} '
       'headers=${_stream.headers.keys.join(',')} '
+      'volume=${playbackAudioSession.applied.toStringAsFixed(0)} '
+      'muted=${playbackAudioSession.muted} '
       'instance=${identityHashCode(this)} adopted=${widget.existingPlayer != null}',
     );
 
@@ -2205,6 +2255,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             // So the native fullscreen player opens on the same mode the rest
             // of the app is in, rather than its own compiled-in default.
             'aspect': kAspectModes[_aspectModeIndex].label,
+            'aspectPinned': _aspectPinned,
+            'globalAspect': playerAspectLabel.value ?? '',
             // Android-only: iOS has no shared-engine adoption to ask for (see
             // docs/ios.md "Known parity gaps" — every AVPlayer open is a fresh
             // resolve, and an `IosSharedEngine` analogue is a deferred idea).
@@ -2600,6 +2652,23 @@ class _PlayerScreenState extends State<PlayerScreen>
       final raw = args is Map ? args['command']?.toString() : null;
       final command = parseZapCommand(raw);
       if (command != null) _handleZapCommand(command);
+    } else if (call.method == 'nativeVolume') {
+      // A mute/level chosen in the native player, reported **live** rather than
+      // only through `nativeClosed`: a backgrounded Activity can be killed, and
+      // the session it never told came back unmuted on the next open.
+      final args = call.arguments;
+      final level = args is Map ? args['volume'] : null;
+      final muted = args is Map ? args['muted'] : null;
+      if (level is num && muted is bool) {
+        playbackAudioSession.recordReported(
+          level: level.toDouble() * 100,
+          muted: muted,
+        );
+        _logPlayback(
+          'audio report live level=${(level.toDouble() * 100).toStringAsFixed(0)} '
+          'muted=$muted',
+        );
+      }
     } else if (call.method == 'nativeAspect') {
       // Android's overlay cycles the aspect itself and used to report it only
       // in RESULT_ASPECT on exit. Every zap payload carries the label from
@@ -2613,6 +2682,28 @@ class _PlayerScreenState extends State<PlayerScreen>
         _aspectModeIndex = index;
         _persistAspectLabel(kAspectModes[index].label);
       }
+    } else if (call.method == 'nativeAspectPin') {
+      // The aspect menu in Android's overlay: pin the chosen mode to this
+      // item. The Activity already applied it; adopt the label and store the
+      // pin so the next open of this channel starts in it.
+      final args = call.arguments;
+      final label = args is Map ? args['label']?.toString() : null;
+      final index = aspectModeIndexOf(label);
+      if (index >= 0) {
+        _aspectPinned = true;
+        _aspectModeIndex = index;
+        if (mounted) setState(() {});
+        _persistAspectPin(label);
+        await _syncNativeControlState();
+      }
+    } else if (call.method == 'nativeAspectGlobal') {
+      // "Use global" from the same menu: drop the pin and fall back to the
+      // device-wide mode, which the Activity was handed in the open payload.
+      _aspectPinned = false;
+      _aspectModeIndex = resolveAspectModeIndex(playerAspectLabel.value);
+      if (mounted) setState(() {});
+      _persistAspectPin(null);
+      await _syncNativeControlState();
     } else if (call.method == 'resolveAgain') {
       // Inbound re-resolve for a native watchdog that owns playback out of
       // process (iOS's presented controller): Stalker `create_link` URLs carry
@@ -2688,6 +2779,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           playbackAudioSession.recordReported(
             level: nativeVolume.toDouble() * 100,
             muted: muted is bool ? muted : nativeVolume <= 0,
+          );
+          _logPlayback(
+            'audio report close level=${(nativeVolume.toDouble() * 100).toStringAsFixed(0)} '
+            'muted=${muted is bool ? muted : nativeVolume <= 0}',
           );
         }
         // The aspect the user left the native overlay in. Persisted the same
@@ -4040,7 +4135,29 @@ class _PlayerScreenState extends State<PlayerScreen>
     // it replaced. (The Linux-native branch is unaffected; it pushes the label
     // over IPC.)
     if (mounted) setState(() {});
-    final mode = kAspectModes[_aspectModeIndex];
+    await _applyAspect(kAspectModes[_aspectModeIndex]);
+    await _syncNativeControlState();
+  }
+
+  /// A long-press menu choice: pin [label] to this item, or null to follow the
+  /// device-wide mode again.
+  Future<void> _pinAspect(String? label) async {
+    if (label == null) {
+      _aspectPinned = false;
+      _aspectModeIndex = resolveAspectModeIndex(playerAspectLabel.value);
+    } else {
+      final index = aspectModeIndexOf(label);
+      if (index < 0) return;
+      _aspectPinned = true;
+      _aspectModeIndex = index;
+    }
+    await widget.onAspectPinned?.call(label, _aspectPinKey);
+    if (mounted) setState(() {});
+    await _applyAspect(kAspectModes[_aspectModeIndex]);
+    await _syncNativeControlState();
+  }
+
+  Future<void> _applyAspect(AspectMode mode) async {
     final platform = _player.platform;
     if (platform is NativePlayer) {
       final properties = <String, String>{
@@ -4059,7 +4176,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }
     _logPlayback('native aspect mode=${mode.label}');
-    await _syncNativeControlState();
   }
 
   // The selected track often reads as the `auto` placeholder (null codec/fps)
@@ -4314,6 +4430,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       channelNumber: _zap?.playing.number,
       sourceName: _sourceName,
       aspectLabel: kAspectModes[_aspectModeIndex].label,
+      aspectPinned: _aspectPinned,
       // Windows fullscreen is a window operation the runner owns; media_kit's
       // own toggle is inert here. See [_toggleFullscreenForCurrentSurface].
       onRequestFullscreen: (Platform.isWindows || Platform.isLinux)
@@ -4340,6 +4457,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       onPlayPause: _togglePlayback,
       onGoLive: _goToLive,
       onCycleAspect: _cycleNativeAspect,
+      onPinAspect: _pinAspect,
       // The compact bar is Flutter-drawn only where the video is Flutter too;
       // the native surface keeps its GDI bar (and this subtree isn't mounted
       // there).

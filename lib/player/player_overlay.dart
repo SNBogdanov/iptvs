@@ -15,6 +15,7 @@ import '../theme.dart';
 import '../widgets/artwork_cache.dart';
 import '../widgets/image_utils.dart';
 import 'clock_format.dart';
+import 'aspect_mode.dart' show kAspectModes;
 import 'playback_audio_session.dart';
 import 'double_tap_action.dart';
 import 'player_chrome_prefs.dart';
@@ -228,6 +229,11 @@ class PlayerVideoSurface extends StatefulWidget {
   /// state it is itself the source of truth for.
   final String aspectLabel;
 
+  /// Whether this item's framing is its own pin rather than the device-wide
+  /// mode. The aspect button draws an accent border when set — the one control
+  /// in the chrome that carries a per-item exception.
+  final bool aspectPinned;
+
   /// How the embedded surface frames the picture for the current aspect mode.
   ///
   /// The embedded path is composited by **Flutter**, not by mpv: `media_kit`'s
@@ -248,6 +254,10 @@ class PlayerVideoSurface extends StatefulWidget {
   final Future<void> Function() onPlayPause;
   final Future<void> Function() onGoLive;
   final Future<void> Function() onCycleAspect;
+
+  /// Long press on the aspect control: pin [label] to this item, or null for
+  /// "Use global".
+  final Future<void> Function(String? label) onPinAspect;
 
   /// Overrides [PlayerVideoSurfaceState.togglePlayerFullscreen] for the
   /// on-screen button and the pointer double-tap.
@@ -317,6 +327,7 @@ class PlayerVideoSurface extends StatefulWidget {
     this.onPreviousEntry,
     this.onNextEntry,
     required this.aspectLabel,
+    this.aspectPinned = false,
     required this.videoFit,
     required this.dynamicRangeLabel,
     required this.onBack,
@@ -324,6 +335,7 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.onPlayPause,
     required this.onGoLive,
     required this.onCycleAspect,
+    required this.onPinAspect,
   });
 
   @override
@@ -438,12 +450,14 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             onPreviousEntry: widget.onPreviousEntry,
             onNextEntry: widget.onNextEntry,
             aspectLabel: widget.aspectLabel,
+            aspectPinned: widget.aspectPinned,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
             onToggleFavorite: widget.onToggleFavorite,
             onPlayPause: widget.onPlayPause,
             onGoLive: widget.onGoLive,
             onCycleAspect: widget.onCycleAspect,
+            onPinAspect: widget.onPinAspect,
             onToggleFullscreen: togglePlayerFullscreen,
             fullscreen: widget.fullscreen,
             miniReturnFullscreen: widget.miniReturnFullscreen,
@@ -593,12 +607,14 @@ class EmbeddedPlayerControls extends StatefulWidget {
     this.onPreviousEntry,
     this.onNextEntry,
     required this.aspectLabel,
+    this.aspectPinned = false,
     required this.dynamicRangeLabel,
     required this.onBack,
     required this.onToggleFavorite,
     required this.onPlayPause,
     required this.onGoLive,
     required this.onCycleAspect,
+    required this.onPinAspect,
     required this.onToggleFullscreen,
     this.miniPlayer = false,
     this.fullscreen = false,
@@ -669,12 +685,19 @@ class EmbeddedPlayerControls extends StatefulWidget {
 
   /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
   final String aspectLabel;
+
+  /// See [PlayerVideoSurface.aspectPinned].
+  final bool aspectPinned;
   final String Function(VideoParams params) dynamicRangeLabel;
   final VoidCallback onBack;
   final VoidCallback onToggleFavorite;
   final Future<void> Function() onPlayPause;
   final Future<void> Function() onGoLive;
   final Future<void> Function() onCycleAspect;
+
+  /// Long press on the aspect button: pin [label] to this item, or null for
+  /// "Use global".
+  final Future<void> Function(String? label) onPinAspect;
 
   /// Enters/exits fullscreen. Injected (rather than calling media_kit's
   /// `toggleFullscreen(context)` inline) so the double-tap and fullscreen-button
@@ -2109,12 +2132,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // here made the only surface that knows the answer the only
                 // one not showing it — with four modes the user cycled blind.
                 if (playerControlsPrefs.value.shows(PlayerControl.aspect))
-                  _textButton(
-                    widget.aspectLabel,
-                    'Cycle aspect ratio',
-                    () => unawaited(widget.onCycleAspect()),
-                    semanticsLabel: 'Aspect ratio, ${widget.aspectLabel}',
-                  ),
+                  _aspectButton(),
                 if (playerControlsPrefs.value.shows(PlayerControl.info))
                   _button(Icons.info_outline, 'Stream information', () {
                     setState(() => _showInfo = !_showInfo);
@@ -3387,15 +3405,65 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// *label is its state*, matching all four native overlays. Keeps the same
   /// chip styling and the same ≥44pt floor (as a *minimum*, so a wider label
   /// like "16:9" grows the chip instead of clipping).
+  Widget _aspectButton() => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    // Short press cycles the device-wide mode (or the pin, when this item has
+    // one); a hold opens the pin menu, the only way a channel gets an
+    // exception to the global mode.
+    onLongPress: () => unawaited(_openAspectMenu()),
+    child: _textButton(
+      widget.aspectLabel,
+      widget.aspectPinned
+          ? 'Pinned for this channel — hold for the menu'
+          : 'Cycle aspect ratio — hold to pin one to this channel',
+      () => unawaited(widget.onCycleAspect()),
+      semanticsLabel: widget.aspectPinned
+          ? 'Aspect ratio, ${widget.aspectLabel}, pinned'
+          : 'Aspect ratio, ${widget.aspectLabel}',
+      active: widget.aspectPinned,
+    ),
+  );
+
+  /// Mode list for the long press: every [kAspectModes] entry, then "Use
+  /// global" to drop this item's pin.
+  Future<void> _openAspectMenu() async {
+    final box = context.findRenderObject();
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (box is! RenderBox || overlay is! RenderBox) return;
+    final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final choice = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        origin.dx,
+        origin.dy,
+        overlay.size.width - origin.dx,
+        overlay.size.height - origin.dy,
+      ),
+      items: <PopupMenuEntry<String>>[
+        for (final mode in kAspectModes)
+          PopupMenuItem<String>(value: mode.label, child: Text(mode.label)),
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(
+          value: '',
+          child: Text('Use global'),
+        ),
+      ],
+    );
+    if (choice == null) return;
+    await widget.onPinAspect(choice.isEmpty ? null : choice);
+  }
+
   Widget _textButton(
     String label,
     String tooltip,
     VoidCallback onPressed, {
     String? semanticsLabel,
+    bool active = false,
   }) => _chrome(
     tooltip: tooltip,
     semanticsLabel: semanticsLabel,
     onPressed: onPressed,
+    active: active,
     child: ConstrainedBox(
       constraints: BoxConstraints(
         minWidth: _m.buttonWidth,
@@ -3410,8 +3478,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
             label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: AppColors.textHi,
+            style: TextStyle(
+              color: active ? AppColors.accent : AppColors.textHi,
               fontSize: 13,
               fontWeight: FontWeight.w600,
             ),

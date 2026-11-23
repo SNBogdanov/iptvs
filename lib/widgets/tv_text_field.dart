@@ -98,6 +98,20 @@ class _TvTextFieldState extends State<TvTextField> {
   }
 
   @override
+  void didUpdateWidget(covariant TvTextField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The mask belongs to the **field**, not to this State's position in a
+    // list. The source editor rebuilds its fields when the kind changes
+    // (Stalker → Xtream), and without this the Username cell inherited the
+    // MAC cell's `_obscured = true`: dots with no show/hide toggle, because
+    // the toggle is drawn from `widget.obscureText` while the text was read
+    // from the stale state.
+    if (widget.obscureText != oldWidget.obscureText) {
+      _obscured = widget.obscureText;
+    }
+  }
+
+  @override
   void dispose() {
     _fieldFocus.removeListener(_onFieldFocusChange);
     if (widget.cellFocusNode == null) {

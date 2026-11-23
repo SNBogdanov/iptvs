@@ -105,6 +105,22 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Changed
 
+- **Xtream's Username field is no longer masked after switching the source type**: the field's mask
+  now follows the field rather than the cell's position in the form (it used to inherit the MAC
+  field's mask, showing dots with no reveal toggle).
+- **A mute or level chosen in the Android player no longer falls off after an engine rebuild or the
+  ExoPlayer→mpv fallback** (a cross-source zap, a buffer-preset change, a stream that needs mpv —
+  the case that read as "mute falls off when I switch source"), and unmuting after such a rebuild
+  restores the audible level rather than 10 %: every engine is seeded from the live state (mpv's own
+  mute flag included), the mute button sets an explicit level, and the mute is reported to the
+  session immediately instead of only on close.
+- **A downward pull from the top edge no longer changes the brightness** while opening the
+  notification shade; that strip belongs to the system.
+- **The aspect mode is device-wide** instead of per source; **holding the aspect button** opens a
+  menu that pins a different mode to the current channel (or "Use global" to drop the pin), and a
+  pinned channel draws the aspect chip in the accent colour with a border. The old per-source value
+  is read only as a fallback, and a pin is stored with the source's settings so it follows the
+  profile.
 - **The guide cache is bounded.** Programmes more than 36 hours back or a week ahead are
   pruned, deleting a source now also deletes its cached channels/guide/catalogue (it used
   to leave them unreachable in the file forever), and the write-ahead log is capped at

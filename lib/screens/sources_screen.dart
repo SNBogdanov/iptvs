@@ -1228,6 +1228,10 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
                 for (final s in _specs(_kind)) ...[
                   const SizedBox(height: 16),
                   TvTextField(
+                    // Keyed by field: switching the kind must not hand one
+                    // field's state (its mask, its edit mode) to the next one
+                    // sitting at the same position.
+                    key: ValueKey('source-field-${s.key}'),
                     controller: _controller(s.key),
                     label: s.label,
                     hintText: s.hint ?? '',

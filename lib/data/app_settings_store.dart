@@ -159,6 +159,25 @@ class AppSettingsStore {
       ? _storage.delete(key: _kVolumeSwipeOnLeft)
       : _storage.write(key: _kVolumeSwipeOnLeft, value: 'false');
 
+  /// The device-wide player aspect mode (`Fit`/`Fill`/`Stretch`/`16:9`/`4:3`).
+  ///
+  /// **One choice for the whole device**, unlike the buffer preset: a wrong
+  /// framing is about the screen and the viewer, not the provider, so opening a
+  /// second source should not re-frame the picture. A channel that genuinely
+  /// needs a different one carries a pin in its source's settings
+  /// (`SourceConfig.aspectPins`), set by holding the aspect button.
+  ///
+  /// Absent means "never chosen" and falls back to the platform default
+  /// (`defaultAspectModeIndex`).
+  static const _kAspectMode = 'app_player_aspect_mode';
+
+  Future<String?> playerAspectMode() async => _storage.read(key: _kAspectMode);
+
+  Future<void> setPlayerAspectMode(String? label) =>
+      (label == null || label.isEmpty)
+      ? _storage.delete(key: _kAspectMode)
+      : _storage.write(key: _kAspectMode, value: label);
+
   /// Per content kind, whether its **stream** is opened through the configured
   /// proxy (Settings → Proxy, "Streams: Live / Movies / Series").
   ///

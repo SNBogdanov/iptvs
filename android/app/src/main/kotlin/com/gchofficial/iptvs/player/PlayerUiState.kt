@@ -24,7 +24,7 @@ data class EpgEntry(
 }
 
 /** Which list-menu, if any, is currently open. Mirrors the Windows single-menu model. */
-enum class PlayerMenu { None, Audio, Subtitles, Speed }
+enum class PlayerMenu { None, Audio, Subtitles, Speed, Aspect }
 
 /**
  * Aspect/zoom modes, cycled by the aspect button — the same set, in the same
@@ -225,6 +225,13 @@ class PlayerUiState(
     // `.fill`). Crops to fill rather than letterboxing — identical to Fit
     // whenever the picture and the screen share a shape, which is most viewing.
     var aspect by mutableStateOf(AspectMode.Fill)
+
+    /**
+     * Whether [aspect] is this channel's own pin (from the long-press menu)
+     * rather than the device-wide mode. Drives the menu's checkmark: a pinned
+     * channel checks its mode, an unpinned one checks "Use global".
+     */
+    var aspectPinned by mutableStateOf(false)
 
     // Live-edge sync: true while at the live edge, false once the user has paused
     // (and thus fallen behind). Drives the grey LIVE badge + the go-to-live button.

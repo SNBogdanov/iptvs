@@ -50,6 +50,16 @@ final ValueNotifier<int> seekStepSeconds =
 /// it describes the hand, not the catalogue.
 final ValueNotifier<bool> volumeSwipeOnLeft = ValueNotifier<bool>(true);
 
+/// The device-wide aspect mode, as an [AspectMode.label], or null when the user
+/// has never chosen one (the player then picks a platform default).
+///
+/// A notifier for the same reason as the others: a choice made in one player
+/// applies to the next, synchronously, without re-reading the keychain, and the
+/// Settings-independent nature of it (no tile) makes this the only channel.
+/// `lib/player/aspect_mode.dart` owns the label vocabulary; this stays a string
+/// so `lib/data/` keeps no dependency on the player package.
+final ValueNotifier<String?> playerAspectLabel = ValueNotifier<String?>(null);
+
 /// Reads the persisted preferences into the notifiers, so the chrome reflects
 /// the saved values from the first frame.
 ///
@@ -66,4 +76,5 @@ Future<void> loadPlayerChromePrefs({AppSettingsStore? store}) async {
   showChannelName.value = await settings.showChannelName();
   seekStepSeconds.value = await settings.seekStepSeconds();
   volumeSwipeOnLeft.value = await settings.playerVolumeSwipeOnLeft();
+  playerAspectLabel.value = await settings.playerAspectMode();
 }

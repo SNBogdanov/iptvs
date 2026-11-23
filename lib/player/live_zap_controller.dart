@@ -94,11 +94,13 @@ abstract class ZapCatalog {
   bool isFavorite(ZapEntry entry);
   Future<void> setFavorite(ZapEntry entry, bool value);
 
-  /// The stored aspect-mode label of [entry]'s owning source, and the sink for
-  /// a change made in the player. Per owning source, so a cross-source
-  /// favourite's framing is stored against its own provider.
+  /// The aspect framing of [entry]: its own pin when it has one, else the
+  /// device-wide mode. [persistAspect] writes the global choice;
+  /// [persistAspectPin] writes (or clears, with null) the channel's pin.
   String? aspectLabelFor(ZapEntry entry);
+  bool aspectPinnedFor(ZapEntry entry);
   Future<void> persistAspect(ZapEntry entry, String label);
+  Future<void> persistAspectPin(ZapEntry entry, String? label);
 
   /// The buffering preset of [entry]'s owning source.
   BufferPreset bufferPresetFor(ZapEntry entry);
@@ -483,11 +485,14 @@ class LiveZapController extends ChangeNotifier {
   ({Programme? now, Programme? next}) get cursorEpg => catalog.epgFor(current);
   bool get isFavorite => catalog.isFavorite(playing);
   String? get aspectLabel => catalog.aspectLabelFor(playing);
+  bool get aspectPinned => catalog.aspectPinnedFor(playing);
   BufferPreset get bufferPreset => catalog.bufferPresetFor(playing);
 
   Future<void> setFavorite(bool value) => catalog.setFavorite(playing, value);
   Future<void> persistAspect(String label) =>
       catalog.persistAspect(playing, label);
+  Future<void> persistAspectPin(String? label) =>
+      catalog.persistAspectPin(playing, label);
 
   /// Banner payload for the native surfaces (`setZapBanner`). Carries the
   /// **cursor's** channel, not the playing one, because the banner is what

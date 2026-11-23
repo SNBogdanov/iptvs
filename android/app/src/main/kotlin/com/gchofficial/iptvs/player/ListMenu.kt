@@ -107,6 +107,20 @@ fun BoxScope.PlayerMenusLayer(
             selectedId = speedId(state.speed)
             onSelect = { id -> id.toFloatOrNull()?.let { callbacks.onSetSpeed(it) } }
         }
+        PlayerMenu.Aspect -> {
+            // The same panel as the track menus: one row per mode plus "Use
+            // global", which clears this channel's pin. A Material
+            // `DropdownMenu` here drew the only white surface in the player.
+            header = "Aspect ratio"
+            options = buildList {
+                AspectMode.entries.forEach { add(TrackOption(it.label, it.label)) }
+                add(TrackOption(ASPECT_GLOBAL, "Use global"))
+            }
+            selectedId = if (state.aspectPinned) state.aspect.label else ASPECT_GLOBAL
+            onSelect = { id ->
+                callbacks.onPinAspect(if (id == ASPECT_GLOBAL) null else id)
+            }
+        }
         PlayerMenu.None -> return
     }
 
@@ -224,6 +238,9 @@ private fun MenuRow(
 }
 
 private fun speedId(value: Float): String = value.toString()
+
+/** Sentinel row id for the aspect menu's "Use global" entry. */
+private const val ASPECT_GLOBAL = "__global__"
 
 private fun speedOptionLabel(value: Float): String =
     if (value == value.toLong().toFloat()) "${value.toLong()}×" else "${value}×"

@@ -168,7 +168,11 @@ class HdrPlayerActivity : ComponentActivity() {
      * wins for the rest of the session; Dart still receives it through
      * `reportAspect` on each cycle and through RESULT_ASPECT on exit.
      */
-    private var aspectChosenLocally = false
+    /** Whether the framing shown is this channel's pin (set from the menu). */
+    private var aspectPinned = false
+
+    /** The device-wide mode, applied by the menu's "Use global". */
+    private var globalAspectLabel: String = AspectMode.Fill.label
 
     // When Dart last reported a zap resolve in flight (`setZapBanner`'s
     // `settling`). While one is, the reconnect watchdog stands down: the
@@ -505,6 +509,13 @@ class HdrPlayerActivity : ComponentActivity() {
         AspectMode.entries
             .firstOrNull { it.label == intent.getStringExtra(EXTRA_ASPECT) }
             ?.let { uiState.aspect = it }
+        // Whether that mode is this channel's own pin or the device-wide choice,
+        // and what the global mode is (the menu's "Use global" applies it).
+        aspectPinned = intent.getBooleanExtra(EXTRA_ASPECT_PINNED, false)
+        uiState.aspectPinned = aspectPinned
+        globalAspectLabel =
+            intent.getStringExtra(EXTRA_GLOBAL_ASPECT)?.takeIf { it.isNotBlank() }
+                ?: AspectMode.Fill.label
         uiState.canFavorite = intent.getBooleanExtra(EXTRA_CAN_FAVORITE, false)
         uiState.isFavorite = intent.getBooleanExtra(EXTRA_IS_FAVORITE, false)
         // Whether a LiveZapController exists behind this route. Set here (not
@@ -545,8 +556,13 @@ class HdrPlayerActivity : ComponentActivity() {
         // close result can report it with RESULT_MUTED and unmuting restores
         // that level rather than full volume.
         uiState.audibleVolume = initialAudibleVolume
+        // Seed the **live** state as well, not just the engine: a rebuilt engine
+        // (`startWithExoPlayer` after a cross-source zap or a fallback) reads
+        // `currentVolume()` from here, and a preview-adopted state starts at the
+        // preview's deliberate zero.
+        uiState.volume = initialVolume
+        uiState.muted = initialMuted
         if (initialMuted) {
-          uiState.muted = true
           // A mute restored from the previous session counts as the **button's**:
           // the user silenced the player deliberately, and the volume swipe must
           // not override that any more than it overrides a press made a second
@@ -555,6 +571,10 @@ class HdrPlayerActivity : ComponentActivity() {
           // which made the restored mute look broken.
           uiState.mutedByButton = true
         }
+        logNative(
+            "audio seed volume=$initialVolume muted=$initialMuted " +
+                "audible=$initialAudibleVolume",
+        )
 
         if (shared != null) {
             val sharedEngine = shared.first
@@ -633,7 +653,25 @@ class HdrPlayerActivity : ComponentActivity() {
     private val initialMuted: Boolean
         get() = intent.getBooleanExtra(EXTRA_MUTED, initialVolume <= 0f)
 
+    /**
+     * The level a freshly built engine must start at: the **live** session
+     * state, not the launch Intent.
+     *
+     * A rebuild (a cross-source zap changing the data source or the buffer
+     * preset, an engine fallback) used to seed itself from [initialVolume] and
+     * so silently undid a mute or a level change made since the player opened —
+     * "mute periodically falls off" with no user action to explain it.
+     */
+    private fun currentVolume(): Float = if (uiState.muted) 0f else uiState.volume
+
     private fun startWithExoPlayer() {
+        // Read the session's intent **before** constructing the engine: its
+        // `init` writes `state.volume = player.volume` (a fresh ExoPlayer is at
+        // 1f) and `state.muted = false`, so reading `currentVolume()` afterwards
+        // would seed the engine with the value it just clobbered — the exact
+        // "mute is off when I reopen" the audio log caught (`audio seed
+        // muted=true` followed by `exo seed muted=false`).
+        val seedVolume = currentVolume()
         val exo = ExoPlayerEngine(
             context = this,
             state = uiState,
@@ -651,9 +689,11 @@ class HdrPlayerActivity : ComponentActivity() {
         exo.onDiagnostic = diagnosticSink
         setEngine(exo)
         exo.load(url, subtitles)
-        // Fresh engines open at their own default 1f — apply the session volume
-        // (see EXTRA_VOLUME) so a muted/lowered session survives the open.
-        exo.setVolume(initialVolume)
+        // Fresh engines open at their own default 1f — apply the **live**
+        // session volume (the launch value on a cold open, the mute/level
+        // chosen since on a zap rebuild).
+        exo.setVolume(seedVolume)
+        logNative("exo seed volume=$seedVolume muted=${uiState.muted}")
     }
 
     /** One-way fallback: ExoPlayer couldn't decode the video → switch to libmpv. */
@@ -681,6 +721,11 @@ class HdrPlayerActivity : ComponentActivity() {
 
     /** Builds and loads an [MpvEngine] with the session's current locator. */
     private fun startWithMpv() {
+        // Same ordering rule as [startWithExoPlayer]: read the intent before the
+        // engine exists, because creating it resets the shared state to mpv's
+        // defaults (unmuted, volume 100).
+        val seedVolume = currentVolume()
+        val seedMuted = uiState.muted
         val mpv = MpvEngine(
             context = this,
             state = uiState,
@@ -691,6 +736,14 @@ class HdrPlayerActivity : ComponentActivity() {
             httpProxy = streamRoute?.mpvUrl,
         )
         setEngine(mpv)
+        // mpv starts at its own default (unmuted, volume 100) and its first
+        // property events would overwrite the session state with that — the
+        // ExoPlayer→mpv fallback used to un-mute a muted session, which is what
+        // "mute falls off when I switch source" was: the other source's streams
+        // are the ones that fall back. Seed both the level and the flag.
+        mpv.setVolume(seedVolume)
+        mpv.setMuted(seedMuted)
+        logNative("mpv seed volume=$seedVolume muted=$seedMuted")
         mpv.load(url, subtitles)
     }
 
@@ -1084,16 +1137,21 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState.epgNext = epgFromMap(args, "epgNextTitle", "epgNextStartMs", "epgNextStopMs", null)
         uiState.canFavorite = args["canFavorite"] as? Boolean ?: false
         uiState.isFavorite = args["isFavorite"] as? Boolean ?: false
-        // The payload's `aspect` is the framing Dart knew about at *launch*.
-        // Once the viewer cycles the framing in this session, their choice
-        // outranks it — otherwise every channel change re-applied the launch
-        // value and the picture snapped back ("масштаб слетает при переключении
-        // каналов"). Dart still learns the final choice through RESULT_ASPECT
-        // and through `reportAspect` on each cycle.
-        if (!aspectChosenLocally) {
-            (args["aspect"] as? String)?.let { label ->
-                AspectMode.entries.firstOrNull { it.label == label }?.let { uiState.aspect = it }
-            }
+        // The payload's framing belongs to the **channel**, not to the launch:
+        // it is its own pin or the device-wide mode, rebuilt by Dart from the
+        // zap catalog on every settle. It used to be skipped once the viewer
+        // had cycled the aspect in this session (`aspectChosenLocally`), which
+        // meant unpinning on one channel and zapping back to a pinned one
+        // rendered the pinned channel in the previous channel's mode — with the
+        // chip showing no pin either, because the same gate skipped
+        // `aspectPinned`.
+        (args["aspect"] as? String)?.let { label ->
+            AspectMode.entries.firstOrNull { it.label == label }?.let { uiState.aspect = it }
+        }
+        aspectPinned = args["aspectPinned"] as? Boolean ?: false
+        uiState.aspectPinned = aspectPinned
+        (args["globalAspect"] as? String)?.takeIf { it.isNotBlank() }?.let {
+            globalAspectLabel = it
         }
         uiState.digitBuffer = ""
         zapDigitsPendingOptimistic = false
@@ -1233,8 +1291,19 @@ class HdrPlayerActivity : ComponentActivity() {
             // zero volume as "muted" either way — and a swipe must never mute
             // (nor get stuck behind a mute it did not cause).
             val willMute = !uiState.muted && uiState.volume > 0f
-            engine?.toggleMute()
+            // An explicit level, not `engine.toggleMute()`: each engine keeps
+            // its own `volumeBeforeMute`, so after a rebuild unmuting restored
+            // its built-in floor (10 %) instead of the user's audible level.
+            val level = if (willMute) 0f else uiState.audibleVolume
+            engine?.setVolume(level)
             uiState.mutedByButton = willMute
+            logNative("mute button muted=$willMute level=$level audible=${uiState.audibleVolume}")
+            // Tell Dart now, not only on close: a backgrounded player can be
+            // killed, and a mute it never heard about came back as sound on the
+            // next open. The **audible** level rides along even while muted
+            // (same contract as RESULT_VOLUME), so unmuting later restores the
+            // user's level rather than the session's zero.
+            MainActivity.instance?.get()?.reportVolume(uiState.audibleVolume, willMute)
         },
         onSetBrightness = { value -> setWindowBrightness(value) },
         onSelectAudio = { engine?.selectAudio(it) },
@@ -1242,7 +1311,6 @@ class HdrPlayerActivity : ComponentActivity() {
         onSetSpeed = { engine?.setSpeed(it) },
         onCycleAspect = {
             uiState.aspect = AspectMode.entries[(uiState.aspect.ordinal + 1) % AspectMode.entries.size]
-            aspectChosenLocally = true
             engine?.applyAspect(uiState.aspect)
             // Tell Dart. It owns the label sequence that every zap payload
             // carries (`kAspectModes`), and it only ever learned this choice
@@ -1251,6 +1319,7 @@ class HdrPlayerActivity : ComponentActivity() {
             // channel change.
             MainActivity.instance?.get()?.reportAspect(uiState.aspect.label)
         },
+        onPinAspect = { label -> pinAspect(label) },
         // Live streams are typically non-seekable, so "go to live" reloads the
         // source — reconnecting drops the buffer and resumes at the live edge.
         // Re-resolves first, through the same single-flight gate the reconnect
@@ -1433,6 +1502,29 @@ class HdrPlayerActivity : ComponentActivity() {
         if (!uiState.catchingUp && uiState.speed == 1f) return
         uiState.catchingUp = false
         engine?.setSpeed(1f)
+    }
+
+    /**
+     * The long-press aspect menu: pin [label] to **this** channel, or apply the
+     * device-wide mode when null ("Use global").
+     */
+    private fun pinAspect(label: String?) {
+        val mode = if (label == null) {
+            AspectMode.entries.firstOrNull { it.label == globalAspectLabel }
+                ?: AspectMode.Fill
+        } else {
+            AspectMode.entries.firstOrNull { it.label == label } ?: return
+        }
+        aspectPinned = label != null
+        uiState.aspectPinned = aspectPinned
+        uiState.aspect = mode
+        engine?.applyAspect(mode)
+        val main = MainActivity.instance?.get()
+        if (aspectPinned) {
+            main?.reportAspectPin(mode.label)
+        } else {
+            main?.reportAspectGlobal()
+        }
     }
 
     /**
@@ -1656,6 +1748,10 @@ class HdrPlayerActivity : ComponentActivity() {
                 else uiState.volume,
             )
             result.putExtra(RESULT_MUTED, uiState.muted)
+            logNative(
+                "audio result volume=${if (uiState.muted || uiState.volume <= 0f) uiState.audibleVolume else uiState.volume} " +
+                    "muted=${uiState.muted} stateVolume=${uiState.volume}",
+            )
             hasResult = true
             if (hasResult) setResult(RESULT_OK, result)
         }
@@ -1881,6 +1977,12 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_ADOPT_SHARED = "adopt_shared"
         const val EXTRA_BUFFER_PRESET = "buffer_preset"
         const val EXTRA_ASPECT = "aspect"
+
+  /** Whether [EXTRA_ASPECT] is this channel's own pin, not the global mode. */
+  const val EXTRA_ASPECT_PINNED = "aspectPinned"
+
+  /** The device-wide aspect label, for the long-press menu's "Use global". */
+  const val EXTRA_GLOBAL_ASPECT = "globalAspect"
 
         /**
          * Session-wide start volume (0..1) — the Dart [PlaybackAudioSession]

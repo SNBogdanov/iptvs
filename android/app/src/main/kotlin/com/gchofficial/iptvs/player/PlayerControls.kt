@@ -78,6 +78,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -118,6 +119,8 @@ class PlayerCallbacks(
     val onSelectSubtitle: (String) -> Unit,
     val onSetSpeed: (Float) -> Unit,
     val onCycleAspect: () -> Unit,
+    /** Long-press aspect menu: pin [label] to this channel, or null for global. */
+    val onPinAspect: (String?) -> Unit,
     val onGoLive: () -> Unit,
     /**
      * "Go to live" held down: resume if paused and play at double speed until
@@ -216,6 +219,15 @@ fun PlayerScreen(
         }
     }
 
+    // The system reserves the strip along the very top for the notification
+    // shade even while the status bar is hidden (immersive), and the window
+    // still delivers those moves here: a shade pull used to open the shade and
+    // change the brightness at the same time. A gesture that *starts* in this
+    // strip is left completely untouched. 40 dp rather than the status-bar
+    // inset, because in immersive mode the inset reads as 0 while the shade
+    // gesture area is still there.
+    val topShadeEdgePx = with(LocalDensity.current) { 40.dp.toPx() }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -289,6 +301,13 @@ fun PlayerScreen(
                         // untouched from the moment it passes the slop.
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
+                            // A pull from the status-bar strip is the system's
+                            // notification shade. The player must not read it as
+                            // a level change, or the shade opens *and* the
+                            // brightness moves under it.
+                            if (down.position.y < topShadeEdgePx) {
+                                return@awaitEachGesture
+                            }
                             target = SwipeSides.targetFor(
                                 down.position.x,
                                 size.width.toFloat(),
@@ -1146,9 +1165,20 @@ private fun RightCluster(
         if (!spread) Spacer(Modifier.width(8.dp))
     }
     if (state.showsAspect) {
-        TextControlButton(state.aspect.label, "Aspect ratio") {
-            onInteract(); callbacks.onCycleAspect()
-        }
+        // Short press cycles; a hold opens the same dark list-menu as the
+        // track/speed menus (`PlayerMenusLayer`), not a Material DropdownMenu —
+        // that one rendered on the default white surface, which is the one
+        // white panel in the whole player.
+        TextControlButton(
+            label = state.aspect.label,
+            contentDescription = "Aspect ratio, hold to pin this channel",
+            active = state.aspectPinned,
+            onHoldStart = {
+                onInteract()
+                state.openMenu = PlayerMenu.Aspect
+            },
+            onClick = { onInteract(); callbacks.onCycleAspect() },
+        )
         if (!spread) Spacer(Modifier.width(8.dp))
     }
     // Orientation: follow the device, or pin landscape with the **sensor**
@@ -1320,6 +1350,9 @@ fun TextControlButton(
     contentDescription: String,
     modifier: Modifier = Modifier,
     onFocusChanged: ((Boolean) -> Unit)? = null,
+    // Non-default state this control carries (a per-channel aspect pin): the
+    // label turns accent and the chip gains an accent border.
+    active: Boolean = false,
     onHoldStart: (() -> Unit)? = null,
     onHoldEnd: (() -> Unit)? = null,
     onClick: () -> Unit,
@@ -1370,6 +1403,20 @@ fun TextControlButton(
             .height(PlayerDimens.ButtonSize)
             .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
             .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
+            // A pinned aspect is the one control carrying a non-default,
+            // per-item choice: the accent border is how the viewer sees that
+            // *this* channel is framed differently from the global mode.
+            .then(
+                if (active) {
+                    Modifier.border(
+                        1.dp,
+                        PlayerColors.Accent,
+                        RoundedCornerShape(PlayerDimens.ButtonCorner),
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 onFocusChanged?.invoke(it.isFocused)
@@ -1379,7 +1426,7 @@ fun TextControlButton(
     ) {
         Text(
             text = label,
-            color = PlayerColors.TextHi,
+            color = if (active) PlayerColors.Accent else PlayerColors.TextHi,
             fontFamily = InterFontFamily,
             fontWeight = FontWeight.SemiBold,
             fontSize = 14.sp,

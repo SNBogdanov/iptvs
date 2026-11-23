@@ -156,6 +156,17 @@ class MpvController(
     fun setVolume(value: Float) {
         mpv?.setPropertyInt("volume", (value.coerceIn(0f, 1f) * 100).toInt())
     }
+    /**
+     * Sets mpv's own `mute` flag, not just a zero volume.
+     *
+     * The flag is what the observer reports back as `state.muted`, so a session
+     * that opens muted has to set it: mpv's default is unmuted at volume 100,
+     * and the first property event would otherwise overwrite the seeded state
+     * with "audible" — the ExoPlayer→mpv fallback used to un-mute the player.
+     */
+    fun setMuted(value: Boolean) {
+        mpv?.setPropertyBoolean("mute", value)
+    }
     fun toggleMute() = mpv?.command(arrayOf("cycle", "mute")) ?: Unit
     fun setSpeed(value: Float) = mpv?.setPropertyDouble("speed", value.toDouble()) ?: Unit
 

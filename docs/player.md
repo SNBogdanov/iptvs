@@ -148,12 +148,13 @@ never disagree, and `RESULT_FAVORITE` stays as the one report guaranteed to surv
 applies either through the same `FavoritesController.toggle` the channel list uses, so an in-player
 toggle shows up in the list on return.
 
-**An aspect chosen in the player outranks every later zap payload.** Each `zapTo` carries the
-`aspect` Dart held at *launch*, so re-applying it on a channel change reverted a framing the viewer
-picked after the player opened — the reported "the zoom keeps resetting when I change channels".
-`HdrPlayerActivity.aspectChosenLocally` flips on the aspect chip's cycle and makes the local value
-win for the rest of the session; Dart is kept in step by `reportAspect` (`nativeAspect`, each cycle)
-and by RESULT_ASPECT at exit. The embedded media_kit overlay carries the same star,
+**An aspect chosen in the player is the channel's state, and every zap payload carries it.** Each
+`zapTo` re-states the framing of the channel it is moving to — its own pin or the device-wide mode,
+rebuilt by Dart from `ZapCatalog.aspectLabelFor`/`aspectPinnedFor` on every settle — so the Activity
+applies the payload unconditionally. It used to keep the locally cycled value for the rest of the
+session (`aspectChosenLocally`), which meant unpinning on one channel and zapping back to a pinned
+one rendered the pinned channel in the previous channel's mode. Dart is kept in step by
+`reportAspect` (`nativeAspect`, each cycle) and by RESULT_ASPECT at exit. The embedded media_kit overlay carries the same star,
 toggling the store directly. **Every surface draws it in the same slot** — the control row,
 immediately right of "Go to live" — at that row's ordinary button size: Kotlin `RightCluster`,
 iOS `clusterStack`, the Windows GDI `BottomLayout::favorite`, the shared Flutter `cluster`, and the
@@ -582,6 +583,33 @@ is what prompted a user to write in asking for "stretch to allow full-screen vie
 `_aspectModes`, which meant the Kotlin and Swift copies were pinned by their own tests and the
 Dart one — the original — was not. It is now `lib/player/aspect_mode.dart`, and
 `test/aspect_mode_test.dart` covers it.
+
+**The mode is device-wide, and a channel can be pinned.** The choice used to live in the owning
+source's settings, so opening a second provider re-framed the picture for no reason the viewer
+could see — and because the channel list kept its own immutable `SourceConfig` snapshot, a change
+made in the player was not even seen by the next open until the app restarted ("it keeps resetting
+to Stretch"). Now:
+
+- `AppSettingsStore.playerAspectMode()` holds one label for the whole device
+  (`playerAspectLabel` is the synchronous mirror the routes read); a short press on the aspect
+  button cycles it and saves it there.
+- **Holding** the aspect button opens a menu with every mode plus **"Use global"**. Choosing a
+  mode stores a **pin for that item** — a channel id, or a media item id for VOD — in the owning
+  source's `settings['aspectPins']`, so it rides the existing cloud row; "Use global" clears it.
+  The pin key is the item id, not the channel number a provider may reuse.
+- Cycling on a pinned channel moves **its pin**, not the global mode: the button has to change the
+  picture the viewer is looking at. Zapping to a channel resolves pin → global through
+  `ZapCatalog.aspectLabelFor`/`aspectPinnedFor`, so the framing follows the channel.
+- **A pinned channel shows it on the control**: the aspect chip is drawn with the accent border and
+  accent label (Flutter `_textButton(active:)`, Compose `TextControlButton(active = …)`), so the
+  viewer can tell whose framing is an exception without opening the menu. The menu's checkmark
+  follows the same state — the current mode when pinned, "Use global" when not.
+- The menu exists in the Flutter overlay (`_aspectButton` long press) and in Android's native
+  Compose overlay (`PlayerMenu.Aspect` in `ListMenu.kt`, the same dark panel as the track/speed
+  menus — a Material `DropdownMenu` drew the only white surface in the player). The Windows **GDI**
+  overlay and the iOS native controller cycle only — their long press/right click is not wired yet,
+  so on those surfaces a pin has to be set from a Flutter surface (or, on Windows, the embedded
+  one).
 
 **The default is chosen by the shape of the container, not by taste.** `defaultAspectModeIndex()`
 returns **Fill on a television**, **Fit on a desktop**, and on a **handset or tablet** whichever
@@ -1825,6 +1853,13 @@ horizontal swipe with a few pixels of wobble raised the volume. A mostly-horizon
 unconsumed from the moment it passes the slop, so the system's own edge gestures and the tap layer
 still see it.
 
+**A gesture that starts in the top 40 dp belongs to the system.** That strip is the notification
+shade's pull area even while the status bar is hidden (immersive), and the window still delivers the
+moves to the player: a shade pull opened the shade *and* changed the brightness underneath it. The
+detector now returns before claiming anything when `awaitFirstDown` lands inside that strip, so the
+shade opens alone. A fixed 40 dp rather than `WindowInsets.statusBars` on purpose — in immersive mode
+the inset reports 0 while the gesture area is still reserved.
+
 Volume writes through the same `onSetVolume` the slider uses, so the bar and the panel can never
 disagree. Brightness writes `WindowManager.LayoutParams.screenBrightness` on the player's **own
 window**: the system brightness and every other app keep the value the user set, and the override
@@ -3039,6 +3074,32 @@ is not replayed to late subscribers, so the **by-design**-muted preview engine (
 before the listener attaches, never emitted) cannot poison a session that must instead reflect the
 user's choices. On Android the adopted native Activity opens with `EXTRA_VOLUME` and reports its
 final level back so the session survives the whole native round-trip.
+
+**Two Android-specific losses this section used to have, both now closed.** A **rebuilt** engine (a
+cross-source zap that changes the data source, a buffer-preset change, an ExoPlayer→mpv fallback)
+seeded its volume from the launch Intent (`initialVolume`) instead of the live state, so a mute or
+level chosen after the player opened silently came back at the launch level — the "mute periodically
+falls off" report. `HdrPlayerActivity.currentVolume()` now reads `uiState` (`muted → 0`, else
+`volume`), and the state is seeded from the Intent on open. The mute **button** also sets an explicit
+level rather than `engine.toggleMute()`: every engine instance carries its own `volumeBeforeMute`, so
+unmuting right after a rebuild restored that instance's built-in floor (10 %) instead of the
+session's audible level. And the Activity now reports the mute **live** (`nativeVolume`, the same
+payload as `RESULT_VOLUME`/`RESULT_MUTED`) instead of only on close, so a backgrounded player that the
+OS kills cannot come back loud.
+
+**The mpv fallback is the third place a mute used to die.** `MpvEngine` starts mpv at its own default
+(unmuted, volume 100) and the first `volume`/`mute` property events overwrote the seeded state with
+that — so a session that fell back from ExoPlayer (the streams that need it are exactly the ones on
+the *other* source, which is why the report read "mute falls off when I switch source") came back
+audible. `startWithMpv` now seeds `setVolume(currentVolume())` **and** `setMuted(uiState.muted)`
+(`MpvController.setMuted`, mpv's own flag — a zero volume alone would still be reported as unmuted).
+
+**And the seed must be read *before* the engine is constructed.** Both engines' constructors write
+the shared state back to their own defaults (`ExoPlayerEngine.init`: `state.volume = player.volume`,
+`state.muted = player.volume == 0f`; a fresh ExoPlayer is at 1f), so `currentVolume()` called after
+construction returned the value the engine had just clobbered — the audio log caught it as
+`audio seed muted=true` immediately followed by `exo seed muted=false`. `startWithExoPlayer` and
+`startWithMpv` therefore capture `seedVolume`/`seedMuted` first and apply those after `load`.
 
 ## Live preview + seamless handoff (Android)
 

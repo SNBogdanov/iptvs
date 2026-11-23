@@ -30,6 +30,7 @@ import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
 import '../player/aspect_mode.dart' show aspectModeIndexOf;
 import '../player/buffer_preset.dart';
+import '../player/player_chrome_prefs.dart';
 import '../player/channel_dwell.dart';
 import '../player/live_zap_controller.dart';
 import '../player/zap_quick_list.dart';
@@ -1039,12 +1040,66 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// A label this build doesn't know is dropped rather than stored: it could
   /// only come from a newer build, and persisting it would keep handing this
   /// one a mode it cannot select.
-  Future<void> _persistAspectMode(SourceConfig owner, String label) async {
-    if (aspectModeIndexOf(label) < 0) return;
-    if (owner.aspectModeLabel == label) return;
+  /// Per-item aspect pins chosen this session, keyed by source id then item id
+  /// (a channel id, or a media item id for VOD).
+  ///
+  /// The [SourceConfig] objects this screen plays from are immutable and never
+  /// reloaded, so without this overlay the next open — and every zap, which
+  /// re-reads `aspectLabelFor` — would be handed the **previous** label until
+  /// the app restarted. That is exactly the "it keeps resetting to Stretch"
+  /// report.
+  final Map<String, Map<String, String>> _aspectPins = {};
+
+  /// The pin for [itemKey], this session's choice first, then the stored one.
+  String? _aspectPinFor(SourceConfig config, String itemKey) =>
+      _aspectPins[config.id]?[itemKey] ?? config.aspectPinFor(itemKey);
+
+  /// Whether [itemKey] is framed by its own pin rather than the global mode.
+  bool _aspectPinnedFor(SourceConfig config, String itemKey) =>
+      _aspectPinFor(config, itemKey) != null;
+
+  /// The label to open [itemKey] with: its pin, else the device-wide mode
+  /// (null, "never chosen", lets the player pick the platform default).
+  String? _aspectLabelFor(SourceConfig config, String itemKey) =>
+      _aspectPinFor(config, itemKey) ?? playerAspectLabel.value;
+
+  /// Saves the device-wide mode chosen by a short press.
+  void _persistGlobalAspect(String label) {
+    playerAspectLabel.value = label;
+    unawaited(const AppSettingsStore().setPlayerAspectMode(label));
+  }
+
+  /// Pins [label] to [itemKey] in [owner]'s settings, or clears the pin when
+  /// null ("Use global").
+  ///
+  /// Saved against the *stored* config rather than [owner]: that object can be
+  /// as old as this screen, and writing it back would undo a setting changed
+  /// elsewhere since (the buffer preset, the dwell time).
+  Future<void> _persistAspectPin(
+    SourceConfig owner,
+    String itemKey,
+    String? label,
+  ) async {
+    if (label != null && aspectModeIndexOf(label) < 0) return;
+    final pins = _aspectPins.putIfAbsent(owner.id, () => <String, String>{});
+    if (label == null) {
+      pins.remove(itemKey);
+    } else {
+      pins[itemKey] = label;
+    }
+    if (pins.isEmpty) _aspectPins.remove(owner.id);
+
+    SourceConfig? fresh;
+    for (final config in await widget.store.list()) {
+      if (config.id == owner.id) {
+        fresh = config;
+        break;
+      }
+    }
+    if (fresh == null) return;
     await widget.store.save(
-      owner.copyWith(
-        settings: <String, dynamic>{...owner.settings, 'aspectMode': label},
+      fresh.copyWith(
+        settings: fresh.settingsWithAspectPin(itemKey, label),
       ),
     );
   }
@@ -2543,9 +2598,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               sourceName: repo.source.name,
               zap: zap,
               bufferPreset: _bufferPresetForChannel(channel),
-              initialAspectLabel: _configForChannel(channel).aspectModeLabel,
-              onAspectChanged: (label) => unawaited(
-                _persistAspectMode(_configForChannel(channel), label),
+              initialAspectLabel: _aspectLabelFor(
+                _configForChannel(channel),
+                channel.id,
+              ),
+              initialAspectPinned: _aspectPinnedFor(
+                _configForChannel(channel),
+                channel.id,
+              ),
+              onAspectChanged: _persistGlobalAspect,
+              onAspectPinned: (label, _) => _persistAspectPin(
+                _configForChannel(channel),
+                channel.id,
+                label,
               ),
               epgNow: epg.now,
               epgNext: epg.next,
@@ -2823,9 +2888,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // initial values.
         zap: zap,
         bufferPreset: _bufferPresetForChannel(channel),
-        initialAspectLabel: _configForChannel(channel).aspectModeLabel,
-        onAspectChanged: (label) =>
-            unawaited(_persistAspectMode(_configForChannel(channel), label)),
+        initialAspectLabel: _aspectLabelFor(
+          _configForChannel(channel),
+          channel.id,
+        ),
+        initialAspectPinned: _aspectPinnedFor(
+          _configForChannel(channel),
+          channel.id,
+        ),
+        onAspectChanged: _persistGlobalAspect,
+        onAspectPinned: (label, _) => _persistAspectPin(
+          _configForChannel(channel),
+          channel.id,
+          label,
+        ),
         epgNow: epg.now,
         epgNext: epg.next,
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
@@ -3238,9 +3314,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             stream: stream,
             sourceName: playRepo.source.name,
             bufferPreset: bufferPresetFromName(playConfig.bufferPresetName),
-            initialAspectLabel: playConfig.aspectModeLabel,
-            onAspectChanged: (label) =>
-                unawaited(_persistAspectMode(playConfig, label)),
+            initialAspectLabel: _aspectLabelFor(playConfig, channel.id),
+            initialAspectPinned: _aspectPinnedFor(playConfig, channel.id),
+            onAspectChanged: _persistGlobalAspect,
+            onAspectPinned: (label, _) =>
+                _persistAspectPin(playConfig, channel.id, label),
             epgNow: programme,
             // Catch-up is deliberately memoised under its own key rather than
             // the live channel's: an archive URL can be a different container
@@ -3445,9 +3523,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             // Movies/series are always the active source — only live rows can
             // belong to another one.
             bufferPreset: bufferPresetFromName(widget.config.bufferPresetName),
-            initialAspectLabel: widget.config.aspectModeLabel,
-            onAspectChanged: (label) =>
-                unawaited(_persistAspectMode(widget.config, label)),
+            initialAspectLabel: _aspectLabelFor(widget.config, item.id),
+            initialAspectPinned: _aspectPinnedFor(widget.config, item.id),
+            onAspectChanged: _persistGlobalAspect,
+            onAspectPinned: (label, key) =>
+                _persistAspectPin(widget.config, key ?? item.id, label),
             playback: PlaybackContext(
               db: widget.repo.db,
               sourceId: widget.repo.source.id,
@@ -4575,11 +4655,20 @@ class _ChannelListZapCatalog implements ZapCatalog {
       : _screen._setForeignFavorite(entry.sourceId, entry.channelId, value);
 
   @override
-  String? aspectLabelFor(ZapEntry entry) => entry.config.aspectModeLabel;
+  String? aspectLabelFor(ZapEntry entry) =>
+      _screen._aspectLabelFor(entry.config, entry.channelId);
 
   @override
-  Future<void> persistAspect(ZapEntry entry, String label) =>
-      _screen._persistAspectMode(entry.config, label);
+  bool aspectPinnedFor(ZapEntry entry) =>
+      _screen._aspectPinnedFor(entry.config, entry.channelId);
+
+  @override
+  Future<void> persistAspect(ZapEntry entry, String label) async =>
+      _screen._persistGlobalAspect(label);
+
+  @override
+  Future<void> persistAspectPin(ZapEntry entry, String? label) =>
+      _screen._persistAspectPin(entry.config, entry.channelId, label);
 
   @override
   BufferPreset bufferPresetFor(ZapEntry entry) =>

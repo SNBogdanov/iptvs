@@ -52,7 +52,12 @@ navigation code.
   /editing accent ring still wins, so validation never fights the focus indicator. That exists so
   add/edit-source validation reports *at* the field instead of in a `SnackBar` at the far edge of
   the screen, which on a TV is nowhere near where the user is looking. Callers own when to set and
-  clear it; it does not gate submission. Implementation notes: its prefix/suffix icons live
+  clear it; it does not gate submission. **The mask follows the field, not the cell's position**:
+  `didUpdateWidget` re-syncs `_obscured` from `widget.obscureText`, and the source editor keys its
+  fields by spec key. Without both, switching the source kind (Stalker → Xtream) rebuilt the field
+  list at the same positions and Username inherited MAC's `_obscured = true` — dots with no
+  show/hide toggle, because the toggle reads `widget.obscureText` while the text read the stale
+  state (`tv_text_field_test.dart` pins it). Implementation notes: its prefix/suffix icons live
   *outside* the `InputDecoration` in a manually centered Row, and the field uses a collapsed
   `InputDecoration` with **every border slot explicitly `InputBorder.none`** — not the
   `InputDecoration.collapsed` constructor, whose null border slots get filled from the theme's

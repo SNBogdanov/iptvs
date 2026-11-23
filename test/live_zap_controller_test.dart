@@ -90,6 +90,12 @@ class _FakeCatalog implements ZapCatalog {
   }
 
   @override
+  bool aspectPinnedFor(ZapEntry entry) => false;
+
+  @override
+  Future<void> persistAspectPin(ZapEntry entry, String? label) async {}
+
+  @override
   BufferPreset bufferPresetFor(ZapEntry entry) =>
       bufferPresetFromName(entry.config.settings['bufferPreset']?.toString());
 

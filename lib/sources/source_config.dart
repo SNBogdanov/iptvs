@@ -201,16 +201,59 @@ class SourceConfig {
     return (v == null || v.isEmpty) ? null : v;
   }
 
+  /// Per-channel aspect pins: `{channel or media id: mode label}`.
+  ///
+  /// A pin is a **deliberate exception to the device-wide mode** — the user held
+  /// the aspect button on one channel and picked a framing just for it (a 4:3
+  /// SD channel stretched edge to edge, say). Stored in the source's `settings`
+  /// so it rides the existing cloud row, and keyed by the item id rather than
+  /// the channel *number*, which a provider may reuse.
+  Map<String, String> get aspectPins {
+    final raw = settings['aspectPins'];
+    if (raw is! Map) return const {};
+    final pins = <String, String>{};
+    raw.forEach((key, value) {
+      if (key is String && value is String && value.isNotEmpty) {
+        pins[key] = value;
+      }
+    });
+    return pins;
+  }
+
+  /// The pinned mode for [itemKey] (a channel id or a media item id), or null
+  /// when it follows the device-wide mode.
+  String? aspectPinFor(String itemKey) => aspectPins[itemKey];
+
+  /// [settings] with [itemKey]'s pin set to [label], or cleared when null.
+  ///
+  /// Removing the last pin removes the key entirely, so a source that never
+  /// pinned anything keeps a byte-identical `settings` blob (the same rule
+  /// [channelDwell] follows).
+  Map<String, dynamic> settingsWithAspectPin(String itemKey, String? label) {
+    final pins = Map<String, String>.of(aspectPins);
+    if (label == null || label.isEmpty) {
+      pins.remove(itemKey);
+    } else {
+      pins[itemKey] = label;
+    }
+    final next = Map<String, dynamic>.of(settings);
+    if (pins.isEmpty) {
+      next.remove('aspectPins');
+    } else {
+      next['aspectPins'] = pins;
+    }
+    return next;
+  }
+
   /// The aspect mode this source's player last used, as the mode's label
   /// (`Fit`/`Fill`/`Stretch`/`16:9`/`4:3`), or null if the user has never
   /// chosen one — in which case the player picks a platform-appropriate
   /// default.
   ///
-  /// Stored per source rather than globally for the same reason the buffer
-  /// preset is: it rides the existing `settings` blob into the cloud, needs no
-  /// new storage, and a user with an SD-heavy provider and an HD one may well
-  /// want different framing for each. Broad, not secret — it is a preference,
-  /// not a credential.
+  /// **Legacy:** the mode used to be per source. New builds keep one device-wide
+  /// mode ([playerAspectLabel]) and only per-channel pins here; this getter is
+  /// still read as a one-time fallback so an existing choice is not silently
+  /// discarded.
   String? get aspectModeLabel {
     final value = settings['aspectMode']?.toString();
     return (value == null || value.isEmpty) ? null : value;

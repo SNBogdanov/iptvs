@@ -353,6 +353,10 @@ class _NullZapCatalog implements ZapCatalog {
   @override
   Future<void> persistAspect(ZapEntry entry, String label) async {}
   @override
+  bool aspectPinnedFor(ZapEntry entry) => false;
+  @override
+  Future<void> persistAspectPin(ZapEntry entry, String? label) async {}
+  @override
   BufferPreset bufferPresetFor(ZapEntry entry) => BufferPreset.normal;
   @override
   ChannelDwell dwellFor(ZapEntry entry) => kDefaultChannelDwell;

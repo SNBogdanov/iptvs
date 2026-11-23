@@ -294,4 +294,33 @@ void main() {
     expect(find.byIcon(Icons.tune), findsOneWidget);
     expect(find.byIcon(Icons.clear), findsNothing);
   });
+
+  testWidgets('a rebuilt field takes the new mask, not the old state', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: 'value');
+    addTearDown(controller.dispose);
+
+    Widget field({required bool obscure}) => MaterialApp(
+      home: Scaffold(
+        body: TvTextField(
+          controller: controller,
+          hintText: '',
+          obscureText: obscure,
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(field(obscure: true));
+    expect(tester.widget<TextField>(find.byType(TextField)).obscureText, isTrue);
+
+    // The source editor rebuilds its fields at the same positions when the
+    // kind changes (Stalker → Xtream). Without syncing `_obscured` in
+    // didUpdateWidget, Username inherited MAC's mask: dots with no reveal
+    // toggle, because the toggle reads `widget.obscureText` and the text read
+    // the stale state.
+    await tester.pumpWidget(field(obscure: false));
+    await tester.pump();
+    expect(tester.widget<TextField>(find.byType(TextField)).obscureText, isFalse);
+  });
 }
