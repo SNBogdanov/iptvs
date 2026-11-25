@@ -84,6 +84,13 @@ flutter build apk --release
 flutter build linux --release
 ```
 
+**Не используй `--no-pub` для первого Android-билда после debug-сборки.** `flutter
+build` под `--no-pub` не перегенерирует `android/app/src/main/java/io/flutter/plugins/
+GeneratedPluginRegistrant.java`, а тот, оставленный debug-сборкой, регистрирует
+`integration_test` (dev-dependency) — release компилируется без него и падает на
+`package dev.flutter.plugins.integration_test does not exist`. Лечится `flutter pub get`
+между сменой режима сборки (или просто сборкой без `--no-pub`).
+
 ## Локальная сборка: облачный конфиг (Windows и Android)
 
 Ключевое, что легко потерять: **Supabase-конфиг приходит только через

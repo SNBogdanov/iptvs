@@ -13,6 +13,7 @@ import '../data/source_store.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/pairing_qr.dart';
+import 'connect_device_screen.dart';
 
 /// Pairs this device with a web-panel account and pulls its source list down.
 /// No login happens here: the device shows a short code, the user enters it in
@@ -634,11 +635,35 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     ),
     const SizedBox(height: 12),
     OutlinedButton.icon(
+      onPressed: _busy ? null : _authoriseAnotherDevice,
+      icon: const Icon(Icons.qr_code_scanner),
+      label: const Text('Authorise another device'),
+    ),
+    const SizedBox(height: 12),
+    OutlinedButton.icon(
       onPressed: _busy ? null : _unpair,
       icon: const Icon(Icons.link_off),
       label: const Text('Unpair this device'),
     ),
   ];
+
+  /// Hands this device's account authority to a second device (a TV) by
+  /// claiming its pairing code — see [ConnectDeviceScreen] and
+  /// `claim_pairing_as_device`. Nothing leaves this screen's account: the
+  /// server resolves the account from this device's own `devices` row.
+  Future<void> _authoriseAnotherDevice() async {
+    final connected = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ConnectDeviceScreen(sync: _sync),
+      ),
+    );
+    if (!mounted || connected != true) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Device authorised — it will finish pairing on its own.'),
+      ),
+    );
+  }
 
   /// A status line describing the profile's end-to-end-encryption state. Locked
   /// devices get the actionable unlock message (and Push is disabled above).

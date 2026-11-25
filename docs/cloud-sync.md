@@ -27,8 +27,9 @@ a redundant `unique (id, owner)`, and every owner-bearing child (`sources`, `met
 `(parent_id, owner) → parent(id, owner)`. A row whose owner disagrees with its parent's is therefore
 unrepresentable — for the RPCs, for the panel's direct RLS writes, and for anything added later.
 
-Then `SECURITY DEFINER` RPCs: three pairing
-(`request_pairing`/`pairing_status`/`claim_pairing`), the profile-scoped push
+Then `SECURITY DEFINER` RPCs: the pairing group
+(`request_pairing`/`pairing_status`/`claim_pairing`, plus `claim_pairing_as_device` — a paired
+device authorising another one, see "Pairing from a paired device"), the profile-scoped push
 (`push_sources`/`push_metadata`/`push_favorites`, each `(payload, p_profile_id)`), and
 `set_device_profile`. Migrations are applied to the live project and re-applying is idempotent;
 the Supabase GitHub integration auto-applies new ones on push.
@@ -186,7 +187,34 @@ trigger is picked up automatically.
   device**. `null` means this device isn't provisioned yet (locked).
 
 - `request_pairing(p_label)` — the device's suggested name for itself (see "The device's name,
-  decided at pairing time"). `claim_pairing(p_code, p_label)` is the panel-side counterpart.
+  decided at pairing time"). `claim_pairing(p_code, p_label)` is the panel-side counterpart;
+  `claim_pairing_as_device(p_code)` is the paired-device counterpart (below).
+
+### Pairing from a paired device (phone authorises a TV)
+
+`claim_pairing` requires `is_real_user()` — a signed-in **panel** account — so a phone that is
+already paired but not signed into the panel could not authorise a freshly installed TV. The TV
+shows its code and QR, the phone scans or types it, and the phone's own paired session claims it:
+
+- `claim_pairing_as_device(p_code)` — `SECURITY DEFINER`. The claimer is
+  `current_device_owner()` (the account this device's `devices` row belongs to), so a device can
+  only add devices to **its own** account. It performs the same single-use claim as
+  `claim_pairing` (insert/update `devices`, set `pairings.claimed_by` to the account, which is the
+  only write the `pairings_validate` trigger permits), refuses a device's own code, and keeps the
+  10-minute expiry.
+- Client: `CloudSync.claimPairingAsDevice(code)`; the screen is
+  `lib/screens/connect_device_screen.dart`, reached from the paired Cloud screen's **Authorise
+  another device**. It scans the QR with `mobile_scanner` (Android/iOS; camera is an optional
+  feature, the typed code always works) and extracts the code with `pairingCodeFromScan`, which
+  accepts both our `?code=` panel link and a bare eight-character code.
+- `mobile_scanner` is built with `dev.steenbakker.mobile_scanner.useUnbundled=true`
+  (`android/gradle.properties`): Play Services supplies the barcode model instead of the APK. The
+  saving is a **release**-artifact one — a debug APK is dominated by the JIT kernel blob and dexes,
+  so it barely moves. A device without Play Services still pairs by typing the code.
+- No per-device capability flag: any paired device may add devices to its account, which is what
+  "my phone authorises my TV" means. The panel lists and can revoke every device, and an unwanted
+  pairing is visible there as a new device.
+- The TV needs no change: its existing `pairing_status` poll notices the claim on the next tick.
 
 **Standing constraint for every RPC in this schema: overloads must be arity-distinct with NO
 `DEFAULT` on any parameter.** PostgREST picks the candidate whose *parameter-name set* matches the

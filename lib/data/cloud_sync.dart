@@ -570,6 +570,24 @@ class CloudSync {
     return res == true;
   }
 
+  /// Claim [code] — another device's pairing code (a TV's) — **as this paired
+  /// device**.
+  ///
+  /// The panel's `claim_pairing` requires a real (non-anonymous) account, so a
+  /// phone that is already paired but not signed into the panel had no way to
+  /// authorise a TV. `claim_pairing_as_device` resolves the account from this
+  /// device's own `devices` row: the phone is the authority, the TV shows the
+  /// code, and nothing is typed into a browser.
+  ///
+  /// Throws [PostgrestException] with the server's message on an expired code
+  /// or an unpaired caller.
+  Future<void> claimPairingAsDevice(String code) async {
+    await _client.rpc(
+      'claim_pairing_as_device',
+      params: {'p_code': code.trim().toUpperCase()},
+    );
+  }
+
   // ── profiles ──────────────────────────────────────────────────────────────
 
   /// The account's profiles, in panel order. A paired device may read these to

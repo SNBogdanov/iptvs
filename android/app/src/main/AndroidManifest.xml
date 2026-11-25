@@ -2,6 +2,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Reading the active network's LinkProperties (its HTTP proxy) for Dart. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Scanning the TV's pairing QR from a phone (see ConnectDeviceScreen).
+         Optional: the same screen takes a typed code, and a TV has no camera,
+         so camera hardware must never be a requirement for installing. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
 
     <!-- Android TV: the app runs on TVs but doesn't require TV hardware, and it
          must work without a touchscreen so the Leanback launcher will list it. -->

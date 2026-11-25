@@ -26,6 +26,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan the pairing QR code shown by another device to authorise it on your cloud account.</string>
 	<!--
 	  NSAllowsArbitraryLoads (blunt, not per-domain): iptvs connects to
 	  user-supplied IPTV provider panels entered at runtime, and most of those
