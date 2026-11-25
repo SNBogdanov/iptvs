@@ -52,6 +52,12 @@ const int kAndroidImageCacheBytes = 32 << 20;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Wall-clock phases of the path to the first frame. Printed (debug only, like
+  // every `addAndPrint`) as one line so a slow start can be attributed instead
+  // of guessed at: `media_kit` is native library loading, `state` the database
+  // / source list / device class / cloud group, `migrate` the identity pass and
+  // `prefs` the remembered-category keychain reads.
+  final bootWatch = Stopwatch()..start();
   // Before any HttpClient exists: `dart:io` ignores the platform proxy, so
   // images/API calls bypassed it while the native players honoured it. The
   // override goes in synchronously and answers per request, so the keychain and
@@ -64,6 +70,7 @@ Future<void> main() async {
         kAndroidImageCacheBytes;
   }
   MediaKit.ensureInitialized();
+  final nativeReadyMs = bootWatch.elapsedMilliseconds;
   // Device-wide volume/mute survives restarts: restore it before any player
   // route can open (the first one is a profile pick and a catalogue load away).
   unawaited(playbackAudioSession.load());
@@ -125,6 +132,7 @@ Future<void> main() async {
     detectDeviceClass(),
     _initialiseCloud(),
   ).wait;
+  final stateReadyMs = bootWatch.elapsedMilliseconds;
   // Repairs the pre-PR4 cache namespaces, but it is an optimisation of existing
   // state, never a prerequisite for the UI: the repository rebuilds and re-keys
   // rows from the provider on its own. So it must not be able to stop the first
@@ -142,6 +150,7 @@ Future<void> main() async {
           '${redactText('$error')}',
     );
   }
+  final migrateDoneMs = bootWatch.elapsedMilliseconds;
   // The release-date sort key for rows ingested before v17. Deliberately
   // **unawaited**: the column is an ordering optimisation, never a prerequisite
   // for the UI, and a 60k-row backfill must not hold the first frame. Until a
@@ -206,6 +215,14 @@ Future<void> main() async {
   // `load()` with an awaited keychain read would delay the first provider
   // fetch; the live tab would flash "All" for a frame).
   await preloadTabCategoryPrefs(sources.map((source) => source.id));
+  DiagnosticsLog.instance.addAndPrint(
+    'boot',
+    'startup media_kit=${nativeReadyMs}ms '
+        'state=${stateReadyMs - nativeReadyMs}ms '
+        'migrate=${migrateDoneMs - stateReadyMs}ms '
+        'prefs=${bootWatch.elapsedMilliseconds - migrateDoneMs}ms '
+        'sources=${sources.length}',
+  );
   runApp(IptvApp(db: db, store: store));
 }
 

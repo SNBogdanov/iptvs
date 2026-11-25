@@ -41,24 +41,27 @@ void resetMediaCategoryCacheForTest() {
 ///
 /// Two keychain reads per source for the media tabs plus one for live. Failures
 /// are swallowed: an unreadable preference simply means "All" for that tab.
+///
+/// **All reads are issued at once** — they are independent keys, and this runs
+/// on the path to the first frame. The sequential version cost `3 * sources`
+/// platform-channel round trips end to end (each one a Keystore decrypt), which
+/// was the single longest part of boot on a phone with a handful of sources.
+/// Writes go to distinct keys of two process-wide maps, so concurrency is safe;
+/// ordering is irrelevant because nothing reads the caches until `runApp`.
 Future<void> preloadTabCategoryPrefs(Iterable<String> sourceIds) async {
   const settings = AppSettingsStore();
-  for (final sourceId in sourceIds) {
-    for (final kind in const ['movie', 'series']) {
-      try {
-        cacheMediaCategory(
-          sourceId,
-          kind,
-          await settings.mediaCategory(sourceId, kind),
-        );
-      } catch (_) {
-        cacheMediaCategory(sourceId, kind, null);
-      }
-    }
-    try {
-      cacheLiveCategory(sourceId, await settings.liveCategory(sourceId));
-    } catch (_) {
-      cacheLiveCategory(sourceId, null);
-    }
-  }
+  final ids = sourceIds.toList(growable: false);
+  await Future.wait([
+    for (final sourceId in ids) ...[
+      for (final kind in const ['movie', 'series'])
+        settings
+            .mediaCategory(sourceId, kind)
+            .then((value) => cacheMediaCategory(sourceId, kind, value))
+            .catchError((Object _) => cacheMediaCategory(sourceId, kind, null)),
+      settings
+          .liveCategory(sourceId)
+          .then((value) => cacheLiveCategory(sourceId, value))
+          .catchError((Object _) => cacheLiveCategory(sourceId, null)),
+    ],
+  ]);
 }
