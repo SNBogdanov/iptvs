@@ -8,6 +8,7 @@ import 'package:iptvs/player/player_chrome_prefs.dart';
 import 'package:iptvs/player/player_overlay.dart';
 import 'package:iptvs/player/zap_quick_list.dart';
 import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/theme.dart';
 import 'package:media_kit/media_kit.dart';
 
 /// Widget-level coverage for [EmbeddedPlayerControls] — the shared Flutter
@@ -48,6 +49,8 @@ void main() {
     ZapQuickListState? quickList,
     bool zapEnabled = false,
     VoidCallback? onOpenQuickList,
+    VoidCallback? onZapRandom,
+    VoidCallback? onZapAuto,
     ValueChanged<String>? onQuickListCommand,
     VoidCallback? onPreviousEntry,
     VoidCallback? onNextEntry,
@@ -89,6 +92,8 @@ void main() {
               quickList: quickList,
               zapEnabled: zapEnabled,
               onOpenQuickList: onOpenQuickList,
+              onZapRandom: onZapRandom,
+              onZapAuto: onZapAuto,
               onQuickListCommand: onQuickListCommand,
               onPreviousEntry: onPreviousEntry,
               onNextEntry: onNextEntry,
@@ -1096,6 +1101,89 @@ void main() {
       expect(opens, 1);
     });
 
+    testWidgets('the two mode toggles appear on a zapping route and send their '
+        'commands', (tester) async {
+      var random = 0;
+      var auto = 0;
+      await pumpOverlay(tester, isLive: true);
+      expect(find.byIcon(Icons.shuffle), findsNothing);
+      expect(find.byIcon(Icons.bolt), findsNothing);
+
+      // VOD never shows them, even if a route wires the callbacks.
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        zapEnabled: true,
+        onZapRandom: () {},
+        onZapAuto: () {},
+      );
+      expect(find.byIcon(Icons.shuffle), findsNothing);
+      expect(find.byIcon(Icons.bolt), findsNothing);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zapEnabled: true,
+        onZapRandom: () => random++,
+        onZapAuto: () => auto++,
+        onOpenQuickList: () {},
+      );
+      expect(find.byIcon(Icons.shuffle), findsOneWidget);
+      expect(find.byIcon(Icons.bolt), findsOneWidget);
+      // Left of the list opener, matching Android's cluster order.
+      expect(
+        tester.getCenter(find.byIcon(Icons.shuffle)).dx,
+        lessThan(tester.getCenter(find.byIcon(Icons.format_list_bulleted)).dx),
+      );
+      expect(
+        tester.getCenter(find.byIcon(Icons.bolt)).dx,
+        lessThan(tester.getCenter(find.byIcon(Icons.format_list_bulleted)).dx),
+      );
+
+      await tester.tap(find.byIcon(Icons.shuffle));
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.bolt));
+      await tester.pump();
+      expect(random, 1);
+      expect(auto, 1);
+
+      // **The button is the mode's state, not a momentary trigger.** Both read
+      // the controller back through `ZapBannerState`, and an on mode fills the
+      // chip with the accent colour (the "pressed" look) instead of the dim
+      // open-panel tint.
+      Finder pressedFill(IconData icon) => find.ancestor(
+        of: find.byIcon(icon),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Material && widget.color == AppColors.accentFill,
+        ),
+      );
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zapEnabled: true,
+        onZapRandom: () {},
+        onZapAuto: () {},
+        onOpenQuickList: () {},
+        zap: _zap(revision: 1, random: true, autoSwitchLabel: '10 s'),
+      );
+      expect(pressedFill(Icons.shuffle), findsOneWidget);
+      expect(pressedFill(Icons.bolt), findsOneWidget);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zapEnabled: true,
+        onZapRandom: () {},
+        onZapAuto: () {},
+        onOpenQuickList: () {},
+        zap: _zap(revision: 1),
+      );
+      expect(pressedFill(Icons.shuffle), findsNothing);
+      expect(pressedFill(Icons.bolt), findsNothing);
+    });
+
     testWidgets('opening the list stands the chrome down', (tester) async {
       // The list claims the arrows and Back whatever the chrome is doing, so
       // a control row left up behind it strands the D-pad — every other
@@ -1707,6 +1795,7 @@ ZapBannerState _zap({
   Programme? epgNow,
   Programme? epgNext,
   String? autoSwitchLabel,
+  bool random = false,
 }) => ZapBannerState(
   revision: revision,
   channelNumber: channelNumber,
@@ -1719,6 +1808,7 @@ ZapBannerState _zap({
   epgNow: epgNow,
   epgNext: epgNext,
   autoSwitchLabel: autoSwitchLabel,
+  random: random,
 );
 
 Programme _programme(String title, {int startHour = 20, int stopHour = 21}) =>

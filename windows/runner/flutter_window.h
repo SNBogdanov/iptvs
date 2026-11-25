@@ -48,6 +48,10 @@ private:
   bool IsCursorOverNativeControls() const;
   void NotifyNativeControlCommand(const std::string &command);
   void UpdateNativeControlState(const flutter::EncodableValue *args);
+  // The `setZapModes` push: whether random zapping and the auto-switch
+  // countdown are on, so the overlay's two mode buttons can show their state.
+  // Display only — the modes are owned by `LiveZapController` in Dart.
+  void UpdateNativeZapModes(const flutter::EncodableValue *args);
   // In-player live zapping (docs/player.md "Live zapping"): the `setZapBanner`
   // push, its 3 s auto-hide, and the session-teardown reset.
   void UpdateZapBanner(const flutter::EncodableValue *args);

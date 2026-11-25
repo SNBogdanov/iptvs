@@ -13,6 +13,11 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Added
 
+- Player: **random zapping and auto-switch ("zapping") are now buttons** on every overlay — a
+  shuffle and a bolt next to the channel-list opener, accent-tinted while on. The shared Flutter
+  overlay (Windows SDR, Linux, iOS) used to only report both modes, and the Windows GDI overlay had
+  no random mode at all; both read the state back from Dart (`ZapBannerState` / `setZapModes`) and
+  send `zap:random` / `zap:auto`, and the GDI pair is also on its keyboard focus ring.
 - Cloud: **authorise another device from this one** — a paired phone scans the TV's pairing QR
   (or types its code) and claims it against the same account, without a panel login on the phone.
   New `claim_pairing_as_device` RPC (a paired-device counterpart of `claim_pairing`), the

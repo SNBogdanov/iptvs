@@ -4448,6 +4448,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       quickList: _quickListState(),
       zapEnabled: _zapEnabled,
       onOpenQuickList: _zapEnabled ? _toggleQuickList : null,
+      onZapRandom: _zapEnabled ? () => _zap?.toggleRandom() : null,
+      onZapAuto: _zapEnabled
+          ? () => _handleZapInput(
+              const ZapCommand(ZapCommandKind.autoSwitch),
+            )
+          : null,
       onQuickListCommand: _zapEnabled ? _handleQuickListPointerCommand : null,
       onPreviousEntry: _canStepEntry ? _stepPreviousEntry : null,
       onNextEntry: _canStepEntry ? _stepNextEntry : null,

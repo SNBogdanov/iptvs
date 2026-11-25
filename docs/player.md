@@ -3617,7 +3617,8 @@ refused, not clamped: the menus are drawn from the ladder Dart pushes on `setZap
 else is a stale sender. The default is stored by removing the key (`channelDwellSeconds`), so an
 untouched source's `settings` blob stays byte-identical.
 
-**Random zapping** (`LiveZapController.random`, toggled by **Ctrl+R**, persisted in
+**Random zapping** (`LiveZapController.random`, toggled by **Ctrl+R** or the shuffle
+button every overlay draws, persisted in
 `AppSettingsStore.randomZapping`) makes `channelUp`/`channelDown` pick a random index that is never
 the channel already under the cursor - which the auto-switch's `channelUp` funnel inherits, so a
 running countdown also jumps randomly. The toggle reports through the banner's transient-message
@@ -3985,8 +3986,18 @@ star's accent means.
 **One picture per icon set, one meaning** — the channel list: Material `format_list_bulleted` on
 the shared Flutter overlay, Compose `Icons.AutoMirrored.Filled.List`, U+E2B8 in the Lua OSD's
 vendored `MaterialIcons-Regular.otf` cmap (verified as `format_list_bulleted_baseline`), and MDL2
-`\xE8FD` in the GDI overlay. The **bolt** belongs to the zapping *modes* instead — Android's
-random/auto-switch toggle buttons — not to the button that opens the list.
+`\xE8FD` in the GDI overlay. The **bolt** belongs to the zapping *modes* instead — not to the
+button that opens the list.
+
+**All four surfaces now carry the two mode toggles**, Android first: a shuffle (random zapping,
+`zap:random`) and a bolt (auto-switch, `zap:auto`), each **filled with the accent colour while its
+mode is on** (white glyph on the accent — the "pressed" look, not the dim open-panel tint). The
+shared Flutter overlay draws them from `onZapRandom`/`onZapAuto` and reads the state back from
+`ZapBannerState` (it used to only *report* the modes — a shuffle marker and the countdown chip — so
+on Windows SDR and on Linux neither could be turned on with a pointer); the Windows GDI overlay
+mirrors them from `setZapModes` and puts both on its focus ring, so a keyboard-only user is not
+forced to know Ctrl+R/Ctrl+Z. The bolt's **long press** opens the pace menu on Android only; on the
+desktop overlays the pace stays in Settings.
 
 **Three of the four only open; Windows toggles.** Android, Linux and the shared Flutter overlay
 send `zap:list` and stand the chrome down as the list opens, so the button is off screen while

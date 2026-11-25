@@ -292,6 +292,10 @@ enum class NativeFocusItem {
   // The quick-list opener: the pointer/keyboard way into a panel that
   // otherwise only a remote's Left or `G` could reach.
   kQuickList,
+  // The two live mode toggles (random zapping / auto-switch). Both are also on
+  // the key ring, so a keyboard-only user is not forced to know Ctrl+R/Ctrl+Z.
+  kZapRandom,
+  kZapAuto,
 };
 
 HWND NativeControlsOwner(HWND hwnd) {
@@ -316,6 +320,13 @@ struct NativeControlState {
   bool live_synced = true; // at the live edge (red badge) vs behind (grey + button)
   bool can_favorite = false; // live channel with a favorites store (show the star)
   bool is_favorite = false;  // current favorite state (Dart owns the store)
+  // The two live **mode toggles**, mirrored from Dart's `setZapModes`: a zap
+  // picks a random channel, and the auto-switch countdown ("zapping" mode) is
+  // running. Display state only — the shuffle bag and the timer live in
+  // `LiveZapController`, the buttons here just send `zap:random` / `zap:auto`
+  // and the next push moves the accent.
+  bool zap_random = false;
+  bool zap_auto = false;
   bool reconnecting = false; // live reconnect watchdog re-establishing the stream
   // A terminal VOD error, mirrored from Dart so the overlay can draw it: the
   // Flutter PlayerErrorOverlay sits behind the native video HWND on this
@@ -1382,8 +1393,10 @@ void DrawWrappedTextEllipsized(HDC hdc, const std::wstring &text, RECT rect,
 void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
                     bool active = false,
                     std::optional<COLORREF> fg_override = std::nullopt,
-                    int radius = kNativeButtonRadius, int icon_size = 20) {
-  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+                    int radius = kNativeButtonRadius, int icon_size = 20,
+                    std::optional<COLORREF> bg_override = std::nullopt) {
+  const COLORREF bg =
+      bg_override.value_or(active ? RGB(38, 34, 78) : RGB(18, 20, 28));
   const COLORREF fg = fg_override.value_or(active ? RGB(255, 255, 255)
                                                   : RGB(232, 235, 244));
   FillRoundRectAA(hdc, rect, NativeScale(radius), bg);
@@ -1705,6 +1718,10 @@ struct BottomLayout {
   // ComputeBottomLayout for why it sits there and not beside the star).
   bool has_quick_list = false;
   RECT quick_list;
+  // Random zapping and the auto-switch ("zapping") toggles, left of the list.
+  bool has_zap_modes = false;
+  RECT zap_random;
+  RECT zap_auto;
 };
 
 BottomLayout ComputeBottomLayout(const RECT &rect) {
@@ -1835,6 +1852,14 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   if (l.has_quick_list) {
     place(l.quick_list, kBtn);
   }
+  // The two mode toggles sit left of the list opener — the same order Android's
+  // `RightCluster` draws (Random, then Zapping, then the list). Same gate: no
+  // zap controller means no modes to toggle.
+  l.has_zap_modes = ZapActive();
+  if (l.has_zap_modes) {
+    place(l.zap_auto, kBtn);
+    place(l.zap_random, kBtn);
+  }
 
   l.has_scrubber = !live;
   if (l.has_scrubber) {
@@ -1946,6 +1971,10 @@ std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   // Match visual order: the quick-list opener is leftmost in the right
   // cluster, then "Go to live" and the favourite star, then speed/audio/CC,
   // aspect, info, and fullscreen.
+  if (l.has_zap_modes) {
+    out.push_back(NativeFocusItem::kZapRandom);
+    out.push_back(NativeFocusItem::kZapAuto);
+  }
   if (l.has_quick_list) out.push_back(NativeFocusItem::kQuickList);
   if (l.has_go_live) out.push_back(NativeFocusItem::kGoLive);
   if (l.has_favorite) out.push_back(NativeFocusItem::kFavorite);
@@ -2012,6 +2041,10 @@ std::string CommandForFocusedItem(NativeFocusItem item) {
     return "closeWindow";
   case NativeFocusItem::kQuickList:
     return QuickListToggleCommand();
+  case NativeFocusItem::kZapRandom:
+    return "zap:random";
+  case NativeFocusItem::kZapAuto:
+    return "zap:auto";
   case NativeFocusItem::kGoLive:
     return "goLive";
   }
@@ -3826,6 +3859,28 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     DrawIconButton(paint_hdc, l.quick_list, L"\xE8FD",
                    is_focused(NativeFocusItem::kQuickList) || QuickListShown());
   }
+  if (l.has_zap_modes) {
+    // The same two glyphs Android uses: `Icons.Filled.Shuffle` and
+    // `Icons.Filled.Bolt`. Two different fills, deliberately: focus is the
+    // dim chrome highlight every button shares, while **the mode being on** is
+    // the accent fill with a white glyph — the same "pressed" look the shared
+    // Flutter overlay draws, and the one Android's `IconControlButton` uses for
+    // `active`. Dart pushes the state back on `setZapModes`, so the button and
+    // the session can never disagree. The bolt carries the countdown on
+    // Android; here the number stays in the banner, already on screen.
+    const COLORREF accent = RGB(123, 108, 246);  // AppColors.accent
+    const bool random_on = g_native_control_state.zap_random;
+    const bool auto_on = g_native_control_state.zap_auto;
+    DrawIconButton(
+        paint_hdc, l.zap_random, L"\xE8B1",
+        is_focused(NativeFocusItem::kZapRandom) || random_on, std::nullopt,
+        kNativeButtonRadius, 20,
+        random_on ? std::optional<COLORREF>(accent) : std::nullopt);
+    DrawIconButton(paint_hdc, l.zap_auto, L"\xE945",
+                   is_focused(NativeFocusItem::kZapAuto) || auto_on,
+                   std::nullopt, kNativeButtonRadius, 20,
+                   auto_on ? std::optional<COLORREF>(accent) : std::nullopt);
+  }
   }  // !l.is_mini (full chrome)
   else {
     // Compact picture-in-picture bar: transport, mute, then restore and close.
@@ -4063,6 +4118,12 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   }
   if (l.has_quick_list && PointInRect(x, y, l.quick_list)) {
     return QuickListToggleCommand();
+  }
+  if (l.has_zap_modes && PointInRect(x, y, l.zap_random)) {
+    return "zap:random";
+  }
+  if (l.has_zap_modes && PointInRect(x, y, l.zap_auto)) {
+    return "zap:auto";
   }
   // A press on an **open** quick list never reaches here: its rows and its
   // margin are answered in `NativeControlsWndProc`'s `WM_LBUTTONDOWN`, which
@@ -6705,6 +6766,30 @@ void FlutterWindow::HideZapBanner() {
   ApplyNativeControlsVisibility();
 }
 
+// The inbound half of `setZapModes` (docs/player.md "Live zapping"): whether
+// random zapping and the auto-switch countdown are on.
+//
+// Display state only, and deliberately so: the shuffle bag and the timer are
+// `LiveZapController`'s, the buttons send `zap:random` / `zap:auto`, and Dart
+// pushes the resulting mode back here. A copy that could be toggled locally
+// would be a second source of truth that disagrees the moment a key does the
+// same thing.
+void FlutterWindow::UpdateNativeZapModes(const flutter::EncodableValue *args) {
+  const bool random = EncodableBoolArg(args, "random", false);
+  const bool auto_switch = EncodableBoolArg(args, "autoSwitch", false);
+  if (random == g_native_control_state.zap_random &&
+      auto_switch == g_native_control_state.zap_auto) {
+    return;
+  }
+  g_native_control_state.zap_random = random;
+  g_native_control_state.zap_auto = auto_switch;
+  // Only the two buttons' fill changed, but they live in the same composited
+  // region as the rest of the chrome — the same path `setControlState` uses.
+  native_controls_region_dirty_ = true;
+  ApplyNativeControlsVisibility();
+  InvalidateNativeControls();
+}
+
 // Session teardown for the banner **and the quick list** (ResetNativeZapState
 // clears both — they are one feature's state, and a list left standing after
 // `destroySurface` would hold the overlay window up with nothing behind it).
@@ -7286,6 +7371,12 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "setZapBanner") {
           UpdateZapBanner(call.arguments());
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "setZapModes") {
+          UpdateNativeZapModes(call.arguments());
           result->Success(flutter::EncodableValue(true));
           return;
         }

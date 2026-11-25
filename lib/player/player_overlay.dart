@@ -200,6 +200,17 @@ class PlayerVideoSurface extends StatefulWidget {
   /// Sends `zap:list` (open the quick list). Null off a zapping route.
   final VoidCallback? onOpenQuickList;
 
+  /// Toggles **random zapping** and the **auto-switch countdown** ("zapping"
+  /// mode). Null off a zapping route; the buttons are drawn only when wired, so
+  /// a surface that cannot host them never shows a dead control.
+  ///
+  /// Both modes belong to `LiveZapController` (the shuffle bag and the timer
+  /// live in Dart), so these are commands, not local state: the button's accent
+  /// reads [ZapBannerState.random] / [ZapBannerState.autoSwitchLabel] back from
+  /// the controller and can never disagree with the session.
+  final VoidCallback? onZapRandom;
+  final VoidCallback? onZapAuto;
+
   /// Steps to the previous/next entry of the session's list. See
   /// [EmbeddedPlayerControls.onPreviousEntry] — one pair of controls for both
   /// live channels and VOD episodes/films, resolved by the route.
@@ -323,6 +334,8 @@ class PlayerVideoSurface extends StatefulWidget {
     this.quickList,
     this.zapEnabled = false,
     this.onOpenQuickList,
+    this.onZapRandom,
+    this.onZapAuto,
     this.onQuickListCommand,
     this.onPreviousEntry,
     this.onNextEntry,
@@ -446,6 +459,8 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             quickList: widget.quickList,
             zapEnabled: widget.zapEnabled,
             onOpenQuickList: widget.onOpenQuickList,
+            onZapRandom: widget.onZapRandom,
+            onZapAuto: widget.onZapAuto,
             onQuickListCommand: widget.onQuickListCommand,
             onPreviousEntry: widget.onPreviousEntry,
             onNextEntry: widget.onNextEntry,
@@ -603,6 +618,8 @@ class EmbeddedPlayerControls extends StatefulWidget {
     this.quickList,
     this.zapEnabled = false,
     this.onOpenQuickList,
+    this.onZapRandom,
+    this.onZapAuto,
     this.onQuickListCommand,
     this.onPreviousEntry,
     this.onNextEntry,
@@ -655,6 +672,11 @@ class EmbeddedPlayerControls extends StatefulWidget {
 
   /// Sends `zap:list`. See [PlayerVideoSurface.onOpenQuickList].
   final VoidCallback? onOpenQuickList;
+
+  /// Toggles random zapping / the auto-switch countdown. See
+  /// [PlayerVideoSurface.onZapRandom] / [PlayerVideoSurface.onZapAuto].
+  final VoidCallback? onZapRandom;
+  final VoidCallback? onZapAuto;
 
   /// Steps to the **previous entry** of whatever the session is walking, or null
   /// when there is nothing to step to.
@@ -2057,6 +2079,36 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // Not a toggle, so the accent tints nothing here — pressing
                 // it opens the list, which takes the screen from this row
                 // (see [didUpdateWidget]), and the list's own Back closes it.
+                // The two live **mode toggles** — random zapping and the
+                // auto-switch countdown ("zapping" mode, Ctrl+Z). Android's
+                // Compose overlay has had exactly these two buttons; the shared
+                // Flutter overlay only ever *reported* their state (a shuffle
+                // marker and the countdown chip), so on Windows SDR and on Linux
+                // a mouse user could not turn either on. Accent = on, read back
+                // from the controller through [ZapBannerState], never kept
+                // locally.
+                if (widget.isLive &&
+                    widget.zapEnabled &&
+                    widget.onZapRandom != null)
+                  _button(
+                    Icons.shuffle,
+                    widget.touch ? 'Random zapping' : 'Random zapping (Ctrl+R)',
+                    widget.onZapRandom!,
+                    pressed: widget.zap?.random ?? false,
+                    semanticsLabel: 'Random zapping',
+                  ),
+                if (widget.isLive &&
+                    widget.zapEnabled &&
+                    widget.onZapAuto != null)
+                  _button(
+                    Icons.bolt,
+                    widget.touch
+                        ? 'Auto-switch channels'
+                        : 'Auto-switch channels (Ctrl+Z)',
+                    widget.onZapAuto!,
+                    pressed: widget.zap?.autoSwitchLabel != null,
+                    semanticsLabel: 'Auto-switch channels',
+                  ),
                 if (widget.isLive &&
                     widget.zapEnabled &&
                     widget.onOpenQuickList != null &&
@@ -3371,12 +3423,18 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   // bare Material IconButton, so the embedded overlay reads the same across the
   // two Windows paths. [active] highlights a toggled control (e.g. an open
   // menu); [color] overrides the icon tint (e.g. the accent favourite star).
+  //
+  // [pressed] is a **mode** being on, which is a stronger statement than "this
+  // panel is open": the two zapping toggles fill with the accent colour and go
+  // white-on-accent, exactly like a held-down switch, so the state is readable
+  // at a glance instead of being a 30 % tint.
   Widget _button(
     IconData icon,
     String tooltip,
     VoidCallback onPressed, {
     Color? color,
     bool active = false,
+    bool pressed = false,
     bool compact = false,
     String? semanticsLabel,
   }) => _chrome(
@@ -3384,7 +3442,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     semanticsLabel: semanticsLabel,
     onPressed: onPressed,
     compact: compact,
-    active: active,
+    active: active || pressed,
+    activeFill: pressed ? AppColors.accentFill : null,
     // A finger needs Apple's 44pt minimum in *both* axes, which is the floor
     // every touch value in [EmbeddedOverlayMetrics] respects — the dense
     // short-surface mode sits exactly on it. The pointer sizes are deliberately
@@ -3396,7 +3455,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       child: Icon(
         icon,
         size: compact ? _m.buttonCompactIcon : _m.buttonIcon,
-        color: color ?? (active ? Colors.white : AppColors.textHi),
+        color: color ??
+            (active || pressed ? Colors.white : AppColors.textHi),
       ),
     ),
   );
@@ -3511,6 +3571,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     required Widget child,
     bool compact = false,
     bool active = false,
+    Color? activeFill,
   }) {
     void handle() {
       _show();
@@ -3528,10 +3589,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           message: tooltip,
           child: Material(
             color: active
-                ? Color.alphaBlend(
-                    AppColors.accent.withValues(alpha: 0.30),
-                    AppColors.panel,
-                  )
+                ? (activeFill ??
+                      Color.alphaBlend(
+                        AppColors.accent.withValues(alpha: 0.30),
+                        AppColors.panel,
+                      ))
                 : AppColors.panel.withValues(alpha: 0.85),
             borderRadius: BorderRadius.circular(compact ? 10 : 12),
             clipBehavior: Clip.antiAlias,
