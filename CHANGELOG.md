@@ -13,6 +13,11 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Added
 
+- Cloud: **authorise another device from this one** — a paired phone scans the TV's pairing QR
+  (or types its code) and claims it against the same account, without a panel login on the phone.
+  New `claim_pairing_as_device` RPC (a paired-device counterpart of `claim_pairing`), the
+  `Authorise another device` screen with camera scanning on Android/iOS, and `pairingCodeFromScan`
+  (accepts the `?code=` panel link or a bare code). Camera hardware stays optional at install time.
 - Live TV: in-player channel zapping — Page Up/Down for the next/previous channel,
   a previous-channel key, and typed channel numbers — on every player surface.
 - Live TV: a quick list (`GUIDE`, `G`, or Left with the controls hidden) to browse
@@ -105,6 +110,27 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Changed
 
+- **Live channel rows are sized per row**, not per list: a channel with a programme takes the
+  tall row (now/next/progress), one without it the compact row — a portal whose guide covers a
+  handful of channels no longer draws every other card with an empty EPG band. While the guide is
+  still downloading a row stays tall only if it can still be matched (it carries an epg id, or the
+  guide matches by name), so a catalog without epg ids opens compact immediately. The selection
+  model now scrolls by the same per-row geometry it renders (`LiveRowLayout`), keeping the D-pad
+  reveal exact.
+- **Live TV: the category filter can select several categories at once** (union), with checkbox
+  semantics in the wide sidebar and in the phone sheet; a long press (or the sheet's
+  `Only <previous>`) returns to a single category in one gesture.
+- **The in-player quick list shows the current union as its own category row** (titled like the
+  zap banner, e.g. `Sports + News`) instead of opening on "All channels" with no row for the
+  several categories the session is walking; picking it re-ranges to exactly those categories, and
+  Back restores the union on the tab.
+- **Random zapping now walks the whole range without repeats**: it draws from a shuffle bag, so a
+  cycle shows every channel of the current range once before anything repeats, refilling when
+  exhausted; turning random off or leaving the player starts a fresh cycle.
+- **A VOD tab refreshes itself when its cached catalogue is older than the source's refresh
+  interval** (startup / 6 / 12 / 24 / 48 h), silently in the background; previously Movies/Series
+  kept the first-visit catalogue until Reload, because the scheduled refresh only covered tabs that
+  were already open when it ran.
 - **Xtream's Username field is no longer masked after switching the source type**: the field's mask
   now follows the field rather than the cell's position in the form (it used to inherit the MAC
   field's mask, showing dots with no reveal toggle).

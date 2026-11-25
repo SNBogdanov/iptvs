@@ -8,6 +8,7 @@ import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import '../data/net.dart' show cleanImageUrl;
 import '../sources/source.dart';
 import '../theme.dart';
+import 'live_row_layout.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/artwork_cache.dart';
@@ -374,6 +375,12 @@ class LiveTabView extends StatelessWidget {
   final double channelRowExtent;
   final double categoryRowExtent;
 
+  /// Exact per-row geometry: a row without a programme is drawn at the plain
+  /// height instead of reserving the whole EPG block. When given it supersedes
+  /// [channelRowExtent] — the list takes its extents from here, and the
+  /// coordinator takes its offsets from the same object.
+  final LiveRowLayout? rowLayout;
+
   final String? lastPlayedChannelId;
   final String? previewChannelId;
 
@@ -404,7 +411,17 @@ class LiveTabView extends StatelessWidget {
   /// cursor sits — Back moves the cursor without changing the filter.
   final String? selectedCategoryId;
 
+  /// The multi-select filter (live only): two or more ids whose channels are
+  /// shown as a union, each drawing a checkmark in the sidebar. Empty in the
+  /// ordinary single-category mode.
+  final Set<String> selectedCategoryIds;
+
   final ValueChanged<String?> onCategorySelected;
+
+  /// Long-press on a sidebar category: "only this one" (the phone sheet's and
+  /// the footer button's escape from a union). Optional so existing callers and
+  /// tests that build the view without it keep compiling.
+  final ValueChanged<String>? onCategoryOnly;
 
   /// Built lazily (only when the wide preview panel actually renders) so no
   /// video output — native platform view or media_kit texture — is created
@@ -433,6 +450,7 @@ class LiveTabView extends StatelessWidget {
     required this.focus,
     required this.channelRowExtent,
     required this.categoryRowExtent,
+    this.rowLayout,
     required this.lastPlayedChannelId,
     required this.previewChannelId,
     this.isPreviewingRow,
@@ -443,7 +461,9 @@ class LiveTabView extends StatelessWidget {
     required this.onCatchup,
     required this.categories,
     required this.selectedCategoryId,
+    this.selectedCategoryIds = const <String>{},
     required this.onCategorySelected,
+    this.onCategoryOnly,
     required this.previewVideoBuilder,
     required this.previewLoading,
     required this.previewError,
@@ -482,7 +502,14 @@ class LiveTabView extends StatelessWidget {
           return ListView.builder(
             controller: scrollController,
             padding: padding,
-            itemExtent: channelRowExtent,
+            // Per-row heights when the screen supplied the exact geometry
+            // (channels without a programme are shorter). `itemExtentBuilder`
+            // keeps rows lazy and gives the framework the same extents the
+            // selection model uses, instead of guessing an average.
+            itemExtent: rowLayout == null ? channelRowExtent : null,
+            itemExtentBuilder: rowLayout == null
+                ? null
+                : (index, _) => rowLayout!.extentAt(index),
             itemCount: visible.length,
             semanticChildCount: visible.length,
             itemBuilder: (context, i) {
@@ -588,13 +615,14 @@ class LiveTabView extends StatelessWidget {
       textScale: MediaQuery.textScalerOf(context).scale(1),
     );
     assert(
-      channelRowExtent == metrics.channelRowExtent(showsEpg) &&
-          categoryRowExtent == metrics.categoryRowExtent,
+      rowLayout != null ||
+          (channelRowExtent == metrics.channelRowExtent(showsEpg) &&
+              categoryRowExtent == metrics.categoryRowExtent),
       'live row extents disagree: itemExtent/coordinator got '
       '$channelRowExtent/$categoryRowExtent, the row layout computed '
       '${metrics.channelRowExtent(showsEpg)}/${metrics.categoryRowExtent}. '
-      'The selection model scrolls by index * extent, so these must be one '
-      'value — see LiveLayoutMetrics.forSize.',
+      'The selection model scrolls by the row geometry it was given, so these '
+      'must be one value — see LiveLayoutMetrics.forSize.',
     );
     // **One width authority for the whole live tab.** Everything else that
     // branches on "wide" reads the *window* width through `MediaQuery`:
@@ -636,11 +664,13 @@ class LiveTabView extends StatelessWidget {
               builder: (context, _) => _LiveCategoryPane(
                 categories: categories,
                 selectedCategoryId: selectedCategoryId,
+                selectedCategoryIds: selectedCategoryIds,
                 selectedIndex: focus.selectedCategoryIndex,
                 focusNode: focus.categoriesFocusNode,
                 onKey: focus.handleCategoriesKey,
                 scrollController: categoryScrollController,
                 onSelected: onCategorySelected,
+                onOnly: onCategoryOnly,
                 onSelectIndex: (i) => focus.selectCategory(i, reveal: false),
                 rowExtent: categoryRowExtent,
               ),
@@ -719,22 +749,29 @@ class LiveTabView extends StatelessWidget {
 class _LiveCategoryPane extends StatelessWidget {
   final List<Category> categories;
   final String? selectedCategoryId;
+  final Set<String> selectedCategoryIds;
   final int selectedIndex;
   final FocusNode focusNode;
   final KeyEventResult Function(FocusNode, KeyEvent) onKey;
   final ScrollController scrollController;
   final ValueChanged<String?> onSelected;
+
+  /// Long-press "only this category" (touch/mouse); absent leaves the gesture
+  /// unused.
+  final ValueChanged<String>? onOnly;
   final ValueChanged<int> onSelectIndex;
   final double rowExtent;
 
   const _LiveCategoryPane({
     required this.categories,
     required this.selectedCategoryId,
+    this.selectedCategoryIds = const <String>{},
     required this.selectedIndex,
     required this.focusNode,
     required this.onKey,
     required this.scrollController,
     required this.onSelected,
+    this.onOnly,
     required this.onSelectIndex,
     required this.rowExtent,
   });
@@ -776,11 +813,19 @@ class _LiveCategoryPane extends StatelessWidget {
                 semanticChildCount: items.length,
                 itemBuilder: (context, i) {
                   final item = items[i];
+                  final checked =
+                      item.id != null && selectedCategoryIds.contains(item.id);
                   return IndexedSemantics(
                     index: i,
                     child: _CategoryRow(
                       label: item.label,
-                      active: item.id == selectedCategoryId,
+                      // The "All channels" row is the active filter only when
+                      // nothing else is selected; a category row is active when
+                      // it is in the (possibly multi) selection.
+                      active: item.id == null
+                          ? selectedCategoryId == null &&
+                                selectedCategoryIds.isEmpty
+                          : checked || item.id == selectedCategoryId,
                       cursor: i == selectedIndex,
                       listFocused: focusNode.hasFocus,
                       position: i + 1,
@@ -789,6 +834,15 @@ class _LiveCategoryPane extends StatelessWidget {
                         onSelectIndex(i);
                         onSelected(item.id);
                       },
+                      // Touch/mouse: "only this category", matching the phone
+                      // sheet's long press. The D-pad has the footer button in
+                      // the sheet instead.
+                      onLongPress: item.id == null || onOnly == null
+                          ? null
+                          : () {
+                              onSelectIndex(i);
+                              onOnly!(item.id!);
+                            },
                     ),
                   );
                 },
@@ -819,7 +873,7 @@ final Color _kRowHoverFill = Color.lerp(
 class _CategoryRow extends StatefulWidget {
   final String label;
 
-  /// This category is the active filter.
+  /// This category is the active filter (or part of the multi-select filter).
   final bool active;
 
   /// The D-pad cursor is on this row.
@@ -831,6 +885,9 @@ class _CategoryRow extends StatefulWidget {
   final int total;
   final VoidCallback onTap;
 
+  /// Touch/mouse "only this category" (a long press, the sheet's gesture).
+  final VoidCallback? onLongPress;
+
   const _CategoryRow({
     required this.label,
     required this.active,
@@ -839,6 +896,7 @@ class _CategoryRow extends StatefulWidget {
     required this.position,
     required this.total,
     required this.onTap,
+    this.onLongPress,
   });
 
   @override
@@ -874,6 +932,7 @@ class _CategoryRowState extends State<_CategoryRow> {
               if (hovered != _hovered) setState(() => _hovered = hovered);
             },
             onTap: onTap,
+            onLongPress: widget.onLongPress,
             child: AnimatedContainer(
               duration: appMotion(context, const Duration(milliseconds: 120)),
               decoration: BoxDecoration(
@@ -890,14 +949,34 @@ class _CategoryRowState extends State<_CategoryRow> {
               ),
               padding: const EdgeInsets.symmetric(horizontal: 10),
               alignment: Alignment.centerLeft,
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: active || cursor ? AppColors.textHi : AppColors.textLo,
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: active || cursor
+                            ? AppColors.textHi
+                            : AppColors.textLo,
+                        fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  // Always drawn, square, and checked for every member of the
+                  // (possibly multi) filter — the row reads as a toggle, not as
+                  // "the one selected thing".
+                  Icon(
+                    active
+                        ? Icons.check_box_rounded
+                        : Icons.check_box_outline_blank_rounded,
+                    size: 18,
+                    color: active
+                        ? AppColors.accent
+                        : AppColors.textLo.withValues(alpha: 0.55),
+                  ),
+                ],
               ),
             ),
           ),

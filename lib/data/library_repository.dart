@@ -246,6 +246,18 @@ class LibraryRepository {
   Future<void>? get pendingEpgRefresh => _pendingEpgRefresh;
   Future<void>? _pendingEpgRefresh;
 
+  /// Whether this source's guide can only match a channel that declares an epg
+  /// id (see [IdOnlyGuideSource]).
+  ///
+  /// The live list reads it to answer "can this row ever print a programme?"
+  /// from the catalogue alone, before the guide finishes downloading. Sources
+  /// that do not opt in are treated as able to match every channel — Stalker's
+  /// provider guide is keyed by its own channel ids and needs no epg id.
+  bool get guideMatchesByIdOnly => switch (source) {
+    final IdOnlyGuideSource s => s.guideMatchesByIdOnly,
+    _ => false,
+  };
+
   Future<void> _scheduleEpgRefresh(
     List<Channel> channels, {
     required bool forceRefresh,

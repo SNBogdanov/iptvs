@@ -103,6 +103,7 @@ class XtreamSource
     implements
         Source,
         BatchedEpgSource,
+        IdOnlyGuideSource,
         CatchupSource,
         SourceCapabilityReporter,
         RefreshableSource {
@@ -183,6 +184,14 @@ class XtreamSource
   /// priority order. See [mergeEpgGuides]: a channel is served by the first
   /// guide that carries it, never by two at once.
   final List<String> extraEpgUrls;
+
+  /// The panel's own `xmltv.php` is matched **only** by `epg_channel_id`
+  /// (`extra['tvgId']`) — see `_guideFeeds`'s `nameToChannelIds: i == 0 ? const
+  /// {} : names`. So without a top-up guide, a channel that carries no epg id
+  /// can never receive a programme, which is what the live list uses to keep
+  /// such rows compact while the guide downloads.
+  @override
+  bool get guideMatchesByIdOnly => extraEpgUrls.isEmpty;
 
   /// Advanced per-source catch-up overrides. When omitted, Xtream panels are
   /// treated as using the device wall clock.

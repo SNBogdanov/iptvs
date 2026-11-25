@@ -96,13 +96,14 @@ The live tab is a selection model (`live_focus_coordinator.dart`) — the same p
 uses, and for the same reason. The channel list and the category sidebar each have exactly **one**
 focus node (`live.channels` / `live.categories`) and a **selected index**; rows are *not* focus
 targets (they stay tappable for touch), and the coordinator drives the scroll itself with exact
-`index * itemExtent` maths. This is why both lists set an explicit **`itemExtent`**. Their baseline
-extents are `kChannelRowExtentWithEpg` 112 / `kChannelRowExtentPlain` 72 /
-`kCategoryRowExtent` 48 in `live_tab_view.dart` — raised from 44 so the row clears the 48 px touch
-minimum, with the 2 px visual gap drawn *inside* the extent so the selection model still scrolls by
-one uniform value. `LiveLayoutMetrics` reduces them within guarded
-minimums on short wide viewports, and the coordinator receives those exact computed values so its
-index→offset calculation cannot drift from the rendered list.
+arithmetic. The category sidebar keeps a uniform `itemExtent` (`kCategoryRowExtent` 48, with the
+2 px visual gap drawn *inside* it). The **channel list is per-row**: `kChannelRowExtentWithEpg` 112
+when the row draws now/next, `kChannelRowExtentPlain` 72 when it has no programme — the list takes
+its extents from `LiveRowLayout` (`itemExtentBuilder`) and the coordinator reveals from the same
+object's prefix sums, so a catalog whose guide covers a handful of channels no longer holds every
+row at 112 px with an empty band. `LiveLayoutMetrics` reduces both heights within guarded
+minimums on short wide viewports and on Android TV; the coordinator receives the same computed
+values the rows are built with, so index→offset cannot drift from the rendered list.
 
 Because `_reveal` scrolls a row against `position.viewportDimension`, the **viewport itself** has to
 exclude the system-bar insets, or a revealed row lands underneath the bar. That is why the channel
@@ -204,9 +205,9 @@ tile-width band.
 
 - **The cross-source Favorites view adds no navigation surface.** "Favorites · All sources" is an
   ordinary entry in the category list, so it costs the Back ladder nothing — no new rung, no new
-  focus node, and the channel list stays the same selection model under the same `itemExtent`
-  rules (its rows carry a guide of their own, so they take the EPG extent when one is loaded —
-  decided by `showsEpg`, the single value the extent and the row layout both read). That
+  focus node, and the channel list stays the same selection model (its rows carry a guide of their
+  own, so a foreign row with a programme takes the taller row and one without stays compact —
+  decided per row by the same `LiveRowLayout` the rest of the list uses, reading `epgFor`). That
   was the reason for preferring it over a dedicated screen, which would have duplicated the list,
   preview pane, EPG strip and D-pad model. It also behaves like one: OK previews and a second OK
   goes fullscreen, exactly as anywhere else — the preview simply resolves through the row's own
@@ -214,10 +215,11 @@ tile-width band.
   identified by `(sourceId, channelId)`, never the id alone; on a remote the symptom of getting
   that wrong would be a second OK opening a different channel than the one on screen.
   Its rows carry a **source chip inline with the channel
-  name** rather than on a line of their own: index→offset math is `index * itemExtent`, so a row
-  that grows by a line breaks scrolling for the whole list. The chip's font stays below the title's
-  so the line height — and therefore the extent — is still set by the title alone, and
-  `layout_overflow_test.dart` sweeps it with real font metrics at text scales up to 2.0.
+  name** rather than on a line of their own: a shared line is what keeps the chip from changing the
+  row's height class (with or without EPG), so a foreign row stays comparable to a local one. The
+  chip's font stays below the title's so the line height — and therefore the extent — is still set
+  by the title alone, and `layout_overflow_test.dart` sweeps it with real font metrics at text
+  scales up to 2.0.
 
 - **The preview picture is a play target through one pointer gesture.** With nothing running the
   panel shows the selected channel's logo, and a **single click** there is the pointer's "preview

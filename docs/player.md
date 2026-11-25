@@ -3823,9 +3823,15 @@ deliberate:
   list reads it (`LiveZapController.reRanged` + `rangeCategoryId`) and, when the session's list
   left the group it launched from, switches its own filter to that group before restoring the row
   (`liveTabCategoryForZapRange` maps the quick list's vocabulary back: `''` → "All channels",
-  `zapsrc:<id>` → the cross-source view). Without it, Back landed in the group the tab had *before*
-  the player opened and, since the watched channel is not drawn there, on the first row of that old
-  group.
+  `zapsrc:<id>` → the cross-source view, `multi:<ids>` → the live multi-select filter). Without it,
+  Back landed in the group the tab had *before* the player opened and, since the watched channel is
+  not drawn there, on the first row of that old group.
+- **A union filter is a range with an id of its own.** When the live tab is showing several
+  categories, the session's range carries `multi:<sorted ids>` (not `''`), so the quick list's
+  categories rung opens on a **row for that union** — titled with the same `Sports + News` /
+  `Sports + 2 more` label the zap banner uses — instead of highlighting "All channels" with no row
+  for what the session was walking. Picking it re-ranges to exactly those categories (hidden ones
+  excluded, catalog order), and Back on the tab restores the union rather than clearing it.
 - "Last channel" is likewise a channel — **plus the range it was played from**
   (`_previousRange`, rotated with `_playingRange` on every settle). Recalling a previous channel
   that has fallen outside the current range **restores that range with it** (never a widened one),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyEvent, KeyRepeatEvent;
 
@@ -403,6 +405,225 @@ class ChannelCategoryDropdown extends StatelessWidget {
     );
   }
 }
+
+/// The phone/tablet **live** category control: a summary that opens a
+/// checkbox sheet, because live supports a multi-select union (the media tabs
+/// keep the single-category dropdown — their cache is keyed per category).
+///
+/// Tapping a row toggles it; "All channels" clears; Favorites stays exclusive
+/// (it is a view, not a filter). A **long-press** on a row is "only this", and
+/// the footer carries `Only <previous single>` — the one-press way back from a
+/// union on a D-pad, where a long-press does not exist.
+class ChannelCategoryMultiPicker extends StatelessWidget {
+  final List<Category> categories;
+  final String? selectedCategoryId;
+  final Set<String> selectedCategoryIds;
+
+  /// The synthetic Favorites id, passed in so this file needs no dependency on
+  /// the controller's constants.
+  final String favoritesCategoryId;
+
+  /// The last single category (or null), offered as the one-tap "Only …".
+  final String? previousSingleCategoryId;
+
+  /// `(ids, exclusive)` — `exclusive` is a Favorites-style view id, or null for
+  /// an ordinary union/single selection.
+  final void Function(Set<String> ids, {String? exclusive}) onApply;
+
+  const ChannelCategoryMultiPicker({
+    super.key,
+    required this.categories,
+    required this.selectedCategoryId,
+    required this.selectedCategoryIds,
+    required this.favoritesCategoryId,
+    required this.previousSingleCategoryId,
+    required this.onApply,
+  });
+
+  String _titleFor(String id) {
+    for (final category in categories) {
+      if (category.id == id) return category.title;
+    }
+    return 'All categories';
+  }
+
+  String get _summary {
+    if (selectedCategoryId != null) {
+      return selectedCategoryId == favoritesCategoryId
+          ? 'Favorites'
+          : _titleFor(selectedCategoryId!);
+    }
+    if (selectedCategoryIds.length >= 2) {
+      return '${selectedCategoryIds.length} categories';
+    }
+    if (selectedCategoryIds.length == 1) {
+      return _titleFor(selectedCategoryIds.single);
+    }
+    return 'All categories';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _DropdownFrame(
+      builder: (focusNode) => InkWell(
+        focusNode: focusNode,
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        onTap: () => unawaited(_open(context)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _summary,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.textHi),
+                ),
+              ),
+              const Icon(Icons.expand_more, color: AppColors.textLo),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _open(BuildContext context) async {
+    // State lives **outside** the `StatefulBuilder` closure: the builder re-runs
+    // on every tap, so a set created inside it would forget the toggle and
+    // rebuild the checkmarks from the original selection.
+    final picked = Set<String>.of(selectedCategoryIds);
+    String? exclusive = selectedCategoryId;
+
+    final result = await showDialog<(Set<String>, String?)>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          void toggle(String? id) {
+            setState(() {
+              if (id == null) {
+                picked.clear();
+                exclusive = null;
+              } else if (id == favoritesCategoryId) {
+                picked.clear();
+                exclusive = id;
+              } else {
+                exclusive = null;
+                if (!picked.remove(id)) picked.add(id);
+              }
+            });
+          }
+
+          void only(String id) {
+            Navigator.pop(
+              context,
+              id == favoritesCategoryId
+                  ? (<String>{}, id)
+                  : (<String>{id}, null),
+            );
+          }
+
+          Widget row(String? id, String label) {
+            final favorites = id != null && id == favoritesCategoryId;
+            final checked = favorites
+                ? exclusive == id
+                : id == null
+                ? picked.isEmpty && exclusive == null
+                : picked.contains(id);
+            return InkWell(
+              borderRadius: BorderRadius.circular(AppRadius.tile),
+              onTap: () => toggle(id),
+              // Touch/mouse shortcut that mirrors the sidebar's long press.
+              onLongPress: id == null ? null : () => only(id),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 12,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: checked ? AppColors.textHi : AppColors.textLo,
+                          fontWeight: checked
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    Icon(
+                      // Square, like every other multi-select in the app: the
+                      // round `check_circle`/`circle_outlined` pair read as a
+                      // radio group, i.e. as "exactly one".
+                      checked
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded,
+                      size: 22,
+                      color: checked ? AppColors.accent : AppColors.textLo,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          final previous = previousSingleCategoryId;
+          return AlertDialog(
+            backgroundColor: AppColors.panelHi,
+            title: const Text('Categories'),
+            content: SizedBox(
+              width: 380,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    row(null, 'All channels'),
+                    if (categories.any((c) => c.id == favoritesCategoryId))
+                      row(favoritesCategoryId, 'Favorites'),
+                    for (final category in categories)
+                      if (category.id != favoritesCategoryId)
+                        row(category.id, category.title),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              // One press back to a single category — the D-pad path to what a
+              // long press does on touch. Hidden when it would change nothing.
+              if (previous != null &&
+                  previous != selectedCategoryId)
+                TextButton(
+                  onPressed: () =>
+                      Navigator.pop(context, (<String>{previous}, null)),
+                  child: Text(
+                    'Only ${_titleFor(previous)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, (picked, exclusive)),
+                child: const Text('Apply'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (result == null) return;
+    onApply(result.$1, exclusive: result.$2);
+  }
+}
+
 
 class MediaCategoryDropdown extends StatelessWidget {
   final List<MediaCategory> categories;

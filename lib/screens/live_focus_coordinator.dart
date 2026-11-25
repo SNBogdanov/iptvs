@@ -5,6 +5,7 @@ import 'package:flutter/services.dart'
 import '../player/channel_number_entry.dart';
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
+import 'live_row_layout.dart';
 
 /// Which live region currently owns the D-pad.
 enum LiveFocusRegion { none, channels, categories, previewControls, search }
@@ -76,6 +77,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     required this.orderedCategoryIds,
     required this.channelRowExtent,
     required this.categoryRowExtent,
+    this.channelRowLayout,
     required this.isWide,
     required this.isMounted,
     required this.onChannelSelectionChanged,
@@ -187,6 +189,11 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// Uniform row heights — the whole point of the model: index → offset is exact.
   final double Function() channelRowExtent;
   final double Function() categoryRowExtent;
+
+  /// Exact per-row geometry of the channel list. When given, a reveal uses its
+  /// offsets (rows can be short or tall individually); when absent the list is
+  /// uniform and [channelRowExtent] is used.
+  final LiveRowLayout Function()? channelRowLayout;
 
   /// Wide (TV/desktop two-column) vs narrow (phone). Decides whether the
   /// category sidebar and preview controls exist at all.
@@ -425,12 +432,30 @@ class LiveFocusCoordinator extends ChangeNotifier {
     );
   }
 
-  void _revealChannel(int index, {bool immediate = false}) => _reveal(
-    scrollController,
-    index,
-    channelRowExtent(),
-    immediate: immediate,
-  );
+  void _revealChannel(int index, {bool immediate = false}) {
+    final layout = channelRowLayout?.call();
+    if (layout == null) {
+      _reveal(
+        scrollController,
+        index,
+        channelRowExtent(),
+        immediate: immediate,
+      );
+      return;
+    }
+    // Exact top/extent of the row, and an exact end of the list: `jumpTo` is
+    // clamped against the real geometry rather than the framework's estimate
+    // for the children it has not built yet (which is what a long jump used to
+    // land short on).
+    final top = layout.offsetAt(index.clamp(0, layout.count - 1));
+    _revealSpan(
+      scrollController,
+      top,
+      top + layout.extentAt(index.clamp(0, layout.count - 1)),
+      layout.total,
+      immediate: immediate,
+    );
+  }
 
   void _revealCategory(int index, {bool immediate = false}) => _reveal(
     categoryScrollController,
@@ -448,9 +473,28 @@ class LiveFocusCoordinator extends ChangeNotifier {
     bool immediate = false,
   }) {
     if (!controller.hasClients || extent <= 0) return;
+    _revealSpan(
+      controller,
+      index * extent,
+      index * extent + extent,
+      null,
+      immediate: immediate,
+    );
+  }
+
+  /// The shared tail of every reveal: [top]/[bottom] are the row's exact
+  /// bounds, and [totalExtent] — when the caller knows the real total row
+  /// height — replaces the framework's `maxScrollExtent`, which is only an
+  /// estimate while part of the list is unbuilt.
+  void _revealSpan(
+    ScrollController controller,
+    double top,
+    double bottom,
+    double? totalExtent, {
+    bool immediate = false,
+  }) {
+    if (!controller.hasClients) return;
     final position = controller.position;
-    final top = index * extent;
-    final bottom = top + extent;
     final viewport = position.viewportDimension;
     double? target;
     if (top < position.pixels) {
@@ -459,7 +503,9 @@ class LiveFocusCoordinator extends ChangeNotifier {
       target = bottom - viewport;
     }
     if (target == null) return;
-    final clamped = target.clamp(0.0, position.maxScrollExtent);
+    final estimatedMax = position.maxScrollExtent;
+    final maxOffset = totalExtent == null ? estimatedMax : totalExtent - viewport;
+    final clamped = target.clamp(0.0, maxOffset < 0 ? 0.0 : maxOffset);
     if (immediate) {
       controller.jumpTo(clamped);
       return;

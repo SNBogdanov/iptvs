@@ -53,6 +53,7 @@ import 'legal_screen.dart';
 import 'live_controller.dart';
 import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
+import 'live_row_layout.dart';
 import 'live_tab_view.dart';
 import 'media_category_cache.dart';
 import 'media_sort.dart';
@@ -238,6 +239,29 @@ bool liveRowsShowEpg({
 }) => categoryId == kAllSourcesFavoritesCategoryId
     ? hasCrossSourceEpg
     : hasEpg || expectsEpg;
+
+/// Prefix of the id a **union** live filter travels under (`_liveFilterIds`),
+/// e.g. in the player's zap range and in the quick list's categories mode. The
+/// same encoding is persisted for a >=2 selection, so a restored union and a
+/// live one are indistinguishable to everything downstream.
+const String kMultiLiveCategoryPrefix = 'multi:';
+
+/// Separator inside [kMultiLiveCategoryPrefix]'s ids — NUL, which no provider
+/// category id contains.
+const String kLiveCategorySeparator = '\u0000';
+
+/// Canonical id for the union of [ids]: sorted, so two equal selections are the
+/// same id however they were built.
+String multiLiveCategoryId(Iterable<String> ids) =>
+    '$kMultiLiveCategoryPrefix'
+    '${(ids.toList()..sort()).join(kLiveCategorySeparator)}';
+
+/// The category ids inside [multiLiveCategoryId]'s output.
+List<String> multiLiveCategoryIds(String id) => id
+    .substring(kMultiLiveCategoryPrefix.length)
+    .split(kLiveCategorySeparator)
+    .where((categoryId) => categoryId.isNotEmpty)
+    .toList(growable: false);
 
 /// Whether the live tab must fall back to "All" because the cross-source
 /// Favorites view is selected but no longer offered.
@@ -466,6 +490,29 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   StreamSubscription<void>? _watchReplacedSub;
   final Map<String, LibraryRepository> _foreignRepos = {};
   String? _categoryId;
+
+  /// Live categories in the **multi-select** filter.
+  ///
+  /// Empty is the ordinary single-category mode ([_categoryId], null = All,
+  /// [kFavoritesCategoryId] = favorites). Two or more ids mean the live list is
+  /// the **union** of those categories, and [_categoryId] is null so the
+  /// single-category checks read as "no single filter". Tapping a category in
+  /// the sidebar (or picking it in the phone sheet) toggles membership; the
+  /// "All channels" row clears it. Live only: the media tabs keep one category,
+  /// because their cache and paging are keyed per category.
+  final Set<String> _liveFilterIds = <String>{};
+
+  /// The last *one-category* choice (never All/Favorites), offered by both
+  /// controls as `Only <name>`: the one-press way back from a union, including
+  /// on a D-pad where a long-press does not exist.
+  String? _liveSingleCategoryId;
+
+  /// `multi:` + ids joined by NUL, the encoding a >=2 selection is remembered
+  /// with. A single selection stores the plain id, so every older record still
+  /// restores exactly as before.
+  static const String _kMultiLiveCategoryPrefix = kMultiLiveCategoryPrefix;
+  static const String _kLiveCategorySeparator = kLiveCategorySeparator;
+
   String _query = '';
 
   bool _resolving = false;
@@ -915,7 +962,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // start on the wrong row. The id is only a *candidate* until the catalogue
     // arrives (`_dropUnavailableLiveCategory`): a provider may have renamed or
     // dropped the group since, and the fallback is "All channels".
-    _categoryId = cachedLiveCategory(widget.repo.source.id);
+    _restoreLiveCategory();
     _createRepositoryControllers();
     _focus = LiveFocusCoordinator(
       scrollController: _scrollController,
@@ -927,11 +974,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         for (final category in _liveCategoriesForUi) category.id,
       ],
       channelRowExtent: _liveChannelRowExtent,
+      channelRowLayout: () => _liveRowLayout,
       categoryRowExtent: _liveCategoryRowExtent,
       isWide: _isWide,
       isMounted: () => mounted,
       onChannelSelectionChanged: _onChannelSelectionChanged,
-      onCategoryActivated: _selectCategory,
+      onCategoryActivated: _toggleLiveCategory,
       onPlayChannel: _play,
       onToggleFavorite: (channel) =>
           unawaited(_toggleFavorite(ContentKind.live, channel.id)),
@@ -969,6 +1017,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         kind: MediaTabController(
           kind: kind,
           repo: widget.repo,
+          refreshInterval: widget.config.refreshInterval,
           onEnrichError: _showSnack,
         ),
     };
@@ -1354,7 +1403,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _zapRecall = null;
       // A different source has its own remembered category (ids are the
       // provider's), so the previous one must not leak into it.
-      _categoryId = cachedLiveCategory(widget.repo.source.id);
+      _restoreLiveCategory();
       _loadLive();
       _live.startEpgRefresh();
       _globalFavorites.startEpgRefresh();
@@ -1675,12 +1724,29 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // the old group, which reads as "Back went to the wrong place".
         if (played != null) {
           final target = liveTabCategoryForZapRange(played.id);
-          final offered =
-              target == null ||
-              target == kAllSourcesFavoritesCategoryId ||
-              _liveCategoriesForUi.any((category) => category.id == target);
-          if (offered && target != _categoryId) {
-            _selectCategory(target, scrollToTop: false);
+          if (target != null && target.startsWith(kMultiLiveCategoryPrefix)) {
+            // The session was re-ranged to a **union** in the quick list. It is
+            // not a provider category, so it is restored through the multi-select
+            // path rather than as one id — otherwise the tab stayed on whatever
+            // single category it showed before, which does not draw the channel.
+            final ids = multiLiveCategoryIds(target);
+            final offered = ids.every(
+              (id) => _liveCategoriesForUi.any((category) => category.id == id),
+            );
+            final current =
+                ids.length == _liveFilterIds.length &&
+                ids.every(_liveFilterIds.contains);
+            if (offered && !current) {
+              _applyLiveSelection(ids.toSet(), scrollToTop: false);
+            }
+          } else {
+            final offered =
+                target == null ||
+                target == kAllSourcesFavoritesCategoryId ||
+                _liveCategoriesForUi.any((category) => category.id == target);
+            if (offered && target != _categoryId) {
+              _selectCategory(target, scrollToTop: false);
+            }
           }
         }
         _focus.restoreSelectionToChannel(_lastPlayedLiveChannelId);
@@ -1950,6 +2016,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   List<Channel>? _visibleCache;
   (
     String?,
+    String, // sorted multi-select ids, so a set change changes the key
     String,
     List<Channel>,
     Set<String>,
@@ -1976,6 +2043,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   List<Channel> get _visible {
     final key = (
       _categoryId,
+      (_liveFilterIds.toList()..sort()).join(_kLiveCategorySeparator),
       _query.trim().toLowerCase(),
       _live.channels,
       _favoriteIds(ContentKind.live),
@@ -2042,6 +2110,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       ];
     }
     final favoritesView = _categoryId == kFavoritesCategoryId;
+    // Multi-select: the union of the chosen categories, hidden groups still
+    // excluded. Checked before the favorites branch because a multi selection
+    // is never combined with Favorites (tapping Favorites clears the set).
+    if (_liveFilterIds.isNotEmpty) {
+      final hidden = _hiddenCategories(ContentKind.live);
+      return _live.channels.where((c) {
+        if (!_liveFilterIds.contains(c.categoryId)) return false;
+        if (hidden.contains(c.categoryId)) return false;
+        if (q.isNotEmpty && !c.name.toLowerCase().contains(q)) return false;
+        return true;
+      }).toList();
+    }
     final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
     final hidden = _hiddenCategories(ContentKind.live);
     final matched = _live.channels.where((c) {
@@ -2384,7 +2464,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // neither is a category the provider knows about, and both are ranges the
     // user can only have reached deliberately.
     final ranged = explicit == null && _query.trim().isEmpty;
-    final categoryId = ranged ? (_categoryId ?? '') : '';
+    // A union carries its own id rather than "no category": `''` is the mode's
+    // "everything" row, and the quick list's categories rung highlights what
+    // this id names — with `''` a union highlighted **All channels**, and there
+    // was no row for the several categories the session was actually walking.
+    final union = _liveFilterIds.length >= 2;
+    final categoryId = ranged
+        ? (union ? multiLiveCategoryId(_liveFilterIds) : (_categoryId ?? ''))
+        : '';
+    final label = ranged && union
+        ? _multiCategoryTitle()
+        : _categoryTitleFor(categoryId);
     return (
       entries: zapEntriesOf(
         channels,
@@ -2393,14 +2483,27 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       ),
       index: index,
       categoryId: categoryId,
-      label: _categoryTitleFor(categoryId),
+      label: label,
     );
+  }
+
+  /// "Sports + News" (or "Sports + 2 more") for a multi-select range's banner.
+  String _multiCategoryTitle() {
+    final titles = [
+      for (final category in _liveCategoriesForUi)
+        if (_liveFilterIds.contains(category.id)) category.title,
+    ];
+    if (titles.length <= 2) return titles.join(' + ');
+    return '${titles.first} + ${titles.length - 1} more';
   }
 
   /// Display title for a live category id, `''` meaning "All channels" — the
   /// same wording the sidebar's first row uses.
   String _categoryTitleFor(String categoryId) {
     if (categoryId.isEmpty) return 'All channels';
+    if (categoryId.startsWith(kMultiLiveCategoryPrefix)) {
+      return _multiCategoryTitle();
+    }
     for (final category in _liveCategoriesForUi) {
       if (category.id == categoryId) return category.title;
     }
@@ -3752,45 +3855,209 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     textScale: mounted ? MediaQuery.textScalerOf(context).scale(1) : 1.0,
   );
 
-  bool get _liveRowsShowEpg => liveRowsShowEpg(
-    categoryId: _categoryId,
-    hasEpg: _live.now.isNotEmpty,
-    hasCrossSourceEpg: _globalFavorites.hasEpg,
-    expectsEpg: _live.expectsEpg,
+  bool get _liveRowsShowEpg {
+    if (_categoryId == kAllSourcesFavoritesCategoryId) {
+      return liveRowsShowEpg(
+        categoryId: _categoryId,
+        hasEpg: _live.now.isNotEmpty,
+        hasCrossSourceEpg: _globalFavorites.hasEpg,
+        expectsEpg: _live.expectsEpg,
+      );
+    }
+    // The guide is often *partial*: a portal can return programmes for a
+    // handful of channels, or for none of the ones this view draws (an XMLTV id
+    // that matches nothing, a category the provider never covers). Asking only
+    // "did any guide arrive?" then kept every row at its tall 112 px extent
+    // while the visible rows had nothing to put in it — the wasted band the
+    // rows were reported to show. So the question is about **this view**:
+    // tall only when at least one row here can actually print a programme.
+    if (_live.expectsEpg && _guideMatchesByIdOnly) {
+      // The guide is still downloading, so there is no programme data yet — but
+      // an id-only guide can only ever match a channel that **carries an epg
+      // id** (`extra['tvgId']`: Xtream's `epg_channel_id`, M3U's `tvg-id`). A
+      // catalog with none of those needs no headroom at all, and holding every
+      // row tall "while the guide loads" is exactly the dead band being fixed:
+      // answer from the channel list instead of waiting for data that cannot
+      // arrive. `hasProgramme` still wins: a cached guide can already be on
+      // screen while its refresh runs.
+      return _filteredEpgFacts.hasId || _filteredEpgFacts.hasProgramme;
+    }
+    return liveRowsShowEpg(
+      categoryId: _categoryId,
+      hasEpg: _filteredEpgFacts.hasProgramme,
+      hasCrossSourceEpg: _globalFavorites.hasEpg,
+      expectsEpg: _live.expectsEpg,
+    );
+  }
+
+  /// Whether the source's guide can only match by epg id, so a channel without
+  /// one will never get a programme from it. False for portals whose guide is
+  /// keyed by channel id (Stalker) or that fall back to name matching.
+  bool get _guideMatchesByIdOnly => widget.repo.guideMatchesByIdOnly;
+
+  // The scan below walks the catalogue, so it is memoized on the *inputs* that
+  // can change the answer. Deliberately **not** keyed on the search query:
+  // typing would then flip the whole list between two row heights whenever the
+  // query happened to match only channels without a guide.
+  (
+    String?,
+    List<Channel>,
+    Set<String>,
+    Map<String, Programme>,
+    Map<String, Programme>,
+  )?
+  _filteredEpgKey;
+  ({bool hasProgramme, bool hasId}) _filteredEpgCache = (
+    hasProgramme: false,
+    hasId: false,
   );
+
+  /// What this view can ever put on the rows' second/third/fourth lines.
+  ///
+  /// [hasProgramme] — some drawn channel has a now/next programme (the guide has
+  /// landed and covers it). [hasId] — some drawn channel declares an epg id, so
+  /// an id-only guide *could* still cover it.
+  ///
+  /// Hidden categories are excluded, exactly as the list excludes them, so
+  /// hiding the one covered group genuinely collapses the rows.
+  ({bool hasProgramme, bool hasId}) get _filteredEpgFacts {
+    final channels = _live.channels;
+    final now = _live.now;
+    final next = _live.next;
+    final favoritesView = _categoryId == kFavoritesCategoryId;
+    final favs = favoritesView
+        ? _favoriteIds(ContentKind.live)
+        : const <String>{};
+    final key = (_categoryId, channels, favs, now, next);
+    final cached = _filteredEpgKey;
+    if (cached != null &&
+        cached.$1 == key.$1 &&
+        identical(cached.$2, key.$2) &&
+        identical(cached.$3, key.$3) &&
+        identical(cached.$4, key.$4) &&
+        identical(cached.$5, key.$5)) {
+      return _filteredEpgCache;
+    }
+    var hasProgramme = false;
+    var hasId = false;
+    final hidden = _hiddenCategories(ContentKind.live);
+    for (final channel in channels) {
+      if (favoritesView) {
+        if (!favs.contains(channel.id)) continue;
+      } else {
+        if (hidden.contains(channel.categoryId)) continue;
+        if (_categoryId != null && channel.categoryId != _categoryId) {
+          continue;
+        }
+      }
+      if (!hasId) {
+        final tvg = channel.extra['tvgId'];
+        hasId = tvg is String && tvg.isNotEmpty;
+      }
+      if (!hasProgramme &&
+          (now.containsKey(channel.id) || next.containsKey(channel.id))) {
+        hasProgramme = true;
+      }
+      if (hasProgramme && hasId) break;
+    }
+    _filteredEpgKey = key;
+    return _filteredEpgCache = (hasProgramme: hasProgramme, hasId: hasId);
+  }
 
   double _liveChannelRowExtent() =>
       _liveLayoutMetrics.channelRowExtent(_liveRowsShowEpg);
 
-  /// The row extent the live list was last built with, so a change in it can
-  /// re-reveal the selection.
-  double? _lastLiveRowExtent;
+  // ── Per-row geometry ───────────────────────────────────────────────────────
+  // A uniform extent made one channel with a guide entry hold every row at
+  // 112 px, so a portal whose guide covers a handful of channels showed an
+  // empty second half on all the rest. Rows are sized individually now: tall
+  // only where a programme is actually drawn (or can still arrive while the
+  // guide downloads). The layout is memoized on the inputs that can change it —
+  // `_visible` and the guide maps are reassigned rather than mutated, so
+  // identity is the cheap test.
+  LiveRowLayout? _liveRowLayoutCache;
+  (
+    Object?,
+    Object?,
+    Object?,
+    Object?,
+    bool,
+    bool,
+    bool,
+    double,
+    double,
+  )?
+  _liveRowLayoutKey;
 
-  /// Re-reveal the selected row when the row *height* changes underneath it.
+  LiveRowLayout get _liveRowLayout {
+    final visible = _visible;
+    final crossSourceView = _categoryId == kAllSourcesFavoritesCategoryId;
+    final metrics = _liveLayoutMetrics;
+    final plain = metrics.channelRowExtentPlain;
+    final tall = metrics.channelRowExtentWithEpg;
+    final expects = _live.expectsEpg;
+    final idOnly = _guideMatchesByIdOnly;
+    final now = _live.now;
+    final next = _live.next;
+    final key = (
+      visible,
+      now,
+      next,
+      _globalFavorites.items,
+      crossSourceView,
+      expects,
+      idOnly,
+      plain,
+      tall,
+    );
+    if (key == _liveRowLayoutKey) return _liveRowLayoutCache!;
+    _liveRowLayoutKey = key;
+    return _liveRowLayoutCache = LiveRowLayout(
+      count: visible.length,
+      plain: plain,
+      withEpg: tall,
+      tallAt: (index) {
+        final channel = visible[index];
+        if (crossSourceView) {
+          final epg = _crossSourceEpgFor(channel);
+          return epg.now != null || epg.next != null;
+        }
+        if (now.containsKey(channel.id) || next.containsKey(channel.id)) {
+          return true;
+        }
+        if (!expects) return false;
+        // The guide is in flight. Rows that carry an epg id can still receive a
+        // programme from an id-only guide; a catalog without them is drawn
+        // compactly from the start instead of reserving space for data that
+        // cannot arrive (see `LiveController.expectsEpg`).
+        if (!idOnly) return true;
+        final tvg = channel.extra['tvgId'];
+        return tvg is String && tvg.isNotEmpty;
+      },
+    );
+  }
+
+  /// The layout the live list was last built with, so a change in it can
+  /// re-reveal the selection.
+  LiveRowLayout? _lastLiveRowLayout;
+
+  /// Re-reveal the selected row when the row *heights* change underneath it.
   ///
-  /// The live list scrolls by exact `index * itemExtent` arithmetic, so the
-  /// offset is only correct for the extent it was computed against. Rows are
-  /// 72px without an EPG line and 112 with one, and **`_liveRowsShowEpg` can
-  /// flip after the rows are already on screen** — most visibly in the
-  /// cross-source Favorites view, whose guide is fetched separately
-  /// (`GlobalFavoritesController.hasEpg`) and lands after the list is built.
-  ///
-  /// The symptom is precise and was reported as such: the cursor is on the
-  /// right channel, the list is scrolled to the wrong place, and one press of
-  /// Up or Down snaps it back — because that press re-reveals against the
-  /// extent the rows now actually have. The error grows with the row index,
-  /// which is why it reads as "the highlighted channel isn't centred".
+  /// The list's scroll offsets are sums of the row heights, so a height that
+  /// arrives late (a guide landing, a row with a programme growing, the
+  /// cross-source Favorites guide arriving from its own controller) leaves the
+  /// cursor on the right row with the list looking somewhere else — the error
+  /// grows with the row index, and one press of Up or Down snaps it back.
   ///
   /// Deliberately post-frame: the reveal has to run *after* the list has been
-  /// rebuilt with the new `itemExtent`, or it computes against the old geometry
-  /// again. The first observation only records the extent — there is nothing to
+  /// rebuilt with the new geometry, or it computes against the old one again.
+  /// The first observation only records the layout — there is nothing to
   /// correct before a list exists.
-  void _resyncLiveRowExtent() {
-    final extent = _liveChannelRowExtent();
-    final previous = _lastLiveRowExtent;
-    if (previous == extent) return;
-    _lastLiveRowExtent = extent;
-    if (previous == null) return;
+  void _resyncLiveRowLayout() {
+    final layout = _liveRowLayout;
+    final previous = _lastLiveRowLayout;
+    _lastLiveRowLayout = layout;
+    if (previous == null || identical(previous, layout)) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _focus.revealSelectedChannel();
@@ -3858,10 +4125,67 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// [scrollToTop] is false only for a reveal that names its own row (a typed
   /// channel number): the caller scrolls to that row, and a deferred
   /// `jumpTo(0)` landing after it would throw the reveal away.
+  /// Applies exactly one category (or All/Favorites/cross-source Favorites),
+  /// which is also the "only this" gesture in both category controls.
   void _selectCategory(String? categoryId, {bool scrollToTop = true}) {
+    _liveFilterIds.clear();
+    _rememberSingleCategory(categoryId);
+    _applyLiveFilter(categoryId: categoryId, scrollToTop: scrollToTop);
+  }
+
+  /// Toggles one category in the live multi-select filter.
+  ///
+  /// "All channels", Favorites and the cross-source Favorites stay exclusive:
+  /// they are different *views*, not filters, so choosing one clears the rest.
+  void _toggleLiveCategory(String? categoryId, {bool scrollToTop = true}) {
+    if (categoryId == null ||
+        categoryId == kFavoritesCategoryId ||
+        categoryId == kAllSourcesFavoritesCategoryId) {
+      _selectCategory(categoryId, scrollToTop: scrollToTop);
+      return;
+    }
+    final next = Set<String>.of(_liveFilterIds);
+    if (!next.remove(categoryId)) next.add(categoryId);
+    _applyLiveSelection(next, scrollToTop: scrollToTop);
+  }
+
+  /// Applies a category **set**: empty is All, one id is the ordinary single
+  /// filter, two or more is the union ([_liveFilterIds]) with no single id.
+  void _applyLiveSelection(Set<String> ids, {bool scrollToTop = true}) {
+    _liveFilterIds
+      ..clear()
+      ..addAll(ids);
+    // `Only <previous single>` offers the last *one-category* choice, so a
+    // union must not overwrite it — otherwise the escape hatch points at
+    // something the user just widened away from.
+    if (ids.length == 1) _rememberSingleCategory(ids.single);
+    _applyLiveFilter(
+      categoryId: ids.length == 1 ? ids.single : null,
+      scrollToTop: scrollToTop,
+    );
+  }
+
+  /// Tracks the last real category (not All/Favorites) for the one-press
+  /// "only this" escape from a multi-select.
+  void _rememberSingleCategory(String? categoryId) {
+    if (categoryId == null ||
+        categoryId == kFavoritesCategoryId ||
+        categoryId == kAllSourcesFavoritesCategoryId) {
+      return;
+    }
+    _liveSingleCategoryId = categoryId;
+  }
+
+  void _applyLiveFilter({
+    required String? categoryId,
+    bool scrollToTop = true,
+  }) {
     final keepChannelId = _focus.selectedChannelId;
+    final union = _liveFilterIds.isNotEmpty;
     setState(() => _categoryId = categoryId);
-    _focus.syncCategorySelection(categoryId);
+    // A union has no single active row to point the sidebar cursor at, so leave
+    // the cursor where the user last put it instead of jumping to "All".
+    if (!union) _focus.syncCategorySelection(categoryId);
     // The kept row is revealed post-frame for the same reason a number jump is:
     // the reveal's offset arithmetic runs against the *outgoing* list's extent
     // (see `_revealChannelInList`), so measuring it before this frame rebuilds
@@ -3889,14 +4213,49 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     unawaited(_rememberLiveCategory(categoryId));
   }
 
+  /// Restores the remembered live filter: a plain category id, a favorites/
+  /// cross-source id, or the `multi:` encoding of a >=2 selection.
+  ///
+  /// Called from `initState` (before the catalogue arrives) and again after a
+  /// source switch, which is why it only *caches* what it read — the ids are
+  /// re-checked against the catalogue by [_dropUnavailableLiveCategory].
+  void _restoreLiveCategory() {
+    final cached = cachedLiveCategory(widget.repo.source.id);
+    _liveFilterIds.clear();
+    _liveSingleCategoryId = null;
+    if (cached != null && cached.startsWith(_kMultiLiveCategoryPrefix)) {
+      final hidden = _hiddenCategories(ContentKind.live);
+      final ids = cached
+          .substring(_kMultiLiveCategoryPrefix.length)
+          .split(_kLiveCategorySeparator)
+          .where((id) => id.isNotEmpty && !hidden.contains(id))
+          .toSet();
+      _liveFilterIds.addAll(ids);
+      // One survivor is just the ordinary single filter, so all the existing
+      // single-category checks keep working.
+      _categoryId = ids.length == 1 ? ids.single : null;
+      if (_categoryId != null) _liveSingleCategoryId = _categoryId;
+      return;
+    }
+    _categoryId = cached;
+    _rememberSingleCategory(cached);
+  }
+
   /// Persists the live category for this source, and mirrors it into the
   /// boot-time cache so a rebuild of the screen (a profile switch, a source
   /// reload) restores what the user just picked without another keychain read.
   Future<void> _rememberLiveCategory(String? categoryId) async {
     final sourceId = widget.repo.source.id;
-    cacheLiveCategory(sourceId, categoryId);
+    // A >=2 selection is stored with the `multi:` marker in the same single
+    // key, so an older build reading it would simply not match a category and
+    // fall back to All — and this build reads old plain ids unchanged.
+    final stored = _liveFilterIds.length >= 2
+        ? '$_kMultiLiveCategoryPrefix'
+              '${(_liveFilterIds.toList()..sort()).join(_kLiveCategorySeparator)}'
+        : categoryId;
+    cacheLiveCategory(sourceId, stored);
     try {
-      await const AppSettingsStore().setLiveCategory(sourceId, categoryId);
+      await const AppSettingsStore().setLiveCategory(sourceId, stored);
     } catch (_) {
       // A convenience record: an unreadable keychain must never fail a category
       // switch, it just means the next launch opens on "All".
@@ -3912,9 +4271,34 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// checked the same way — the last favorite may have been removed on another
   /// device, and its pseudo-category only exists while favorites do.
   void _dropUnavailableLiveCategory() {
+    final available = {
+      for (final category in _liveCategoriesForUi) category.id,
+    };
+    if (_liveFilterIds.isNotEmpty) {
+      // A provider may have renamed or dropped a group since the selection was
+      // remembered. Drop the dead ids; one survivor collapses back to the
+      // ordinary single filter, none falls back to All.
+      _liveFilterIds.removeWhere((id) => !available.contains(id));
+      if (_liveFilterIds.length >= 2) {
+        setState(() => _categoryId = null);
+        unawaited(_rememberLiveCategory(null));
+        return;
+      }
+      final collapsed = _liveFilterIds.length == 1 ? _liveFilterIds.single : null;
+      if (collapsed != null) _rememberSingleCategory(collapsed);
+      setState(() => _categoryId = collapsed);
+      if (collapsed != null) {
+        _focus.syncCategorySelection(collapsed);
+      } else {
+        _focus.resetChannelSelection();
+        _focus.clampSelection();
+      }
+      unawaited(_rememberLiveCategory(collapsed));
+      return;
+    }
     final remembered = _categoryId;
     if (remembered == null) return;
-    if (_liveCategoriesForUi.any((category) => category.id == remembered)) {
+    if (available.contains(remembered)) {
       // The filter was restored from the cache before the catalogue arrived, so
       // the sidebar cursor has never been told about it.
       _focus.syncCategorySelection(remembered);
@@ -4333,10 +4717,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                   isWideLayout(MediaQuery.sizeOf(context)))
               ? null
               : (_tab == ContentKind.live
-                    ? ChannelCategoryDropdown(
+                    ? ChannelCategoryMultiPicker(
                         categories: _liveCategoriesForUi,
-                        value: _categoryId,
-                        onChanged: _selectCategory,
+                        selectedCategoryId: _categoryId,
+                        selectedCategoryIds: _liveFilterIds,
+                        favoritesCategoryId: kFavoritesCategoryId,
+                        previousSingleCategoryId: _liveSingleCategoryId,
+                        onApply: (ids, {exclusive}) {
+                          if (exclusive != null) {
+                            _selectCategory(exclusive);
+                          } else {
+                            _applyLiveSelection(ids);
+                          }
+                        },
                       )
                     : MediaCategoryDropdown(
                         categories: _mediaCategoriesForUi(_tab),
@@ -4472,10 +4865,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   Widget _buildLiveBody(List<Channel> visible) {
     final crossSourceView = _categoryId == kAllSourcesFavoritesCategoryId;
-    // Row height can change under a selection that never moved — see
-    // [_resyncLiveRowExtent]. Checked here because this is the one place that
-    // knows the extent the list is about to be built with.
-    _resyncLiveRowExtent();
+    // Row heights can change under a selection that never moved — see
+    // [_resyncLiveRowLayout]. Checked here because this is the one place that
+    // knows the geometry the list is about to be built with.
+    _resyncLiveRowLayout();
     return LiveTabView(
       loading: _live.loading,
       error: _live.error,
@@ -4511,6 +4904,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       categoryScrollController: _categoryScrollController,
       focus: _focus,
       channelRowExtent: _liveChannelRowExtent(),
+      rowLayout: _liveRowLayout,
       categoryRowExtent: _liveCategoryRowExtent(),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
       previewChannelId: _preview.channelId,
@@ -4537,7 +4931,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       onCatchup: _showCatchupSheet,
       categories: _liveCategoriesForUi,
       selectedCategoryId: _categoryId,
-      onCategorySelected: _selectCategory,
+      selectedCategoryIds: _liveFilterIds,
+      onCategorySelected: _toggleLiveCategory,
+      onCategoryOnly: (id) => _selectCategory(id),
       previewVideoBuilder: () => PreviewVideo(preview: _preview),
       previewLoading: _preview.loading,
       previewError: _preview.error,
@@ -4719,8 +5115,19 @@ class _ChannelListZapCatalog implements ZapCatalog {
           ),
       ];
     }
+    final union = _screen._liveFilterIds.length >= 2;
     return [
       const ZapCategoryRow(id: '', title: 'All channels'),
+      // The **union** the session is walking gets a row of its own. Without it
+      // the categories mode opened with "All channels" highlighted (the union's
+      // id was `''`), and picking anything re-ranged away from the several
+      // categories the user had chosen in the list — the report was exactly
+      // that: no row for "several categories", selection on All.
+      if (union)
+        ZapCategoryRow(
+          id: multiLiveCategoryId(_screen._liveFilterIds),
+          title: _screen._multiCategoryTitle(),
+        ),
       for (final category in _screen._liveCategoriesForUi)
         ZapCategoryRow(id: category.id, title: category.title),
     ];
@@ -4729,6 +5136,25 @@ class _ChannelListZapCatalog implements ZapCatalog {
   @override
   Future<List<ZapEntry>> quickListChannels(ZapCategoryRow category) async {
     final id = category.id;
+    // The union row re-ranges the session to the same set the list is drawing:
+    // the provider categories it names, in catalog order, minus the ones the
+    // user disabled — exactly what [_liveChannelsForCategory] would do for a
+    // single id.
+    if (id.startsWith(kMultiLiveCategoryPrefix)) {
+      final wanted = multiLiveCategoryIds(id).toSet();
+      final hidden = _screen._hiddenCategories(ContentKind.live);
+      return zapEntriesOf(
+        _screen._live.channels
+            .where(
+              (channel) =>
+                  wanted.contains(channel.categoryId) &&
+                  !hidden.contains(channel.categoryId),
+            )
+            .toList(growable: false),
+        config: _screen.widget.config,
+        sourceName: _screen.widget.repo.source.name,
+      );
+    }
     if (id.startsWith(_kZapSourcePrefix) ||
         id == kAllSourcesFavoritesCategoryId ||
         (_crossSourceRange && id.isEmpty)) {
@@ -4780,11 +5206,12 @@ const String _kZapSourcePrefix = 'zapsrc:';
 /// The tab category a zap range's id maps back to, when a player session ends.
 ///
 /// The quick list speaks the zap range's vocabulary: `''` is its "everything"
-/// row, a provider category id is itself, and a `zapsrc:<id>` row is one source
-/// inside the cross-source Favorites view. The tab's own filter has no
-/// per-source favorites entry, so a source row lands on the whole cross-source
-/// view - the widest thing that still draws the channel. `null` is "All
-/// channels".
+/// row, a provider category id is itself, a `multi:<ids>` row is the live tab's
+/// union filter (restored through the multi-select path by the caller), and a
+/// `zapsrc:<id>` row is one source inside the cross-source Favorites view. The
+/// tab's own filter has no per-source favorites entry, so a source row lands on
+/// the whole cross-source view - the widest thing that still draws the channel.
+/// `null` is "All channels".
 ///
 /// Pure and top-level so the mapping is pinned by a unit test: getting it wrong
 /// sends the user back to a group their channel is not in.

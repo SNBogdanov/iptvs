@@ -537,6 +537,28 @@ abstract interface class BatchedEpgSource {
   });
 }
 
+/// Optional capability a [Source] can additionally implement when its guide
+/// can **only** match a channel that declares an epg id (`extra['tvgId']` —
+/// Xtream's `epg_channel_id`, M3U's `tvg-id`).
+///
+/// The live list decides its row height from this: a row is tall only when it
+/// can print a programme, and while the guide is still downloading that
+/// question is answered from the catalogue — a channel with no epg id can never
+/// receive one from an id-only guide, so the whole view stays compact instead
+/// of reserving an empty band for the length of the download.
+///
+/// A separate interface rather than a member on [Source], for the same reason
+/// as [BatchedEpgSource]: every implementation declares `implements Source`, so
+/// a new member would have to be redeclared by all of them (and by every test
+/// double) just to keep compiling. A source that does not implement this is
+/// treated as able to match by name or by its own channel ids (Stalker's
+/// provider guide), i.e. as potentially covering any channel.
+abstract interface class IdOnlyGuideSource {
+  /// False once an extra XMLTV guide is added, whose matching falls back to
+  /// channel names — then any channel may still get a programme.
+  bool get guideMatchesByIdOnly;
+}
+
 /// Optional capability a [Source] can additionally implement to drop any
 /// catalog it has memoized in memory, so the next fetch hits the provider
 /// again. A *forced* reload in [LibraryRepository] (`load`/`loadMedia` with

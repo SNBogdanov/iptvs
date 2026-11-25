@@ -109,14 +109,18 @@ and an already-fresh guide would otherwise flash the message for a frame on ever
 ### Two things the user can now see that they could not before
 
 **The rows are sized from what the source *says*, not only from what has arrived.** A channel row
-is 72 px without an EPG line and 112 px with one, and the guide now lands after the list is built —
-so a source's very first load would draw short rows and jump. `LiveController.expectsEpg` takes the
-source at its word while a refresh is running: Stalker and Xtream always report `supported`, M3U
-does when it has an EPG URL, and anything reporting `unknown` keeps the old wait-and-see behaviour
-rather than sizing rows tall for a guide that may never come. `_settleEpgRefresh` re-reads now/next
-*before* clearing the flag, or the rows would drop to 72 px for the frames between the two and rise
-again. `_resyncLiveRowExtent` still re-reveals the selection whenever the extent does change
-(docs/tv-navigation.md) — this reduces how often that happens rather than replacing it.
+is 72 px without a programme and 112 px with one, **per row**: one covered channel no longer holds
+the whole list tall, and a row that can never receive a programme stays compact from the first frame
+(the guide now lands after the list is built, so the old uniform rule drew short rows and jumped).
+`LiveController.expectsEpg` takes the source at its word while a refresh is running: Stalker and
+Xtream always report `supported`, M3U does when it has an EPG URL, and anything reporting `unknown`
+keeps the old wait-and-see behaviour. While the guide is in flight the row stays tall only if it can
+still be matched — by `extra['tvgId']` when the guide matches ids only (`IdOnlyGuideSource`, i.e.
+Xtream without extra XMLTV guides), or always when it can also match by name (Stalker, M3U top-up
+guides). After the guide lands a row is tall only when it actually has now/next.
+`_settleEpgRefresh` re-reads now/next *before* clearing the flag. `_resyncLiveRowLayout` re-reveals
+the selection whenever the geometry object changes (docs/tv-navigation.md) — this reduces how often
+that happens rather than replacing it.
 
 **A guide that fails with nothing behind it says so.** A failed refresh retains the cached guide and
 is otherwise silent, which is right — except when there is no cached guide to retain, where "this

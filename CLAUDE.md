@@ -722,9 +722,13 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   opted out of text scaling. Swept over sizes and text scales in `test/layout_overflow_test.dart`.
 - **Exception:** the two live-tab lists and the EPG grid are **selection models** — one focus
   node + a selected index; rows are *not* focus targets. Never add focus nodes to their rows.
-  Both live lists set an explicit `itemExtent` (`kChannelRowExtentWithEpg` 112 /
-  `kChannelRowExtentPlain` 72 / `kCategoryRowExtent` 48 in `live_tab_view.dart`) — uniform rows
-  make index→offset exact; the tallest EPG row must fit the extent.
+  The category sidebar sets an explicit `itemExtent` (`kCategoryRowExtent` 48 in
+  `live_tab_view.dart`). The channel list is **per-row**: a row with no programme takes
+  `kChannelRowExtentPlain` (72) and one drawing now/next takes `kChannelRowExtentWithEpg` (112),
+  through `LiveRowLayout` (`lib/screens/live_row_layout.dart`) — which is also what the coordinator
+  scrolls by (exact prefix sums, not `index * extent`). Both the list's `itemExtentBuilder` and the
+  coordinator read that one object, so index→offset cannot drift; the tallest EPG row must still
+  fit `kChannelRowExtentWithEpg`.
 - **The EPG grid's horizontal reveal must use the geometry the row painted, not the programme's
   own times.** Grid rows are horizontally virtualized, so a reveal that pans away from the cursor
   doesn't hide the selected cell — it stops building it, and the guide "jumps somewhere with no
