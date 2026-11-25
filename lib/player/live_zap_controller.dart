@@ -289,6 +289,16 @@ class LiveZapController extends ChangeNotifier {
 
   final Random _rng = Random();
 
+  /// Remaining indices of the current random cycle, or null when no cycle has
+  /// been started (random off, the player just opened, or the range replaced).
+  ///
+  /// The cycle is the **no-repeat** half of random zapping: each pick is drawn
+  /// from this bag and removed, so the range is covered once before anything
+  /// repeats; an empty bag is refilled from the whole range minus the channel
+  /// on screen. Dropped by [toggleRandom] and by a range change, so "stop
+  /// zapping or turn random off" always restarts from the full list.
+  List<int>? _randomBag;
+
   /// The auto-switch mode: on/off, the countdown, and the tick that advances
   /// the cursor.
   ///
@@ -711,25 +721,60 @@ class LiveZapController extends ChangeNotifier {
 
   void channelDown() => _moveTo(_nextIndex(-1));
 
-  /// The index [delta] rows away from the cursor — or, when [random] is on, a
-  /// random index that is never the one already under the cursor (re-picking
-  /// the channel on screen would read as a dead key).
+  /// The index [delta] rows away from the cursor — or, when [random] is on, the
+  /// next index from this cycle's shuffle bag.
+  ///
+  /// **Random is a bag, not a die.** Each pick is removed from the bag, so one
+  /// cycle visits every channel of the range exactly once before anything
+  /// repeats; the bag refills only when it empties. Picking with replacement
+  /// (the old behaviour) could show the same channel three times in five
+  /// presses while others were never reached. The channel on screen is excluded
+  /// whenever a bag is forged, so a pick never reads as a dead key.
   int _nextIndex(int delta) {
     if (_entries.length <= 1) return _index;
     if (!random) {
       return (_index + delta + _entries.length) % _entries.length;
     }
-    var pick = _rng.nextInt(_entries.length);
-    while (pick == _index) {
-      pick = _rng.nextInt(_entries.length);
+    var bag = _randomBag;
+    if (bag == null || bag.isEmpty) {
+      bag = _randomBag = _freshRandomBag(
+        excluding: {
+          _index,
+          if (_playingIndex >= 0) _playingIndex,
+        },
+      );
+      catalog.log('zap random cycle rows=${_entries.length}');
+      if (bag.isEmpty) return _index;
     }
-    return pick;
+    return bag.removeLast();
+  }
+
+  /// A shuffled list of every index in the range except [excluding].
+  ///
+  /// Fisher–Yates, so every ordering is equally likely; `Random()` is the
+  /// session's own generator ([_rng]).
+  List<int> _freshRandomBag({required Set<int> excluding}) {
+    final bag = <int>[
+      for (var i = 0; i < _entries.length; i++)
+        if (!excluding.contains(i)) i,
+    ];
+    for (var i = bag.length - 1; i > 0; i--) {
+      final j = _rng.nextInt(i + 1);
+      final swap = bag[i];
+      bag[i] = bag[j];
+      bag[j] = swap;
+    }
+    return bag;
   }
 
   /// Toggles random zapping, persists through [onRandomChanged], and reports
   /// the new state in the banner's transient-message slot.
   bool toggleRandom() {
     random = !random;
+    // The cycle is scoped to "random is on in this player": enabling starts a
+    // fresh bag (forged on the first pick), disabling throws the progress away
+    // so the next enable starts from the full range again.
+    _randomBag = null;
     _showMessage(random ? 'Random zapping on' : 'Random zapping off');
     onRandomChanged?.call(random);
     _notify();
@@ -823,6 +868,7 @@ class LiveZapController extends ChangeNotifier {
     final restored = _indexIn(range.entries, target);
     if (restored < 0) return;
     _entries = range.entries;
+    _randomBag = null;
     _rangeCatId = range.categoryId;
     _rangeCatLabel = range.label;
     _playingIndex = _indexOfEntry(_playingEntry);
@@ -1186,6 +1232,7 @@ class LiveZapController extends ChangeNotifier {
       return;
     }
     _entries = rows;
+    _randomBag = null;
     _rangeChannelsCache = null;
     _rangeCatId = category.id;
     _rangeCatLabel = category.title;
@@ -1550,6 +1597,19 @@ class LiveZapController extends ChangeNotifier {
             ? target
             : _indexOfEntry(entry);
         _playingEntry = entry;
+        // The random cycle spends whatever actually reached the screen — a
+        // random pick, a quick-list row, a typed number, a restored channel.
+        // Removing the *playing* entry rather than the picked index keeps the
+        // bag honest across a manual jump; a re-ranged list invalidates the
+        // indices wholesale, so the cycle starts over instead of drawing from
+        // a stale one.
+        if (_randomBag != null) {
+          if (identical(list, _entries)) {
+            _randomBag!.remove(_playingIndex);
+          } else {
+            _randomBag = null;
+          }
+        }
         _zapCount++;
         onChannelChanged?.call(entry);
         await onPlay?.call(stream, entry);

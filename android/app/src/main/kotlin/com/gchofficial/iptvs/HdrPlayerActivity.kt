@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
@@ -81,6 +82,17 @@ class HdrPlayerActivity : ComponentActivity() {
     // Debug-only: lets an integration-test soak cycle this Activity without a
     // human closing it each time. Inert (never scheduled) outside BuildConfig.DEBUG.
     private var soakAutoCloseJob: Job? = null
+
+    /// Settles what leaving PiP meant: resuming to fullscreen, or the window
+    /// being **dismissed**.
+    ///
+    /// Dismissing PiP does not reliably finish this Activity on every OEM (in
+    /// the field the picture window vanished, the audio kept playing, and the
+    /// Dart route stayed claimed so the next open had no video). A close is
+    /// distinguishable from an expand by what happens next: expand resumes the
+    /// Activity within a frame or two, close leaves it stopped. So the check is
+    /// delayed, and only the stopped case pauses and finishes.
+    private var pipExitJob: Job? = null
 
     // True while this Activity plays through the *adopted* shared preview engine
     // (see [SharedEngine]): it never releases that engine — on exit it hands the
@@ -1558,6 +1570,8 @@ class HdrPlayerActivity : ComponentActivity() {
         if (isInPictureInPictureMode) enteredPip = true
         uiState.inPip = isInPictureInPictureMode
         if (isInPictureInPictureMode) {
+            pipExitJob?.cancel()
+            pipExitJob = null
             // Collapse all chrome so the PiP window is video-only.
             uiState.controlsVisible = false
             uiState.openMenu = PlayerMenu.None
@@ -1569,6 +1583,23 @@ class HdrPlayerActivity : ComponentActivity() {
             // from here would send the PiP window itself to the back (black
             // screen all around — the original 0.1.13 bug).
             MainActivity.instance?.get()?.moveTaskToBack(true)
+        } else if (enteredPip && !isFinishing && !isChangingConfigurations) {
+            // Left PiP. Expanding resumes this Activity; **dismissing** the
+            // window leaves it stopped, and some OEMs never call finish() — the
+            // audio kept playing behind a closed window and the claimed Dart
+            // route made the next open silent. One delayed check tells the two
+            // apart; pausing on expand would be a bug of its own.
+            pipExitJob?.cancel()
+            pipExitJob = lifecycleScope.launch {
+                delay(500)
+                if (isFinishing || isDestroyed) return@launch
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                    return@launch
+                }
+                logNative("pip dismissed: pausing and finishing")
+                engine?.pause()
+                finish()
+            }
         }
     }
 
@@ -1804,6 +1835,8 @@ class HdrPlayerActivity : ComponentActivity() {
         if (instance?.get() === this) instance = null
         soakAutoCloseJob?.cancel()
         soakAutoCloseJob = null
+        pipExitJob?.cancel()
+        pipExitJob = null
         // lifecycleScope cancels this anyway; dropping the reference here also
         // releases the captured reload callback immediately.
         resolveTimeoutJob?.cancel()

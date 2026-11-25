@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.net.ConnectivityManager
 import android.net.Uri
+import android.util.Log
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -236,6 +237,19 @@ class MainActivity : FlutterActivity() {
                     if (url.isNullOrBlank()) {
                         result.error("bad_args", "Missing stream URL", null)
                         return@setMethodCallHandler
+                    }
+
+                    // A previous player that never finished — the field case
+                    // was a dismissed PiP window that the OEM left merely
+                    // stopped — still owns its engine (audio) and the Dart route
+                    // that claimed this channel, so the new open would play into
+                    // nothing. finish() reports its result, so the stale route
+                    // pops before this one is pushed.
+                    HdrPlayerActivity.instance?.get()?.let { previous ->
+                        if (!previous.isFinishing && !previous.isDestroyed) {
+                            Log.i("iptvs.native", "retiring previous player before a new open")
+                            previous.finish()
+                        }
                     }
 
                     val headers = args["headers"] as? Map<*, *> ?: emptyMap<Any, Any>()

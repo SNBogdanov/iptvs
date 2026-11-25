@@ -11,6 +11,7 @@ import '../data/media_order.dart';
 import '../data/load_token.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
+import '../sources/refresh_interval.dart';
 import '../widgets/routed_focus_node.dart';
 import 'media_category_cache.dart';
 import 'media_sort.dart';
@@ -72,10 +73,24 @@ class MediaTabController extends ChangeNotifier {
   /// only used for the explicit "refresh displayed metadata" action.
   final void Function(String message)? onEnrichError;
 
+  /// The source's catalogue refresh schedule, or null when the caller owns no
+  /// schedule (tests, embedded pickers).
+  ///
+  /// **The VOD cache used to have no age at all:** `LibraryRepository.loadMedia`
+  /// serves any existing `media_sync` row forever, and the screen's scheduled
+  /// refresh only force-refreshed tabs that were *already* open when it ran —
+  /// which is almost never the VOD tab, since that check happens right after the
+  /// live load. A tab therefore showed the catalogue from the first visit until
+  /// the user pressed Reload. With this field, a cached tab whose
+  /// `media_sync.synced_at` is older than the interval refreshes itself once,
+  /// silently, as soon as it is opened.
+  final SourceRefreshInterval? refreshInterval;
+
   MediaTabController({
     required this.kind,
     required this.repo,
     this.onEnrichError,
+    this.refreshInterval,
     AppSettingsStore? store,
   }) : _settings = store ?? const AppSettingsStore(),
        firstFocusNode = RoutedFocusNode('media.${kind.name}.first'),
@@ -98,6 +113,10 @@ class MediaTabController extends ChangeNotifier {
   bool loadingMore = false;
   bool searching = false;
   bool enriching = false;
+
+  /// One silent stale-cache refresh per controller (i.e. per tab per screen):
+  /// a failed or superseded refresh must not retry in a loop.
+  bool _cacheRefreshAttempted = false;
   String? error;
   ({int done, int total})? enrichmentProgress;
 
@@ -375,7 +394,7 @@ class MediaTabController extends ChangeNotifier {
     await loadContinueWatching();
   }
 
-  Future<void> load({bool forceRefresh = false}) async {
+  Future<void> load({bool forceRefresh = false, bool silent = false}) async {
     final gen = ++_loadGeneration;
     // A newer load supersedes any still-running one — cancel its token so it
     // stops writing to the cache once this one has started.
@@ -383,14 +402,16 @@ class MediaTabController extends ChangeNotifier {
     final token = LoadToken();
     _loadToken = token;
     final categoryToLoad = _loadCategory;
-    _set(() {
-      _cancelEnrich();
-      loading = true;
-      loadingMore = false;
-      searching = false;
-      error = null;
-      shownCountFloor = 0;
-    });
+    if (!silent) {
+      _set(() {
+        _cancelEnrich();
+        loading = true;
+        loadingMore = false;
+        searching = false;
+        error = null;
+        shownCountFloor = 0;
+      });
+    }
     unawaited(loadContinueWatching());
     try {
       repo.loadToken = token;
@@ -419,6 +440,7 @@ class MediaTabController extends ChangeNotifier {
         snapshot = snap;
         loading = false;
       });
+      _maybeAutoRefreshCache(snap, forceRefresh: forceRefresh);
       if (repo.autoEnrichMetadata) {
         unawaited(_enrich(snap.items, maxItems: _autoEnrichLimit));
       }
@@ -438,6 +460,35 @@ class MediaTabController extends ChangeNotifier {
         loading = false;
       });
     }
+  }
+
+  /// Refreshes this tab's cached catalogue once when it has aged past the
+  /// source's [refreshInterval].
+  ///
+  /// This is the VOD half of the schedule in `refresh_interval.dart`. `load`
+  /// serves any existing `media_sync` row regardless of age, and the screen's
+  /// `_maybeAutoRefresh` only forces tabs that were already open when it ran
+  /// (checked right after the live load, so normally not the VOD tab) — a tab
+  /// therefore kept its first-visit catalogue until Reload. The refresh is
+  /// **silent**: the cached grid stays on screen and is replaced when the new
+  /// one lands, exactly like the live catalogue's background refresh.
+  void _maybeAutoRefreshCache(
+    MediaLibrarySnapshot snap, {
+    required bool forceRefresh,
+  }) {
+    if (forceRefresh || !snap.fromCache || _cacheRefreshAttempted) return;
+    final interval = refreshInterval;
+    if (interval == null || _disposed) return;
+    final due = planSourceRefresh(interval, snap.syncedAt, DateTime.now());
+    DiagnosticsLog.instance.add(
+      'library',
+      'media refresh check kind=${kind.name} source=${repo.source.name} '
+          'interval=${interval.storageValue} '
+          'last=${snap.syncedAt?.toIso8601String() ?? 'never'} due=$due',
+    );
+    if (!due) return;
+    _cacheRefreshAttempted = true;
+    unawaited(load(forceRefresh: true, silent: true));
   }
 
   Future<void> loadMore() async {

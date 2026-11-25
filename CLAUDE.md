@@ -411,7 +411,12 @@ dragging a name sort or reading as ancient is worse than admitting the provider 
   default 24 — `lib/sources/refresh_interval.dart` + `SourceRefreshStore`); it refreshes **channels +
   VOD, never the EPG**, runs after the cached load (never instead of it), is decided once per screen
   by the pure `planSourceRefresh`, and stores *when it last ran* device-locally in the keychain, not in
-  `settings` (which rides the cloud). A manual refresh resets that timestamp. See docs/sources.md
+  `settings` (which rides the cloud). A manual refresh resets that timestamp. **A VOD tab also acts
+  on its own cache age when opened**: `MediaTabController` is given the interval and, after painting a
+  snapshot that came from the cache with `media_sync.synced_at` older than it, runs one silent
+  `forceRefresh: true` (once per tab per screen, logged as `media refresh check … due=…`). Without
+  that, Movies/Series kept their first-visit catalogue until Reload — the screen-level check runs
+  right after the live load, when no VOD tab is open yet. See docs/sources.md
   "Scheduled catalogue refresh". Those edits are persisted on `SourceConfig.settings`; its category rows are **lazy slivers**, because
   `ListView(children: [...])` builds every child up front and a portal with thousands of
   categories rebuilt all of them on every keystroke and every toggle — the D-pad took seconds to

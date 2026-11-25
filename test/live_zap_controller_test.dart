@@ -252,6 +252,84 @@ void main() {
       expect(controller.zapped, isFalse);
     });
 
+    test('random visits every channel of the range once per cycle', () async {
+      final catalog = _FakeCatalog();
+      final channels = [
+        for (var i = 0; i < 6; i++) _channel('ch$i', number: i + 1),
+      ];
+      final controller = _controller(channels: channels, catalog: catalog);
+      addTearDown(controller.dispose);
+
+      controller.toggleRandom();
+      final seen = <String>{controller.playing.channelId};
+      String? previous = controller.playing.channelId;
+      for (var i = 0; i < 5; i++) {
+        controller.channelUp();
+        await Future<void>.delayed(_past);
+        expect(
+          controller.playing.channelId,
+          isNot(previous),
+          reason: 'a random pick never replays the channel on screen',
+        );
+        previous = controller.playing.channelId;
+        seen.add(previous);
+      }
+
+      expect(seen.length, 6, reason: 'one cycle covers the whole range');
+      expect(catalog.resolved.toSet().length, 5);
+
+      // Exhausted: the next pick starts a fresh cycle over the full range,
+      // still excluding the channel on screen.
+      controller.channelUp();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, isNot(previous));
+    });
+
+    test('turning random off starts a fresh cycle next time', () async {
+      final catalog = _FakeCatalog();
+      final channels = [
+        for (var i = 0; i < 6; i++) _channel('ch$i', number: i + 1),
+      ];
+      final controller = _controller(channels: channels, catalog: catalog);
+      addTearDown(controller.dispose);
+
+      controller.toggleRandom();
+      controller.channelUp();
+      await Future<void>.delayed(_past);
+      controller.toggleRandom(); // off
+      controller.toggleRandom(); // on again: the bag is gone
+
+      // Nothing observable is asserted about the *contents* (they are random);
+      // what matters is that a cycle exists again and never replays the channel
+      // on screen, which the first assert above already pins for a fresh bag.
+      final current = controller.playing.channelId;
+      controller.channelUp();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, isNot(current));
+    });
+
+    test('a manually played channel is spent for the cycle', () async {
+      final catalog = _FakeCatalog();
+      final channels = [
+        for (var i = 0; i < 5; i++) _channel('ch$i', number: i + 1),
+      ];
+      final controller = _controller(channels: channels, catalog: catalog);
+      addTearDown(controller.dispose);
+
+      controller.toggleRandom();
+      final manual = controller.entries[3];
+      await controller.playEntry(manual);
+      final seen = <String>{manual.channelId};
+      for (var i = 0; i < 4; i++) {
+        controller.channelUp();
+        await Future<void>.delayed(_past);
+        seen.add(controller.playing.channelId);
+      }
+      // Five channels: the launch one, the manual pick, and the three that the
+      // bag can still hold — the manual pick must not come back in this cycle.
+      expect(seen.length, 5);
+    });
+
     test('the stream is stopped before the next one is resolved', () async {
       // Provider accounts are single-connection: resolving while the old
       // stream still holds the slot is what a portal refuses.

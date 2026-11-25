@@ -2239,6 +2239,15 @@ next visit re-reads the category from the already-refreshed provider. `media_syn
 written **only** by an unfiltered replace: it describes the whole kind, and a category load used to
 stamp it with its own page counts (a 2104-page catalogue reported `424/424` after one category).
 
+**The cached catalogue ages, and a VOD tab now acts on it.** `loadMedia` serves any existing
+`media_sync` row regardless of its age, and the screen's scheduled refresh (`_maybeAutoRefresh`) only
+forces tabs that were already open when it ran — checked immediately after the live load, so normally
+not the VOD tab. A tab therefore kept its first-visit catalogue until the user pressed Reload. Each
+tab now carries its source's `SourceRefreshInterval` and, when the snapshot it just painted came from
+the cache with `synced_at` older than that interval, runs **one silent `forceRefresh: true`** load
+(cached grid stays on screen; the new catalogue replaces it when it lands). One attempt per tab per
+screen, logged as `media refresh check kind=… interval=… last=… due=…`, so a failure cannot loop.
+
 ### Infinite scroll in the media grid
 
 `ChannelListScreen._maybeAutoLoadMedia` listens to each media tab's
@@ -3616,6 +3625,19 @@ slot, and the shuffle marker is a `random` field on `ZapBannerState` drawn besid
 (the chip renders when the countdown is on **or** random is on, so the mode stays answerable with
 the chrome gone). `onRandomChanged` persists it back to the store from the channel list, and the
 initial value is loaded once when the screen builds its first session.
+
+**It is a bag, not a die: one cycle visits the whole range once.** Each random pick is removed from
+`_randomBag` (a Fisher–Yates shuffle of the range's indices), so with random on the viewer sees every
+channel of the launch range — the current category, favourites, or All — exactly once before any
+repeats; the bag refills only when it empties, still excluding the channel on screen. Picking with
+replacement, the old behaviour, could show one channel three times in five presses and never reach
+others. A channel that actually reaches the screen spends its index whichever path chose it (a
+random draw, a quick-list row, a typed number, a restore) — `_settle` prunes `_playingIndex`, so a
+manual jump is not offered again in the same cycle. The cycle is scoped to "random is on in this
+player": `toggleRandom` drops the bag in both directions and a range change drops it too, so turning
+random off or leaving the player means the next enable starts from a freshly shuffled full range. The
+no-repeat rule is pinned by `live_zap_controller_test` ("random visits every channel of the range once
+per cycle", "a manually played channel is spent for the cycle").
 
 ### Android native input + banner (Phase 2)
 

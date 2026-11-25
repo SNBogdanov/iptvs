@@ -24,6 +24,7 @@ import 'package:iptvs/screens/media_category_cache.dart';
 import 'package:iptvs/screens/media_tab_controller.dart';
 import 'package:iptvs/screens/media_sort.dart';
 import 'package:iptvs/sources/demo_source.dart';
+import 'package:iptvs/sources/refresh_interval.dart';
 import 'package:iptvs/sources/source.dart';
 
 /// [LibraryRepository] subclass whose media-fetching methods return
@@ -121,14 +122,19 @@ MediaItem _item(String id, {String? categoryId, String? description}) =>
       description: description,
     );
 
-MediaLibrarySnapshot _snapshot(List<MediaItem> items, {String? categoryId}) =>
+MediaLibrarySnapshot _snapshot(
+  List<MediaItem> items, {
+  String? categoryId,
+  bool fromCache = false,
+  DateTime? syncedAt,
+}) =>
     MediaLibrarySnapshot(
       kind: ContentKind.movie,
       categoryId: categoryId,
       categories: const [],
       items: items,
-      fromCache: false,
-      syncedAt: DateTime.now(),
+      fromCache: fromCache,
+      syncedAt: syncedAt ?? DateTime.now(),
     );
 
 /// Lets any already-scheduled microtasks (the continuations past a completed
@@ -587,5 +593,37 @@ void main() {
             'neither published nor mutated - `_set` runs nothing once disposed',
       );
     });
+  });
+
+  test('a stale cached tab refreshes itself once, silently', () async {
+    final stale = MediaTabController(
+      kind: ContentKind.movie,
+      repo: repo,
+      refreshInterval: SourceRefreshInterval.every6h,
+    );
+    addTearDown(stale.dispose);
+
+    final firstLoad = stale.load();
+    repo
+        .loadGate('ContentKind.movie:null:null:false:true')
+        .complete(
+          _snapshot(
+            [_item('old')],
+            fromCache: true,
+            syncedAt: DateTime.now().subtract(const Duration(hours: 7)),
+          ),
+        );
+    await firstLoad;
+    await _flush();
+
+    // Stale cache: one force load in the background, and the cached grid stays
+    // on screen while it runs (no spinner, no `loading = true`).
+    final forced = repo.loadGate('ContentKind.movie:null:null:true:true');
+    expect(stale.loading, isFalse);
+    expect(stale.snapshot!.items.single.id, 'old');
+
+    forced.complete(_snapshot([_item('new')]));
+    await _flush();
+    expect(stale.snapshot!.items.single.id, 'new');
   });
 }
