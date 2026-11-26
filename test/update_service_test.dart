@@ -1,5 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
-import 'package:iptvs/data/distribution_channel.dart';
+import 'package:iptvs/data/update_manifest.dart';
 import 'package:iptvs/data/update_service.dart';
 
 ReleaseInfo _rel(String version) => ReleaseInfo(
@@ -7,7 +9,7 @@ ReleaseInfo _rel(String version) => ReleaseInfo(
   tagName: 'v$version',
   name: 'iptvs $version',
   notes: '',
-  htmlUrl: Uri.parse('https://github.com/GCHOfficial/iptvs/releases'),
+  htmlUrl: Uri.parse('https://github.com/SNBogdanov/iptvs/releases'),
 );
 
 void main() {
@@ -63,26 +65,45 @@ void main() {
     });
   });
 
-  group('release track selection', () {
-    test('stable consumes the latest-release object', () {
-      final payload = {'tag_name': 'v1.2.3'};
-      expect(
-        selectReleasePayload(payload, UpdateTrack.stable)?['tag_name'],
-        'v1.2.3',
+  group('release manifest discovery', () {
+    test('reads the version and every platform from update.json', () {
+      final manifest = ReleaseManifest.parse(
+        utf8.encode(
+          jsonEncode({
+            'version': '1.2.3',
+            'minimum_version': '1.0.0',
+            'windows': {
+              'url':
+                  'https://github.com/SNBogdanov/iptvs/releases/download/v1.2.3/iptvs-1.2.3.msi',
+              'size': 73422891,
+              'sha256': 'a' * 64,
+            },
+            'android': {
+              'url':
+                  'https://github.com/SNBogdanov/iptvs/releases/download/v1.2.3/iptvs-1.2.3.apk',
+              'size': 55123456,
+              'sha256': 'b' * 64,
+            },
+          }),
+        ),
       );
+      expect(manifest.version, '1.2.3');
+      expect(manifest.minimumVersion, '1.0.0');
+      expect(manifest.artifacts['windows-x64']?.filename, 'iptvs-1.2.3.msi');
+      expect(manifest.artifacts['android']?.filename, 'iptvs-1.2.3.apk');
+      expect(manifest.artifacts['linux-x86_64'], isNull);
     });
 
-    test('beta selects the highest non-draft stable or prerelease', () {
-      final payload = [
-        {'tag_name': 'v1.2.4', 'prerelease': true, 'draft': true},
-        {'tag_name': 'v1.2.3', 'prerelease': false, 'draft': false},
-        {'tag_name': 'v1.3.0', 'prerelease': true, 'draft': false},
-        {'tag_name': 'not-semver', 'prerelease': true, 'draft': false},
-      ];
-      expect(
-        selectReleasePayload(payload, UpdateTrack.beta)?['tag_name'],
-        'v1.3.0',
+    test('ignores platforms this build does not know', () {
+      final manifest = ReleaseManifest.parse(
+        utf8.encode(
+          jsonEncode({
+            'version': '1.2.3',
+            'macos': {'url': 'https://github.com/a/b/c.dmg', 'size': 1, 'sha256': 'c' * 64},
+          }),
+        ),
       );
+      expect(manifest.artifacts, isEmpty);
     });
   });
 
@@ -114,7 +135,7 @@ void main() {
       expect(
         isApprovedUpdateUri(
           Uri.parse(
-            'https://github.com/GCHOfficial/iptvs/releases/download/v1.2.3/x',
+            'https://github.com/SNBogdanov/iptvs/releases/download/v1.2.3/x',
           ),
         ),
         isTrue,
@@ -150,11 +171,11 @@ void main() {
     test('resolves an approved relative redirect', () {
       expect(
         resolveApprovedUpdateRedirect(
-          Uri.parse('https://github.com/GCHOfficial/iptvs/releases'),
-          '/GCHOfficial/iptvs/releases/download/v1.2.3/file.apk',
+          Uri.parse('https://github.com/SNBogdanov/iptvs/releases'),
+          '/SNBogdanov/iptvs/releases/download/v1.2.3/file.apk',
         ),
         Uri.parse(
-          'https://github.com/GCHOfficial/iptvs/releases/download/v1.2.3/file.apk',
+          'https://github.com/SNBogdanov/iptvs/releases/download/v1.2.3/file.apk',
         ),
       );
     });

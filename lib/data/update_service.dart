@@ -1,6 +1,4 @@
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:package_info_plus/package_info_plus.dart';
 
@@ -9,15 +7,11 @@ import 'distribution_channel.dart';
 import 'net.dart';
 import 'update_manifest.dart';
 
-/// GitHub repository the app publishes releases from (see
-/// `.github/workflows/release.yml`). Used to build the releases API URL.
-const String kGithubOwner = 'GCHOfficial';
+/// GitHub repository this fork publishes releases from. The updater reads the
+/// `update.json` asset attached to the latest release (see
+/// `.github/workflows/release.yml` and docs/updates.md).
+const String kGithubOwner = 'SNBogdanov';
 const String kGithubRepo = 'iptvs';
-
-/// Raw 32-byte Ed25519 public key, Base64 encoded at release build time.
-const String kUpdateManifestPublicKey = String.fromEnvironment(
-  'UPDATE_MANIFEST_PUBLIC_KEY',
-);
 
 /// The running app's version name — the build-name CI sets from the release tag
 /// (`--build-name <tag-without-v>`), so a released build reports e.g. `1.2.3`
@@ -47,7 +41,7 @@ class ReleaseInfo {
   final Uri? androidAsset;
   final ReleaseArtifact? androidArtifact;
 
-  /// Direct download of the portable Windows zip (`iptvs-<ver>-windows-x64.zip`).
+  /// Direct download of the MSI package (`iptvs-<ver>.msi`).
   final Uri? windowsAsset;
   final ReleaseArtifact? windowsArtifact;
 
@@ -103,43 +97,42 @@ class UpdateService {
     this.owner = kGithubOwner,
     this.repo = kGithubRepo,
     this.track = UpdateTrack.stable,
-    this.manifestPublicKey = kUpdateManifestPublicKey,
-    ReleaseManifestVerifier manifestVerifier = const ReleaseManifestVerifier(),
   }) : _http =
            http ??
            (HttpClient()
              ..connectionTimeout = _connectTimeout
-             ..autoUncompress = false),
-       _verifier = manifestVerifier;
+             ..autoUncompress = false);
 
   final HttpClient _http;
   final String owner;
   final String repo;
+
+  /// Retained so the settings UI's Stable/Beta selector keeps compiling. This
+  /// fork publishes one channel: both values read the same `update.json`.
   final UpdateTrack track;
-  final String manifestPublicKey;
-  final ReleaseManifestVerifier _verifier;
 
   static const _connectTimeout = Duration(seconds: 15);
   static const _userAgent = 'iptvs-updater';
-  Uri get _latestUrl => track == UpdateTrack.beta
-      ? Uri.parse(
-          'https://api.github.com/repos/$owner/$repo/releases?per_page=20',
-        )
-      : Uri.parse('https://api.github.com/repos/$owner/$repo/releases/latest');
 
-  /// Fetches the latest *published* release (the `/latest` endpoint already
-  /// excludes drafts and pre-releases). A 404 means no releases exist yet and
-  /// is treated as "up to date" (null), not an error.
+  /// `releases/latest/download/<asset>` — GitHub's own redirect to the newest
+  /// non-draft, non-prerelease release, so no API token or rate limit is
+  /// involved (the `tremotesf` model).
+  Uri get _manifestUrl => Uri.parse(
+    'https://github.com/$owner/$repo/releases/latest/download/update.json',
+  );
+
+  /// Fetches the latest release's `update.json`.
+  ///
+  /// A 404 means no release carries the asset yet and is treated as "up to
+  /// date" (null), not an error — an install that predates the first release is
+  /// not broken, it is simply current.
   Future<ReleaseInfo?> fetchLatest() async {
     final operation = HttpOperation(kUpdateDiscoveryWorkload);
     final response = await openApprovedUpdateGet(
       _http,
-      _latestUrl,
+      _manifestUrl,
       operation: operation,
-      headers: const {
-        HttpHeaders.acceptHeader: 'application/vnd.github+json',
-        HttpHeaders.userAgentHeader: _userAgent,
-      },
+      headers: const {HttpHeaders.userAgentHeader: _userAgent},
     );
     if (response.statusCode == 404) {
       await operation.readBytes(response);
@@ -150,112 +143,30 @@ class UpdateService {
       await operation.readBytes(response);
       throw StateError('GitHub HTTP ${response.statusCode}');
     }
-    final data = jsonDecode(utf8.decode(await operation.readBytes(response)));
-    final releaseJson = selectReleasePayload(data, track);
-    if (releaseJson == null) return null;
-    final discovery = _ReleaseDiscovery.fromJson(
-      releaseJson,
-      owner: owner,
-      repo: repo,
-    );
-    if (discovery == null) return null;
-    if (manifestPublicKey.isEmpty) {
-      throw StateError('Update verification key is not configured');
-    }
-    final manifestBytes = await _getSmall(
-      discovery.manifestUrl,
-      kMaxReleaseManifestBytes,
-    );
-    final signatureBytes = await _getSmall(
-      discovery.signatureUrl,
-      kMaxReleaseSignatureBytes,
-    );
-    final manifest = await _verifier.verify(
-      manifestBytes: manifestBytes,
-      signatureBase64: utf8.decode(signatureBytes).trim(),
-      publicKeyBase64: manifestPublicKey,
-    );
-    if (manifest.version != discovery.version) {
-      throw const FormatException('Release version does not match manifest');
-    }
+    final manifest = ReleaseManifest.parse(await operation.readBytes(response));
     final android = manifest.artifacts['android'];
     final windows = manifest.artifacts['windows-x64'];
     final linux = manifest.artifacts['linux-x86_64'];
     final info = ReleaseInfo(
       version: manifest.version,
-      tagName: discovery.tagName,
-      name: discovery.name,
-      notes: discovery.notes,
-      htmlUrl: discovery.htmlUrl,
-      androidAsset: android == null
-          ? null
-          : _artifactUrl(discovery.tagName, android.filename),
+      tagName: 'v${manifest.version}',
+      name: 'iptvs ${manifest.version}',
+      notes: '',
+      htmlUrl: Uri.https('github.com', '/$owner/$repo/releases'),
+      androidAsset: android?.url,
       androidArtifact: android,
-      windowsAsset: windows == null
-          ? null
-          : _artifactUrl(discovery.tagName, windows.filename),
+      windowsAsset: windows?.url,
       windowsArtifact: windows,
-      linuxAsset: linux == null
-          ? null
-          : _artifactUrl(discovery.tagName, linux.filename),
+      linuxAsset: linux?.url,
       linuxArtifact: linux,
     );
-    DiagnosticsLog.instance.add('update', 'Verified release ${info.tagName}');
+    DiagnosticsLog.instance.add('update', 'Found release ${info.tagName}');
     return info;
-  }
-
-  Uri _artifactUrl(String tag, String filename) =>
-      Uri.https('github.com', '/$owner/$repo/releases/download/$tag/$filename');
-
-  Future<Uint8List> _getSmall(Uri url, int maximumBytes) async {
-    if (!isApprovedUpdateUri(url)) {
-      throw const FormatException('Unapproved update host');
-    }
-    final operation = HttpOperation(
-      kUpdateDiscoveryWorkload.copyWith(
-        name: 'update metadata',
-        maximumBodyBytes: maximumBytes,
-        maximumDecodedBytes: maximumBytes,
-      ),
-    );
-    final response = await openApprovedUpdateGet(
-      _http,
-      url,
-      operation: operation,
-      headers: const {HttpHeaders.userAgentHeader: _userAgent},
-    );
-    if (response.statusCode != 200) {
-      await operation.readBytes(response);
-      throw StateError('Update metadata HTTP ${response.statusCode}');
-    }
-    return operation.readBytes(response);
   }
 
   Future<String> currentVersion() => appVersion();
 
   void close() => _http.close(force: true);
-}
-
-Map<String, dynamic>? selectReleasePayload(Object? data, UpdateTrack track) {
-  if (track == UpdateTrack.stable) {
-    return data is Map ? Map<String, dynamic>.from(data) : null;
-  }
-  if (data is! List) return null;
-  Map<String, dynamic>? selected;
-  String? selectedVersion;
-  for (final raw in data.whereType<Map>()) {
-    final release = Map<String, dynamic>.from(raw);
-    if (release['draft'] == true) continue;
-    final tag = (release['tag_name'] as String?)?.trim();
-    if (tag == null || !RegExp(r'^v\d+\.\d+\.\d+$').hasMatch(tag)) continue;
-    final version = tag.substring(1);
-    if (selectedVersion == null ||
-        compareVersions(version, selectedVersion) > 0) {
-      selected = release;
-      selectedVersion = version;
-    }
-  }
-  return selected;
 }
 
 bool isApprovedUpdateUri(Uri uri) =>
@@ -318,67 +229,6 @@ Future<HttpClientResponse> openApprovedUpdateGet(
     current = resolveApprovedUpdateRedirect(current, location);
   }
   throw const FormatException('Too many update redirects');
-}
-
-class _ReleaseDiscovery {
-  const _ReleaseDiscovery({
-    required this.version,
-    required this.tagName,
-    required this.name,
-    required this.notes,
-    required this.htmlUrl,
-    required this.manifestUrl,
-    required this.signatureUrl,
-  });
-
-  final String version;
-  final String tagName;
-  final String name;
-  final String notes;
-  final Uri htmlUrl;
-  final Uri manifestUrl;
-  final Uri signatureUrl;
-
-  static _ReleaseDiscovery? fromJson(
-    Map<String, dynamic> json, {
-    required String owner,
-    required String repo,
-  }) {
-    final tag = (json['tag_name'] as String?)?.trim();
-    if (tag == null || !RegExp(r'^v\d+\.\d+\.\d+$').hasMatch(tag)) {
-      return null;
-    }
-    final version = tag.substring(1);
-    final manifestName = 'iptvs-$version-manifest.json';
-    final signatureName = '$manifestName.sig';
-    Uri? manifestUrl;
-    Uri? signatureUrl;
-    final assets = json['assets'];
-    if (assets is List) {
-      for (final raw in assets.whereType<Map>()) {
-        final name = raw['name'];
-        final url = raw['browser_download_url'];
-        if (name is! String || url is! String) continue;
-        final uri = Uri.tryParse(url);
-        if (uri == null || !isApprovedUpdateUri(uri)) continue;
-        if (name == manifestName) manifestUrl = uri;
-        if (name == signatureName) signatureUrl = uri;
-      }
-    }
-    if (manifestUrl == null || signatureUrl == null) {
-      throw const FormatException('Release is missing signed update metadata');
-    }
-    final title = (json['name'] as String?)?.trim();
-    return _ReleaseDiscovery(
-      version: version,
-      tagName: tag,
-      name: title == null || title.isEmpty ? 'IPTVS Player $version' : title,
-      notes: (json['body'] as String?)?.trim() ?? '',
-      htmlUrl: Uri.https('github.com', '/$owner/$repo/releases/tag/$tag'),
-      manifestUrl: manifestUrl,
-      signatureUrl: signatureUrl,
-    );
-  }
 }
 
 /// Compares two dotted numeric version strings. Build metadata (anything after

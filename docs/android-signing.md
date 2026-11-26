@@ -48,6 +48,16 @@ The selected recovery uses separate new identities:
 | Google Play | `com.gchofficial.iptvs.player` | Google Play |
 | Local development | `com.gchofficial.iptvs.player.dev` | None |
 
+**This fork publishes under its own identity: `io.github.snbogdanov.iptvs`**
+(flavour suffixes: `.dev` and `.direct`). It is
+a *different app* to Android: it does not update any `com.gchofficial.iptvs.player*`
+install, and none of those update it, so
+state has to come back through cloud pairing or an explicit export. The upstream
+Play and outside-Play registrations in the table above are upstream's — they
+cannot be used by this fork, which ships through GitHub releases only and has no
+store listing at all. The Kotlin `namespace` deliberately stays `com.gchofficial.iptvs`; the
+code package is not the app identity.
+
 The new GitHub and Play applications install beside both the old app and each
 other. This prevents signer/version conflicts and lets Store packages omit the
 self-updater. User state must be restored through authenticated cloud sync or an
@@ -59,12 +69,12 @@ Keeping `com.gchofficial.iptvs` with a new certificate is suitable only for clea
 installs or a deliberately documented uninstall/reinstall transition. Android
 will reject it as an in-place update for existing direct-download installations.
 
-The Google Play application was created with its final ID on 2026-07-14.
-
-Google Play uses a separate upload key and a Play-managed app-signing key. The
-direct certificate recorded below must never be supplied as either of those
-keys. Upload-key setup and CI values are documented in
-`docs/store-publishing.md`.
+The Google Play application and its Play-managed app-signing key belong to
+upstream's release process, not this fork. This fork has **no store publishing
+path**: the `googlePlay` Gradle flavour, the Play upload pipeline and the
+store-signing environments were removed, so the only Android artifact is the
+GitHub-direct APK signed with the key recorded below. Never supply that key to a
+store — a store builds its own signing identity, and its updates are its own.
 
 On 2026-07-16, Android developer verification registered both active release
 identities. `com.gchofficial.iptvs.player` is registered with Google's
@@ -126,27 +136,77 @@ required when moving between Play and GitHub-direct installations.
   configured expected SHA-256 fingerprint before uploading it.
 - Private keystores, passwords, and `key.properties` files are never committed.
 
-### Local parallel build (installation next to the official app)
+### The fork's signing key
 
-`android/keystore.properties` + the keystore it names are **local, gitignored**
-files (the same shape Tremotesf uses). When the four CI variables above are
-absent, Gradle uses that local key for a release build instead of failing, so a
-build can be installed alongside the official app; it is a test key and must
-never sign a published artifact. CI has no such file and keeps the env-only
-rule. The `parallel` flavor adds `.parallel` to the application id:
+This fork has its **own permanent release key**, generated 2026-11-26 and kept
+out of the repository:
+
+| Field | Value |
+|---|---|
+| Keystore | `secrets/iptvs-release.jks` (PKCS12, gitignored) |
+| Alias | `iptvs` |
+| Subject | `CN=IPTVS, OU=Android, O=SNBogdanov, C=RU` |
+| Key | RSA 4096, `SHA256withRSA`, validity 10 000 days (until 2054-04-13) |
+| Certificate SHA-256 | `33:3B:31:F4:29:5F:6D:7D:4C:25:EB:98:7A:6E:9B:92:39:DD:E9:F4:1E:FB:83:97:BD:2B:B5:CE:E6:25:AA:6F` |
+| Certificate PEM | `secrets/iptvs-release-cert.pem` |
+| Password | `secrets/iptvs_android_keystore_password.txt` (same value for store and key) |
+
+`android/keystore.properties` (gitignored) points at it, so a local
+`flutter build apk --release` signs with this key when the CI variables below
+are absent. **Back this keystore up** (two offline copies): it is the package's
+identity — losing it means no future release can update an installed build, and
+losing it while someone else holds a copy means they can sign as the same app.
+
+For CI, base64 the keystore into the protected `release` environment secret
+`ANDROID_RELEASE_KEYSTORE_BASE64` and put the same alias/passwords in
+`ANDROID_RELEASE_KEY_ALIAS` / `ANDROID_RELEASE_KEYSTORE_PASSWORD` /
+`ANDROID_RELEASE_KEY_PASSWORD`.
+
+The old `android/keystore.jks` (alias `tremotesf`, `CN=Tremotesf Parallel`) is
+**retired**: it signed earlier local `.parallel` builds, which this fork no
+longer produces.
+
+The side-by-side `parallel` flavour was **removed**: this fork already has its
+own application id (`io.github.snbogdanov.iptvs`), so a `.dev` or `.direct`
+build installs beside an upstream package without a third identity to maintain.
+The phone that keeps the fork's own release (`Note`) runs the `.direct` flavour
+only — debug and release alike, signed with the same key, so the install is
+replaced in place rather than duplicated:
 
 ```bash
-flutter build apk --release --flavor parallel
-# -> build/app/outputs/flutter-apk/app-parallel-release.apk
+flutter build apk --debug   --flavor githubDirect   # iteration build, release-signed
+flutter build apk --release --flavor githubDirect   # what a release ships
 ```
 
-The resulting package is `com.gchofficial.iptvs.player.parallel`, independent of
-the Play/direct identities, so installing it never overwrites them.
+The `development` flavour (`io.github.snbogdanov.iptvs.dev`) is a separate app
+id: useful for a truly throwaway build, never for updating the Note.
+
+#### `versionCode` is derived from the version name
+
+`android/app/build.gradle.kts` computes `versionCode` with `versionCodeFromName`
+(`1.0.2` → `1_000_002`) and ignores Flutter's `--build-number`/`+N`. Two build
+paths producing different codes for the same version is what made in-place
+upgrades unreliable: a `--split-per-abi` arm64 build of `+1` got code 2001 while
+the universal release got 1, so the "new" APK could be a downgrade. With the
+derived code, every build of a version shares one code and every release is
+higher than all earlier ones — so **never install a `--split-per-abi` APK on a
+device**, because the ABI offset changes the code again.
+
+#### Debug builds carry the release signature
+
+`buildTypes.debug` uses the `release` signing config when one is configured
+(CI env vars or `android/keystore.properties`), falling back to the committed
+public debug key otherwise — so PR CI, which has no secrets, keeps working. The
+point is a single installation per device: `flutter build apk --debug --flavor
+githubDirect` has the same application id (`.direct`), the same version name and
+the same signer as the release build, so `adb install -r` replaces it in place
+and no second copy appears. A `development` (`.dev`) build is still a different
+app and cannot update it.
 
 #### Local Android toolchain on this machine
 
 `flutter doctor` does not find the SDK by itself here; the working environment
-(the one the parallel build was verified with) is:
+(the one local release builds were verified with) is:
 
 ```powershell
 $env:ANDROID_HOME      = 'C:\Users\SERGEYBO\Documents\Projects\_tools\android-sdk'
@@ -185,20 +245,23 @@ read-only repository access; only the final publish job receives
 
 ## Creating the permanent key
 
-The permanent direct-distribution app-signing key was generated outside the
-repository on 2026-07-14. Its non-secret identity is:
+This fork's direct-distribution key (`secrets/iptvs-release.jks`, **not** committed) was
+generated outside the repository. Its non-secret identity is:
 
 ```text
-Alias: iptvs-app
-Certificate subject: CN=iptvs, O=George-Cosmin Hanta, C=RO
-Certificate SHA-256: 6E:36:3B:97:B8:5A:D9:99:20:CC:56:0D:5D:BF:6E:CD:94:80:9E:3D:84:F4:F1:3A:65:5A:15:00:4A:50:D5:3B
+Alias: iptvs
+Certificate subject: CN=IPTVS, OU=Android, O=SNBogdanov, C=RU
+Certificate SHA-256: 33:3B:31:F4:29:5F:6D:7D:4C:25:EB:98:7A:6E:9B:92:39:DD:E9:F4:1E:FB:83:97:BD:2B:B5:CE:E6:25:AA:6F
 ```
+
+(The key this fork replaced — `CN=iptvs, O=George-Cosmin Hanta, C=RO`,
+`6E:36:3B:97…4A:50:D5:3B` — belongs to upstream and signs nothing here.)
 
 The four signing secrets and `ANDROID_RELEASE_CERT_SHA256` variable are
 configured in the GitHub `release` environment. Passwords and keystore contents
 must never be copied into this document.
 
-Generate the key on a trusted offline machine, outside the repository:
+Generate a new key on a trusted offline machine, outside the repository:
 
 ```bash
 keytool -genkeypair -v -keystore iptvs-release.jks -alias iptvs \

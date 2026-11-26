@@ -121,9 +121,21 @@ flutter build apk --debug --flavor development `
 `DISTRIBUTION_CHANNEL` по умолчанию и так `development`, но передавай явно —
 на нём завязаны обновления и подпись канала.
 
-Release-сборка для установки на телефон — `--flavor development` (пакет
-`.dev`, debug-подпись `android/app/debug.keystore`), а не `parallel`/`googlePlay`:
+Release-сборка для установки на телефон — `--flavor githubDirect` (пакет
+`.direct`, подпись ключом форка `secrets/iptvs-release.jks`), а не `development`:
 это разные applicationId, и обновить существующую установку «поверх» ими нельзя.
+Флейвора `googlePlay` в форке больше нет — магазины не используются.
+
+## Правило релиза (версия и подпись)
+
+- «Сборка release» = поднять `version:` в `pubspec.yaml` на 1 patch, собрать релиз после полного
+  `flutter test` и выложить на GitHub (коммит, тег `v<версия>`, push). Итерационная сборка версию
+  **не** поднимает.
+- `versionCode` считается из имени версии (`versionCodeFromName`), поэтому релиз всегда выше
+  предыдущего; `--build-number` и `--split-per-abi` не использовать.
+- До следующего релиза все сборки идут с этой версией и **release-подписью**, включая debug:
+  на телефон **Note** ставится `--debug --flavor githubDirect` (пакет `.direct`) через
+  `adb install -r` поверх предыдущей установки — одна копия приложения, без второго ярлыка.
 
 Артефакты:
 
@@ -144,7 +156,7 @@ Flutter кеширует AOT по содержимому и сохраняет �
 
 ## MSIX / Store
 
-Только по просьбе: `tool\package_windows_msix.ps1`, см. `docs/store-publishing.md`.
+Только по просьбе: `tool\package_windows_msix.ps1`, см. `docs/updates.md` (подпись MSIX).
 
 ## Отчёт
 

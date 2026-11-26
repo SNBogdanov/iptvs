@@ -16,6 +16,7 @@ import 'diagnostics_log.dart';
 import 'load_token.dart';
 import 'media_order.dart';
 import 'secret_locator_vault.dart';
+import 'windows_data_migration.dart';
 import 'watch_state.dart';
 
 /// A saved VOD resume point (see `playback_positions`).
@@ -121,6 +122,9 @@ class AppDatabase {
     }
 
     final dir = await getApplicationSupportDirectory();
+    // One-shot: the fork moved the Windows data folder from the old owner's
+    // `%APPDATA%\GCHOfficial\iptvs` to `%APPDATA%\SNBogdanov\iptvs`.
+    await migrateLegacyWindowsData(dir);
     final path = p.join(dir.path, 'iptv.db');
     final vault = SecretLocatorVault();
     await vault.ensureKey();

@@ -8,7 +8,6 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/implementation-plan.md](docs/implementation-plan.md) — temporary audit-remediation ledger; update its checklist, evidence, decisions, and progress entry in every related PR.
 - [docs/validation-baseline.md](docs/validation-baseline.md) — reproducible large-ingestion workloads, public schema history, performance evidence, and native-device validation matrix.
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
-- [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
 - [docs/ios.md](docs/ios.md) — **player implemented, nothing shipped to users yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). Compiles, `swift test`, and simulator builds are green; on-device validation (real HDR, real provider headers) is still outstanding. The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
 - [docs/sources.md](docs/sources.md) — the provider layer's intricate corners: Stalker adult ("censored") genres that `get_all_channels` omits, multiple EPG guides per source (the claim rules that decide which guide serves a channel, and why a row union would be wrong), how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove — plus the stable-identity namespace migration: why the destination may already be populated, why the **stable** namespace wins a collision, and why it can never block the first frame.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
@@ -48,8 +47,9 @@ Windows, `dart_define.android.json` on Android; CI uses repo Variables). Without
 `CloudConfig.isConfigured` is false, so the startup profile picker shows only local profiles and
 favorites/watch-state sync is absent — the build still succeeds, which is exactly how this gets
 missed. Keep the flavor on the installed package: `development` (`.dev`, debug keystore) for a
-phone that already runs it; `parallel`/`googlePlay` are different applicationIds and cannot update
-it in place.
+phone that already runs it; `googlePlay`/`microsoftStore` no longer exist in this fork, so the only
+distributable Android artifact is `githubDirect` (`.direct`), which cannot update a `development`
+install in place.
 
 **`flutter test` is a release gate, not an iteration step.** The full suite takes about 30
 minutes here and runs in its own process, so any build lock has to wrap the whole command
@@ -75,12 +75,45 @@ environment variables are present, and the release workflow verifies the resulti
 PR CI also runs one release build signed with that public debug key — solely so release lint
 (`lintVital*`, which debug builds skip; it broke v0.1.44) gates PRs; the APK is deleted, never uploaded;
 see `docs/android-signing.md` before touching package identity or signing.
-Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
-exact platform filename, size, and SHA-256; GitHub-direct Linux updates replace a writable
-running AppImage via a detached helper. See `docs/updates.md` before changing release assets.
+Direct in-app updates read an **unsigned `update.json`** from the latest release
+(`SNBogdanov/iptvs`, `releases/latest/download/update.json`) — one URL + byte size + SHA-256 per
+platform, the `tremotesf` model — and fail closed on any mismatch; the Windows artifact is a signed
+MSI that the helper installs with `msiexec` into `C:\Program Files\IPTVS`, and GitHub-direct Linux updates
+replace a writable running AppImage via a detached helper. See `docs/updates.md` before changing
+release assets.
 The Linux AppImage does **not** bundle mpv (CI installs `mpv`/`libmpv-dev` only for the embedded
 fallback build/link) — native Linux playback runtime-discovers and version-gates the host's mpv
 (>= 0.40 required); see `docs/player.md`.
+
+## Release cycle
+
+The user's standing rule, triggered by **«сборка release»**.
+
+1. **Bump the version name by one patch.** `version: x.y.z+N` becomes `x.y.(z+1)+(N+1)`; the
+   build number is bookkeeping only. Android's `versionCode` is **derived from the name** in
+   `android/app/build.gradle.kts` (`versionCodeFromName`: `1.0.2` → `1_000_002`), which is what
+   makes a release upgrade every earlier install — a plain `+N` counter once produced 2001 for a
+   split arm64 build and 2 for the universal one, so a "new" release could be a downgrade. Flutter's
+   `--build-number` is deliberately ignored, and **nothing installed on a device is built with
+   `--split-per-abi`** (the ABI offset would change the code again). A published version is never
+   reused.
+2. **Full gate, then artifacts.** `flutter analyze` plus the complete `flutter test` (the only time
+   the full suite runs), then the Windows MSI (`tool/package_windows_msi.ps1`, WiX v4), the Android
+   `githubDirect` APK signed with `secrets/iptvs-release.jks` and checked against the certificate
+   SHA-256 in `docs/android-signing.md`, and the Linux AppImage
+   (`tool/package_linux_appimage.sh`).
+3. **Publish.** Commit, tag `v<version>`, push branch and tag (via `/commit`); `release.yml` then
+   builds and publishes the release with `update.json`. Until the `release` environment holds the
+   signing secrets, publish the same asset names by hand with `gh release create`, and generate
+   `update.json` exactly as the workflow does (`docs/updates.md` "Create update.json").
+4. **Between releases the version is frozen, and every build of it is release-signed.** The phone
+   keeps one installation, exactly as the user asked: `debug` uses the release signing config (see
+   `buildTypes.debug` — it falls back to the public debug key only when no keystore is configured,
+   so PR CI still works), so `flutter build apk --debug --flavor githubDirect` replaces the release
+   build it sits on (`adb install -r`, same package `.direct`, same code for the same version).
+   `development` (`.dev`) is a different app id and never goes on the Note (`RF8N30P85JJ`).
+5. The signing keys never change: a new Android key means no further updates for every installed
+   build, and an MSI `UpgradeCode` change turns each release into a second install.
 
 ## Verification gate
 
@@ -798,10 +831,11 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   `number entry` and `revealing a jumped-to channel` groups in
   `test/live_focus_coordinator_test.dart` and the preview-picture group in
   `test/live_tab_layout_test.dart`. Detail: docs/tv-navigation.md "Typed channel numbers".
-- **The Back ladder** (`channel_list_screen` `_handleRootBack`): Back never changes data or
-  filters — it peels exactly one rung per press toward the exit (rung list in
-  docs/tv-navigation.md); chrome (AppBar/toolbar buttons, route key `''`) sits above the ladder;
-  exit is behind a double-Back snackbar.
+- **The Back ladder** (`channel_list_screen` `_handleRootBack`): **Back leaves.** One press arms
+  the exit confirmation (snackbar, 2 s), the next exits — no per-press rungs through the list,
+  sidebar, search box or tabs (arrows do that), and a text field still owns Back while editing.
+  Exit is behind the double-Back snackbar. Why: from the player the old ladder cost four or five
+  presses and two of them looked like unrelated navigation.
 - Pinned by `test/live_focus_coordinator_test.dart`, `test/channel_list_focus_test.dart`,
   `test/epg_grid_test.dart`, `test/tv_text_field_test.dart` — keep them green.
 - Selection-model rows still expose accessibility semantics: useful

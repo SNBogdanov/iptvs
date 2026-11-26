@@ -57,6 +57,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\SERGEYBO\.config\op
 
 `exit 2` — лок занят, не собирай. «Просроченность» лока определяется только по возрасту (6 ч), не по PID.
 
+## Версия и подпись (правило релиза)
+
+- **Версию поднимает только релиз.** При «сборка release» — `version:` в `pubspec.yaml` +1 к
+  patch (`1.0.1+2` → `1.0.2+3`), без суффиксов. Между релизами версию **не менять**: все сборки
+  идут с версией последнего релиза, пока не скажут «сборка release».
+- **`versionCode` считается из имени версии** (`versionCodeFromName` в
+  `android/app/build.gradle.kts`, `1.0.2` → `1_000_002`). `--build-number` не передавать: он
+  игнорируется, а разные коды у одной версии ломают обновление поверх.
+- **Никогда не собирай `--split-per-abi`** для установки на устройство: ABI-сдвиг меняет
+  `versionCode` и рвёт цепочку обновлений. Для телефона — universal APK.
+- **Debug тоже подписывается ключом release** (debug buildType берёт signingConfig release,
+  debug-ключ — только когда keystore не настроен). На телефон **Note** (`RF8N30P85JJ`) ставится
+  `--debug --flavor githubDirect` (пакет `io.github.snbogdanov.iptvs.direct`) через
+  `adb install -r` — он ложится поверх релизной установки, второй копии не появляется.
+  `development` (`.dev`) — другое приложение, на Note его не ставить.
+
 ## Сборка
 
 ```powershell

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
-  echo "Usage: $0 <apk> <development|githubDirect|googlePlay>" >&2
+  echo "Usage: $0 <apk> <development|githubDirect>" >&2
   exit 2
 fi
 
@@ -38,18 +38,14 @@ fi
 
 case "$channel" in
   githubDirect)
-    expected_package='com.gchofficial.iptvs.player.direct'
+    expected_package='io.github.snbogdanov.iptvs.direct'
     if [ "$has_install_permission" != true ] || [ "$has_update_provider" != true ]; then
       echo "GitHub-direct APK is missing its user-driven updater manifest entries." >&2
       exit 1
     fi
     ;;
-  development|googlePlay)
-    if [ "$channel" = development ]; then
-      expected_package='com.gchofficial.iptvs.player.dev'
-    else
-      expected_package='com.gchofficial.iptvs.player'
-    fi
+  development)
+    expected_package='io.github.snbogdanov.iptvs.dev'
     if [ "$has_install_permission" = true ] || [ "$has_update_provider" = true ]; then
       echo "$channel APK contains GitHub self-updater manifest entries." >&2
       exit 1

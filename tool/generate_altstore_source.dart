@@ -32,13 +32,13 @@ import 'dart:io';
 /// wired up (docs/ios.md "Bundle identities").
 const String kDefaultBundleIdentifier = 'com.gchofficial.iptvs.player.sideload';
 
-/// Reserved public product name (docs/store-publishing.md).
+/// Reserved public product name.
 const String kDefaultAppName = 'IPTVS Player';
 
 const String kDefaultSourceName = 'IPTVS Player AltStore Source';
 
 /// Matches the Windows Store `PublisherDisplayName` identity
-/// (docs/store-publishing.md) so the developer name is consistent across
+/// (the same convention) so the developer name is consistent across
 /// distribution channels.
 const String kDefaultDeveloperName = 'George-Cosmin Hanta';
 

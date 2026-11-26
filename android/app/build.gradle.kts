@@ -11,6 +11,31 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+/**
+ * Android `versionCode` derived from the version **name** (`1.0.1` → 1_000_001).
+ *
+ * One number for every build of a version — debug, release, split or not, from
+ * any machine — so the upgrade rules stay trivial: a newer version is always a
+ * higher code, an iteration build of the same version replaces the installed
+ * one, and Android never sees a downgrade. Flutter's own `versionCode`
+ * (`--build-number`/`+N`) is deliberately ignored, because two build paths
+ * producing different codes for the same version is exactly what broke in-place
+ * updates (`--split-per-abi` adds an ABI offset, CI's `run_number` is unrelated
+ * to the version). Patch and minor are capped at 999 so the fields cannot
+ * collide; a version that does not fit fails the build instead of reusing a code.
+ */
+fun versionCodeFromName(name: String): Int {
+    val parts = name.split('.', '-', '+')
+    val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
+    val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+    val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+    require(major in 0..2100 && minor in 0..999 && patch in 0..999) {
+        "Version '$name' does not fit the versionCode scheme " +
+            "(major 0..2100, minor 0..999, patch 0..999)."
+    }
+    return major * 1_000_000 + minor * 1_000 + patch
+}
+
 val releaseSigningEnvironment = mapOf(
     "IPTVS_ANDROID_KEYSTORE_PATH" to System.getenv("IPTVS_ANDROID_KEYSTORE_PATH"),
     "IPTVS_ANDROID_KEYSTORE_PASSWORD" to System.getenv("IPTVS_ANDROID_KEYSTORE_PASSWORD"),
@@ -26,7 +51,7 @@ val missingReleaseSigningValues = releaseSigningEnvironment
 val releaseSigningConfigured = missingReleaseSigningValues.isEmpty()
 
 /**
- * Optional local key for parallel/test installs, in the shape Tremotesf uses
+ * Optional local key for local test installs, in the shape Tremotesf uses
  * (`android/keystore.properties` + a gitignored keystore). It is only consulted
  * when the CI environment variables are absent; CI keeps the env-only rule, and
  * a key from this file must never be used for a published build.
@@ -71,16 +96,25 @@ android {
 
     defaultConfig {
         // The application ID is the app's stable public identity (and what the
-        // system reports as the package name, e.g. in an HDMI-info overlay). It
-        // matches the Kotlin `namespace`/package.
-        applicationId = "com.gchofficial.iptvs.player"
+        // system reports as the package name, e.g. in an HDMI-info overlay).
+        //
+        // This is **this fork's** identity. The upstream app publishes as
+        // `com.gchofficial.iptvs.player` (Google Play) and `...player.direct`
+        // (outside-Play), so this build is a *different* app to Android: it does
+        // not update those installs, and they do not update it. The Kotlin
+        // `namespace` below stays upstream's package name on purpose — renaming
+        // the code package is a separate, much larger change that buys nothing at
+        // runtime.
+        applicationId = "io.github.snbogdanov.iptvs"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // libmpv (dev.jdtech.mpv:libmpv) requires API 26+; this also matches the
         // HDR window color-mode API used by the native player.
         minSdk = maxOf(flutter.minSdkVersion, 26)
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
+        // Derived from the name, not from Flutter's counter — see
+        // `versionCodeFromName`: one code per version, for every build path.
+        versionCode = versionCodeFromName(flutter.versionName)
         versionName = flutter.versionName
     }
 
@@ -93,15 +127,6 @@ android {
         create("githubDirect") {
             dimension = "distribution"
             applicationIdSuffix = ".direct"
-        }
-        create("googlePlay") {
-            dimension = "distribution"
-        }
-        // Installs alongside the official app (own application id and, locally,
-        // the test key): `flutter build apk --release --flavor parallel`.
-        create("parallel") {
-            dimension = "distribution"
-            applicationIdSuffix = ".parallel"
         }
     }
 
@@ -137,6 +162,16 @@ android {
             // A release task fails during configuration when any required value
             // is absent, so no distributable APK can silently use the debug key.
             signingConfig = signingConfigs.findByName("release")
+        }
+        debug {
+            // **Debug builds carry the release signature** when it is available.
+            // The point is one installation per phone: an iteration build then
+            // replaces the released app in place (same package, same signer)
+            // instead of appearing beside it as a second copy. Without the key —
+            // PR CI, or a machine with no `keystore.properties` — Gradle's
+            // committed public debug keystore keeps working as before.
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
 

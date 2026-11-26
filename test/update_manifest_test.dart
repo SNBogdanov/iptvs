@@ -1,220 +1,182 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/update_manifest.dart';
 
-Uint8List _manifestBytes({
-  String version = '1.4.2',
-  String platform = 'android',
-  String filename = 'iptvs-1.4.2-android.apk',
-  int byteSize = 12345,
-  String sha256 =
-      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-}) => Uint8List.fromList(
-  utf8.encode(
-    jsonEncode({
-      'schema': 1,
-      'version': version,
-      'minimum_version': '1.0.0',
-      'artifacts': [
-        {
-          'platform': platform,
-          'filename': filename,
-          'byte_size': byteSize,
-          'sha256': sha256,
-        },
-      ],
-    }),
-  ),
-);
+Uint8List _bytes(Map<String, dynamic> json) =>
+    Uint8List.fromList(utf8.encode(jsonEncode(json)));
 
-Future<({String publicKey, String signature})> _sign(Uint8List bytes) async {
-  final algorithm = Ed25519();
-  final keyPair = await algorithm.newKeyPair();
-  final publicKey = await keyPair.extractPublicKey();
-  final signature = await algorithm.sign(bytes, keyPair: keyPair);
-  return (
-    publicKey: base64Encode(publicKey.bytes),
-    signature: base64Encode(signature.bytes),
-  );
-}
+const _sha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+Map<String, dynamic> _artifact(
+  String filename, {
+  String sha256 = _sha,
+  int size = 12345,
+  String host = 'github.com',
+}) => {
+  'url': 'https://$host/SNBogdanov/iptvs/releases/download/v1.4.2/$filename',
+  'size': size,
+  'sha256': sha256,
+};
 
 void main() {
-  const verifier = ReleaseManifestVerifier();
-
-  test(
-    'accepts a detached signature produced by the CI OpenSSL commands',
-    () async {
-      final bytes = Uint8List.fromList(
-        utf8.encode(
-          '{"schema":1,"version":"1.4.2","minimum_version":"0.1.0",'
-          '"artifacts":[{"platform":"android",'
-          '"filename":"iptvs-1.4.2-android.apk","byte_size":5,'
-          '"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}',
-        ),
-      );
-
-      final manifest = await verifier.verify(
-        manifestBytes: bytes,
-        signatureBase64:
-            '62k6SPfz0orSnznIRn5LDfoRL4+zpFFlg15YPSNW1TGvXBXUOVqsU6ybbBz6VUh9brofaE7r/8COKZoTBgX0Bg==',
-        publicKeyBase64: 'i6CuVlUd5rYtdQOIHmznHE70sizci80VJ/IvEZCnyAw=',
+  group('ReleaseManifest', () {
+    test('parses every platform with its URL, size and hash', () {
+      final manifest = ReleaseManifest.parse(
+        _bytes({
+          'version': '1.4.2',
+          'minimum_version': '1.0.0',
+          'windows': _artifact('iptvs-1.4.2.msi', size: 73422891),
+          'android': _artifact('iptvs-1.4.2.apk', size: 55123456),
+          'linux': _artifact('iptvs-1.4.2.AppImage', size: 81234567),
+        }),
       );
 
       expect(manifest.version, '1.4.2');
-    },
-  );
+      expect(manifest.minimumVersion, '1.0.0');
+      expect(manifest.artifacts.keys, {
+        'windows-x64',
+        'android',
+        'linux-x86_64',
+      });
+      final windows = manifest.artifacts['windows-x64']!;
+      expect(windows.filename, 'iptvs-1.4.2.msi');
+      expect(windows.byteSize, 73422891);
+      expect(windows.sha256, _sha);
+      expect(windows.url.host, 'github.com');
+    });
 
-  test('accepts a valid signature over the exact manifest bytes', () async {
-    final bytes = _manifestBytes();
-    final signed = await _sign(bytes);
+    test('a missing minimum_version falls back to the version', () {
+      final manifest = ReleaseManifest.parse(
+        _bytes({'version': '1.4.2', 'android': _artifact('a.apk')}),
+      );
+      expect(manifest.minimumVersion, '1.4.2');
+    });
 
-    final manifest = await verifier.verify(
-      manifestBytes: bytes,
-      signatureBase64: signed.signature,
-      publicKeyBase64: signed.publicKey,
-    );
+    test('unknown platform keys are ignored, not rejected', () {
+      final manifest = ReleaseManifest.parse(
+        _bytes({
+          'version': '1.4.2',
+          'android': _artifact('iptvs-1.4.2.apk'),
+          'macos': {'url': 'https://github.com/a/b.dmg', 'size': 1, 'sha256': _sha},
+        }),
+      );
+      expect(manifest.artifacts.keys, {'android'});
+    });
 
-    expect(manifest.version, '1.4.2');
-    expect(manifest.minimumVersion, '1.0.0');
-    expect(manifest.artifacts['android']?.filename, 'iptvs-1.4.2-android.apk');
-  });
+    test('rejects a version that is not dotted numeric', () {
+      expect(
+        () => ReleaseManifest.parse(_bytes({'version': 'v1.4.2'})),
+        throwsFormatException,
+      );
+    });
 
-  test('rejects a manifest changed after signing', () async {
-    final original = _manifestBytes();
-    final signed = await _sign(original);
-    final altered = _manifestBytes(byteSize: 12346);
-
-    await expectLater(
-      verifier.verify(
-        manifestBytes: altered,
-        signatureBase64: signed.signature,
-        publicKeyBase64: signed.publicKey,
-      ),
-      throwsA(isA<FormatException>()),
-    );
-  });
-
-  test('rejects a signature made by another key', () async {
-    final bytes = _manifestBytes();
-    final signer = await _sign(bytes);
-    final other = await _sign(bytes);
-
-    await expectLater(
-      verifier.verify(
-        manifestBytes: bytes,
-        signatureBase64: signer.signature,
-        publicKeyBase64: other.publicKey,
-      ),
-      throwsA(isA<FormatException>()),
-    );
-  });
-
-  test('rejects filename not bound to platform and version', () async {
-    final bytes = _manifestBytes(filename: 'different.apk');
-    final signed = await _sign(bytes);
-
-    await expectLater(
-      verifier.verify(
-        manifestBytes: bytes,
-        signatureBase64: signed.signature,
-        publicKeyBase64: signed.publicKey,
-      ),
-      throwsA(isA<FormatException>()),
-    );
-  });
-
-  test('rejects oversized artifact metadata', () async {
-    final bytes = _manifestBytes(byteSize: kMaxAndroidUpdateBytes + 1);
-    final signed = await _sign(bytes);
-
-    await expectLater(
-      verifier.verify(
-        manifestBytes: bytes,
-        signatureBase64: signed.signature,
-        publicKeyBase64: signed.publicKey,
-      ),
-      throwsA(isA<FormatException>()),
-    );
-  });
-
-  test('accepts the exact Linux AppImage platform and filename', () async {
-    final bytes = _manifestBytes(
-      platform: 'linux-x86_64',
-      filename: 'iptvs-1.4.2-linux-x86_64.AppImage',
-    );
-    final signed = await _sign(bytes);
-
-    final manifest = await verifier.verify(
-      manifestBytes: bytes,
-      signatureBase64: signed.signature,
-      publicKeyBase64: signed.publicKey,
-    );
-
-    expect(
-      manifest.artifacts['linux-x86_64']?.filename,
-      'iptvs-1.4.2-linux-x86_64.AppImage',
-    );
-  });
-
-  test(
-    'ignores artifacts for unknown future platforms and keeps the known ones',
-    () async {
-      // Regression: 0.1.38 added a `linux-x86_64` artifact, and every ≤0.1.37
-      // client's parser threw 'Unsupported release platform' on it, rejecting
-      // the whole manifest and bricking auto-update on every platform. A client
-      // must parse the platforms it knows and skip the rest.
-      final bytes = Uint8List.fromList(
-        utf8.encode(
-          jsonEncode({
-            'schema': 1,
+    test('rejects a non-HTTPS or hostless artifact URL', () {
+      expect(
+        () => ReleaseManifest.parse(
+          _bytes({
             'version': '1.4.2',
-            'minimum_version': '1.0.0',
-            'artifacts': [
-              {
-                'platform': 'android',
-                'filename': 'iptvs-1.4.2-android.apk',
-                'byte_size': 12345,
-                'sha256': List.filled(64, 'a').join(),
-              },
-              {
-                // A platform this build has never heard of.
-                'platform': 'macos-arm64',
-                'filename': 'iptvs-1.4.2-macos-arm64.dmg',
-                'byte_size': 999,
-                'sha256': List.filled(64, 'b').join(),
-              },
-            ],
+            'android': {
+              'url': 'http://github.com/a.apk',
+              'size': 1,
+              'sha256': _sha,
+            },
           }),
         ),
+        throwsFormatException,
       );
-      final signed = await _sign(bytes);
-
-      final manifest = await verifier.verify(
-        manifestBytes: bytes,
-        signatureBase64: signed.signature,
-        publicKeyBase64: signed.publicKey,
-      );
-
-      expect(manifest.artifacts.keys, ['android']);
-      expect(manifest.artifacts['android']?.filename, 'iptvs-1.4.2-android.apk');
-    },
-  );
-
-  test('rejects uppercase or malformed SHA-256 values', () async {
-    for (final digest in [List.filled(64, 'A').join(), 'xyz']) {
-      final bytes = _manifestBytes(sha256: digest);
-      final signed = await _sign(bytes);
-      await expectLater(
-        verifier.verify(
-          manifestBytes: bytes,
-          signatureBase64: signed.signature,
-          publicKeyBase64: signed.publicKey,
+      expect(
+        () => ReleaseManifest.parse(
+          _bytes({
+            'version': '1.4.2',
+            'android': {'url': 'https:///a.apk', 'size': 1, 'sha256': _sha},
+          }),
         ),
-        throwsA(isA<FormatException>()),
+        throwsFormatException,
       );
-    }
+    });
+
+    test('rejects the wrong file type for a platform', () {
+      expect(
+        () => ReleaseManifest.parse(
+          _bytes({
+            'version': '1.4.2',
+            'windows': _artifact('iptvs-1.4.2.zip'),
+          }),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test('rejects a malformed or oversized artifact', () {
+      expect(
+        () => ReleaseManifest.parse(
+          _bytes({
+            'version': '1.4.2',
+            'android': _artifact('a.apk', sha256: 'not-a-hash'),
+          }),
+        ),
+        throwsFormatException,
+      );
+      expect(
+        () => ReleaseManifest.parse(
+          _bytes({
+            'version': '1.4.2',
+            'android': _artifact('a.apk', size: 0),
+          }),
+        ),
+        throwsFormatException,
+      );
+      expect(
+        () => ReleaseManifest.parse(
+          _bytes({
+            'version': '1.4.2',
+            'android': _artifact(
+              'a.apk',
+              size: kMaxAndroidUpdateBytes + 1,
+            ),
+          }),
+        ),
+        throwsFormatException,
+      );
+    });
+  });
+
+  group('release pipeline', () {
+    // The workflow writes `update.json` with shell tools; this pins the shape it
+    // must produce against the parser above, so the two cannot drift apart
+    // without a red test. (The publish step itself can only run in CI.)
+    test('publishes an update.json the client can parse', () {
+      final workflow = File('.github/workflows/release.yml').readAsStringSync();
+
+      expect(workflow, contains('> dist/update.json'));
+      expect(workflow, contains(r'--arg version "$VERSION"'));
+      expect(workflow, contains(r'--arg minimum "$MINIMUM_UPDATE_VERSION"'));
+      for (final key in ['android', 'windows', 'linux']) {
+        expect(
+          workflow,
+          contains('--argjson $key'),
+          reason: 'update.json must carry the $key platform key',
+        );
+      }
+      // Absolute, tag-pinned URLs: the manifest names the build it was made from.
+      expect(
+        workflow,
+        contains(
+          r'base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"',
+        ),
+      );
+      expect(workflow, contains(r'windows="dist/iptvs-$VERSION.msi"'));
+    });
+
+    test('no longer signs the manifest with Ed25519', () {
+      final workflow = File('.github/workflows/release.yml').readAsStringSync();
+
+      expect(workflow, isNot(contains('UPDATE_MANIFEST_PRIVATE_KEY')));
+      expect(workflow, isNot(contains('UPDATE_MANIFEST_PUBLIC_KEY')));
+      expect(workflow, isNot(contains('pkeyutl')));
+    });
   });
 }

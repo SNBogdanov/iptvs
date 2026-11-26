@@ -1,6 +1,7 @@
 package com.gchofficial.iptvs.player
 
 import android.content.Context
+import android.graphics.Color
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -9,6 +10,7 @@ import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.widget.FrameLayout
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
@@ -247,11 +249,36 @@ class ExoPlayerEngine(
      */
     var onClaimedSurfaceFirstFrame: (() -> Unit)? = null
 
+    /**
+     * Opaque black cover over the video surface, up only while a **new**
+     * stream is loading.
+     *
+     * A `SurfaceView` keeps the last decoded frame until the next one is
+     * rendered, and `player.stop()` does not clear it — so a channel change
+     * showed the *previous* channel for the whole time the new one took to
+     * start, which reads as "the zap didn't work" on a TV. The cover is lifted
+     * by the renderer's own first frame ([onRenderedFirstFrame]), never by a
+     * timer: the picture is shown exactly when there is a picture.
+     */
+    private val blackout = View(context).apply {
+        setBackgroundColor(Color.BLACK)
+        isClickable = false
+        isFocusable = false
+        visibility = View.GONE
+    }
+
     private val playerView = PlayerView(context).apply {
         useController = false
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
         keepScreenOn = true
+        addView(
+            blackout,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
     }
     private val contentFrame: AspectRatioFrameLayout? =
         playerView.findViewById(androidx.media3.ui.R.id.exo_content_frame)
@@ -488,6 +515,11 @@ class ExoPlayerEngine(
                 },
             )
             .build()
+        // Cover the previous channel's last frame before the decoder is torn
+        // down: `stop()` frees the decoder but leaves the old image on the
+        // surface, so without this the zap shows the channel being left until
+        // the new one renders. Lifted in `onRenderedFirstFrame`.
+        blackout.visibility = View.VISIBLE
         // stop() first so a reload (go-to-live) starts from a clean idle state
         // instead of inheriting a paused / mid-flush decoder, which left the
         // first go-to-live stuck paused. No-op on the initial (idle) load.
@@ -569,6 +601,9 @@ class ExoPlayerEngine(
         override fun onRenderedFirstFrame() {
             if (reportedFirstFrame) return
             reportedFirstFrame = true
+            // The new stream has a picture: lift the cover `load` put up over
+            // the previous channel's last frame.
+            blackout.visibility = View.GONE
             // The picture is up, whichever leg produced it.
             cancelPreviewFrameWatch()
             // Only a *claim's* first frame says anything about the handoff, and

@@ -286,6 +286,11 @@ void main() {
         ),
       );
       await pumpUntilFound(tester, waitFor ?? find.text('1 - Channel 0'));
+      // The list starts its now/next query once it settles, and sqflite arms a
+      // 10 s lock timer while that query waits its turn. Let it elapse here: a
+      // pending timer fails a widget test at the end, and this one is the
+      // query's clock, not a timer the screen left running.
+      await tester.pump(const Duration(seconds: 11));
     }
 
     testWidgets('lands on the stored channel', (tester) async {

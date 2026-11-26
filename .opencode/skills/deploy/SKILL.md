@@ -61,8 +61,9 @@ description: "Деплой iptvs (Windows) в две установки: C:\\Pro
 
 ## Опционально
 
-MSIX/Store-пакет — только по просьбе: `tool\package_windows_msix.ps1`
-(см. `docs/store-publishing.md`).
+MSI-пакет — только по просьбе:
+`tool\package_windows_msi.ps1 -BuildDirectory build\windows\x64\runner\Release -Version <версия> -OutputPath build\msi\iptvs-<версия>.msi`
+(см. `docs/updates.md`, раздел «Manifest and package signing»).
 
 ## Отчёт
 

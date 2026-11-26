@@ -41,12 +41,20 @@ void main() {
     }
   });
 
-  test('release signs and publishes the Linux artifact', () {
+  test('release publishes the Linux AppImage in the update manifest', () {
     final workflow = File('.github/workflows/release.yml').readAsStringSync();
     expect(workflow, contains('build-linux:'));
     expect(workflow, contains('linux-x86_64.AppImage'));
-    expect(workflow, contains('platform:"linux-x86_64"'));
-    expect(workflow, contains('UPDATE_MANIFEST_PUBLIC_KEY'));
+    // `update.json` carries one object per platform under a lowercase key; the
+    // Linux one is `linux`, pointing at the AppImage (`lib/data/update_manifest.dart`).
+    expect(
+      workflow,
+      contains('dist/iptvs-\$VERSION-linux-x86_64.AppImage'),
+    );
+    expect(workflow, contains(r'--argjson linux'));
+    // The manifest is unsigned now: no Ed25519 key is consumed or compiled in.
+    expect(workflow, isNot(contains('UPDATE_MANIFEST_PUBLIC_KEY')));
+    expect(workflow, isNot(contains('platform:"linux-x86_64"')));
     expect(
       workflow,
       contains('releases/download/12/appimagetool-x86_64.AppImage'),

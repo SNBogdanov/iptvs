@@ -1,9 +1,8 @@
 # iptvs
 
-[![Build](https://github.com/GCHOfficial/iptvs/actions/workflows/build.yml/badge.svg)](https://github.com/GCHOfficial/iptvs/actions/workflows/build.yml)
+[![Build](https://github.com/SNBogdanov/iptvs/actions/workflows/build.yml/badge.svg)](https://github.com/SNBogdanov/iptvs/actions/workflows/build.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/site-iptvs.click-7b6cf6)](https://iptvs.click)
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-ff5e5b)](https://ko-fi.com/georgecosminhanta)
+[![Releases](https://img.shields.io/badge/downloads-GitHub%20Releases-7b6cf6)](https://github.com/SNBogdanov/iptvs/releases)
 
 A cross-platform **IPTV player** for Windows, Linux, and Android (including **Android TV**),
 built with Flutter and libmpv. It connects to your own IPTV provider, caches its
@@ -68,16 +67,14 @@ element can't.
 
 ## Download
 
-[**Google Play**](https://play.google.com/store/apps/details?id=com.gchofficial.iptvs.player)
-· [**Microsoft Store**](https://apps.microsoft.com/detail/9P8KK9T379WN)
-· [**iptvs.click**](https://iptvs.click)
+Every artifact comes from this fork's [**Releases**](https://github.com/SNBogdanov/iptvs/releases)
+page: the universal Android APK (phones and Android TV), the MSI installer for Windows, and the
+Linux AppImage. There is **no store listing** — Google Play and the Microsoft Store are not used,
+so an APK from a store (or from upstream) is a different app that cannot be updated by this one.
 
-Or grab the latest Linux AppImage, Windows zip, and Android APK from the
-[**Releases**](https://github.com/GCHOfficial/iptvs/releases) page. Note the Play build and
-the direct APK are signed with **different certificates** and cannot be installed over one
-another — pick one. The APK installs
-on both phones and Android TV. The AppImage is portable and updates itself from
-the same signed GitHub release channel when launched from a writable location.
+The APK installs on both phones and Android TV. The AppImage is portable and updates itself from
+the same GitHub release channel when launched from a writable location; the MSI updates itself
+in place through the in-app updater.
 
 ## Build from source
 
@@ -112,7 +109,7 @@ CI expectation: `flutter analyze` is clean and `flutter test` is green.
 Maintaining a source list with a TV remote is painful, so iptvs can optionally talk to
 a **web panel** — a static site backed by [Supabase](https://supabase.com) — where you
 manage, reorder, and keep your sources and metadata keys with a real keyboard.
-The live panel is at **<https://panel.iptvs.click>**. Each device pulls a list
+Each device pulls a list
 down after a one-time **pairing code**, so there is **no login on the TV** — and can
 optionally **push** its own set back up (newest change wins).
 
@@ -149,17 +146,20 @@ sync in the app, build with the Supabase values — locally via
 
 ## Website and knowledge base
 
-**<https://iptvs.click>** — download links, and a knowledge base covering installing per
-platform, adding a source, cloud sync and pairing, profiles and PINs, the TV remote
-controls, and troubleshooting. It is an [Astro Starlight](https://starlight.astro.build)
-site living in [`kb/`](kb/); the pages are plain Markdown, so corrections are welcome as
-pull requests.
+The knowledge base lives in this repository — [`kb/`](kb/), an
+[Astro Starlight](https://starlight.astro.build) site with plain Markdown pages covering
+installing per platform, adding a source, cloud sync and pairing, profiles and PINs, the TV
+remote controls, and troubleshooting. Corrections are welcome as pull requests.
+
+Downloads come from this fork's [**Releases**](https://github.com/SNBogdanov/iptvs/releases)
+only — `iptvs.click` is the original upstream project's site and serves *its* builds, which
+are a different app.
 
 ## Community and support
 
 - **Discord** — <https://discord.gg/Eh2BMVRJT>
 - **Telegram** — <https://t.me/+l_fENZkpwDw4MTU0>
-- **Issues** — [GitHub issues](https://github.com/GCHOfficial/iptvs/issues) for anything reproducible
+- **Issues** — [GitHub issues](https://github.com/SNBogdanov/iptvs/issues) for anything reproducible
 - **Email** — <support@iptvs.click>
 
 Please don't post provider usernames, passwords, MAC addresses or playlist URLs
@@ -167,7 +167,6 @@ anywhere — nobody needs them to help, and the app's exported diagnostics alrea
 strip them.
 
 iptvs is free and GPLv3, with no ads, no tracking, and no account needed to use it.
-If you would like to support development: **<https://ko-fi.com/georgecosminhanta>**.
 
 ## Disclaimer
 

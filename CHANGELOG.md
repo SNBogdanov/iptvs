@@ -11,6 +11,8 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-26
+
 ### Added
 
 - Player: **random zapping and auto-switch ("zapping") are now buttons** on every overlay — a
@@ -115,6 +117,68 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Changed
 
+- **Windows ships an MSI instead of MSIX.** Built with WiX v4
+  (`tool/package_windows_msi.ps1` + `windows/packaging/Product.wxs.in`), it installs per machine
+  into `C:\Program Files\IPTVS`, registers in *Apps & features* and upgrades itself through
+  `msiexec /i … /qn` — no certificate to trust, no package identity to keep stable. Start Menu
+  **and desktop** shortcuts are created; `msiexec /i iptvs-<ver>.msi IPTVS_DESKTOPSHORTCUT=0`
+  leaves the desktop one out. The in-app updater downloads the `.msi`, verifies size and SHA-256
+  and hands it to an elevated `msiexec` helper that relaunches the installed exe.
+- **The Windows data folder left the old owner.** `path_provider` derives
+  `%APPDATA%\<company>\<product>` from the executable's VERSIONINFO, so the fork's company rename
+  moves it to `%APPDATA%\SNBogdanov\iptvs`; `migrateLegacyWindowsData` copies an existing
+  `%APPDATA%\GCHOfficial\iptvs` over once, keeping settings, history and secure-storage entries.
+- **Debug builds carry the release signature and the release's `versionCode`.** `buildTypes.debug`
+  uses the release signing config when a keystore is configured (falling back to the committed
+  debug key only when it is not, so PR CI keeps working), and `versionCode` is now derived from the
+  version name (`versionCodeFromName`: `1.0.2` → `1_000_002`) instead of Flutter's `--build-number`.
+  One consequence is the point of the change: `flutter build apk --debug --flavor githubDirect`
+  installs **over** the release build on a phone — same package, same signer, same code — so only
+  one copy of the app exists while iterating. The other is that a release always upgrades every
+  earlier install; `--split-per-abi` is never used for anything installed on a device, because its
+  ABI offset moves the code.
+- **The release pipeline publishes `update.json` and a signed MSIX.** `release.yml` no longer
+  builds a Windows zip or an Ed25519-signed manifest: it signs the MSIX with the fork's certificate
+  (`WINDOWS_MSIX_PFX_BASE64`/`_PASSWORD` release secrets), exports the matching `.cer`, and writes
+  the unsigned `update.json` the client reads (one URL + size + SHA-256 per platform, the Windows
+  entry naming the certificate). `--dart-define=UPDATE_MANIFEST_PUBLIC_KEY` is gone from every build,
+  and the `package_windows_msix.ps1` verifier now pins this fork's identity instead of upstream's
+  Partner Center one (parameters still take a Store account's values).
+- **Unmuting with the volume slider no longer disables the volume swipe.** The slider (and the
+  swipe itself) set a level through `onSetVolume`, which now also clears `mutedByButton`: raising
+  the level is an unmute, and the flag that gates the swipe used to be cleared only by the mute
+  button, so a slider unmute left the gesture inert until the player was reopened.
+- **Help & about now says this build is a fork** and links both repositories: this fork
+  (`github.com/SNBogdanov/iptvs`, where issues belong) and the original upstream project
+  (`github.com/GCHOfficial/iptvs`, credited separately). Previously both the source link and the
+  issue channel pointed at upstream.
+- **Updates are discovered from an `update.json` asset on the latest GitHub release** (the
+  `tremotesf` model) instead of a GitHub API call plus an Ed25519-signed manifest: version, and one
+  URL + size + SHA-256 per platform (Windows/Android/Linux), read over HTTPS with the same
+  host/redirect allowlist. The manifest is not signed — the per-file hash is the check. **Windows
+  now installs the signed MSIX** (self-signed, certificate imported into `TrustedPeople` once, then
+  `Add-AppxPackage` and a relaunch by package family name) instead of swapping a portable folder.
+- **The fork has its own identities.** Android applicationId is now
+  `io.github.snbogdanov.iptvs` (flavours `.dev` / `.direct`, `googlePlay` without a suffix) and the
+  Windows MSIX identity is `SNBogdanov.IPTVSPlayer` with publisher `CN=SNBogdanov`. Both are
+  *different apps* from upstream's: installs do not update across the two, so state comes back
+  through cloud pairing. The `parallel` flavour (a side-by-side local release) is removed — the
+  uploader no longer needs a third local identity.
+- **Android TV / phones: Back now exits in two presses.** Back on the channel list is "leave":
+  one press shows "Press Back again to exit", the next exits. It no longer peels the list to its
+  first row, hops into the search box or climbs the tabs, so leaving the app from the player takes
+  hide-panel → close-player → confirm instead of four or five presses; arrows still move between
+  the sidebar, search and tabs, and a text field still owns Back while it is being edited.
+- **Android TV: the aspect-ratio chip is back in the cursor path.** A chip with a hold action used a
+  raw pointer detector instead of `clickable`, and a pointer detector does not make a node
+  focusable — so the remote skipped the aspect button (and "Go to live"). It is focusable again,
+  with Enter/Center mapped to its tap.
+- **Android TV: Left/Right on the progress bar scrubs instead of jumping to the next button.** The
+  slider no longer needs an "OK to edit" mode before the arrows change the value — while it holds
+  focus they are the seek step (and the volume step on the volume slider), and Up/Down leaves the
+  row. Matches the Windows GDI overlay's scrubber row.
+- **Android TV: bringing the control bar back returns focus to the button it was hidden on**,
+  instead of always landing on play/pause; controls that are no longer offered fall back to it.
 - **Live channel rows are sized per row**, not per list: a channel with a programme takes the
   tall row (now/next/progress), one without it the compact row — a portal whose guide covers a
   handful of channels no longer draws every other card with an empty EPG band. While the guide is
@@ -184,8 +248,29 @@ each release's notes also appear on GitHub Releases. New work lands under
   while the chrome is hidden, on Android as well as in the shared overlay — each gated by its own
   Settings preference (the Android name pill and top-bar title follow "Channel name in the player").
 
+### Removed
+
+- **Store publishing.** The Microsoft Store and Google Play pipelines (`microsoft-store.yml`,
+  `google-play.yml`), the `googlePlay` Gradle flavour, the store listing assets
+  (`assets/store/`), the Play upload-key helper and the Play AAB verifier, and
+  `docs/store-publishing.md` / `docs/google-play-submission.md` are gone. So are the
+  `googlePlay` and `microsoftStore` distribution channels and `isStoreManaged`; an unknown channel
+  still parses as `development`, which means "no self-update" — exactly what those builds did.
+  This fork ships from GitHub Releases only: APK (`githubDirect`), signed MSIX, AppImage, and the
+  README, KB install guide and landing page point there instead of at store listings.
+
 ### Fixed
 
+- **Previews are silent, on every platform.** Android's deliberate preview used to start at the
+  session volume, and the shared engine kept fullscreen's level on the way back, so a preview — or a
+  preview *returned to* from fullscreen — was audible. It now starts muted and re-applies its own
+  mute on resume; the preview panel's mute button is the only way up.
+- **`CH+`/`CH−` on a TV remote now change the channel from the channel list too**, not only inside
+  the player: the key walks the list (next channel down, wrapping), starts the silent preview on a
+  TV and opens the player on a phone, exactly as OK on that row would.
+- **A channel change no longer shows the previous channel for a second.** The Android player covers
+  the video surface with black while the new stream loads and lifts it on that stream's first
+  rendered frame.
 - Leaving the sources screen no longer re-ingests the whole catalogue.
 - A source-identity collision can no longer stop the app from starting.
 - One XMLTV guide entry now covers every channel sharing its id or normalised name.
@@ -259,4 +344,5 @@ each release's notes also appear on GitHub Releases. New work lands under
   maximized window and a window hidden to the tray across a display sleep/wake.
 - Windows: Back/Escape can close playback while "Reconnecting..." is shown.
 
-[Unreleased]: https://github.com/SNBogdanov/iptvs/commits/main
+[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.1...main
+[1.0.1]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.1

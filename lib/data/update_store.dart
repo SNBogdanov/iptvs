@@ -28,9 +28,8 @@ class PendingUpdate {
     'path': path,
     'release_page': releasePage.toString(),
     'artifact': {
-      'platform': artifact.platform,
-      'filename': artifact.filename,
-      'byte_size': artifact.byteSize,
+      'url': artifact.url.toString(),
+      'size': artifact.byteSize,
       'sha256': artifact.sha256,
     },
   };
@@ -50,13 +49,13 @@ class PendingUpdate {
         artifactJson is! Map) {
       throw const FormatException('Invalid pending update');
     }
+    // A record written before the update.json schema change has no URL and
+    // fails this parse: the pending download is dropped and offered again on the
+    // next check, which is cheaper than guessing where the old file came from.
     final artifact = ReleaseArtifact.fromJson(
       Map<String, dynamic>.from(artifactJson),
-      version,
+      'android',
     );
-    if (artifact.platform != 'android') {
-      throw const FormatException('Pending update is not an Android APK');
-    }
     return PendingUpdate(
       version: version,
       path: path,

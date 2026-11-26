@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Direct GitHub builds alone may launch the user-driven package installer.
-         Google Play builds must not contain this self-update permission. -->
+         Nothing else in this fork ships an APK, so no other variant may inherit
+         this self-update permission. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application>

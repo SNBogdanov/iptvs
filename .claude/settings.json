@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | tr -d '\\r' | { read -r f; norm=$(printf '%s' \"$f\" | tr '\\\\' '/'); case \"$norm\" in */android/local.properties|*/android/key.properties|*/android/*.keystore|*/docs/private/*) printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Blocked: local signing config or a gitignored private record (see docs/android-signing.md / docs/store-publishing.md). Edit manually outside Claude Code if intentional.\"}}';; esac; }"
+            "command": "jq -r '.tool_input.file_path // empty' | tr -d '\\r' | { read -r f; norm=$(printf '%s' \"$f\" | tr '\\\\' '/'); case \"$norm\" in */android/local.properties|*/android/key.properties|*/android/*.keystore|*/docs/private/*) printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Blocked: local signing config or a gitignored private record (see docs/android-signing.md). Edit manually outside Claude Code if intentional.\"}}';; esac; }"
           }
         ]
       }

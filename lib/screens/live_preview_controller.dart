@@ -866,11 +866,23 @@ class LivePreviewController extends ChangeNotifier {
     _pausedByApp = false;
     if (nativeActive) {
       try {
+        // Resuming must restore **the preview's** silence, not whatever the
+        // fullscreen session left on the engine. Fullscreen and the preview
+        // share one ExoPlayer instance, and the Activity applies the user's
+        // audible volume to it when it takes over — so a bare `play` brought
+        // the preview back loud for every unmuted fullscreen visit.
+        await _nativeChannel.invokeMethod('setVolume', {
+          'volume': muted ? 0.0 : 1.0,
+        });
         await _nativeChannel.invokeMethod('play');
       } catch (_) {}
       return;
     }
-    if (_player != null) await _player!.play();
+    final player = _player;
+    if (player != null) {
+      await player.setVolume(muted ? 0 : 100);
+      await player.play();
+    }
   }
 
   /// Mute/unmute whichever engine is previewing (and remember the state).

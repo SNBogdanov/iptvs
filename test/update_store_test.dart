@@ -14,10 +14,11 @@ void main() {
       version: '1.2.3',
       path: '/cache/iptvs-1.2.3-android.apk',
       releasePage: Uri.parse(
-        'https://github.com/GCHOfficial/iptvs/releases/tag/v1.2.3',
+        'https://github.com/SNBogdanov/iptvs/releases/tag/v1.2.3',
       ),
       artifact: ReleaseArtifact(
         platform: 'android',
+        url: Uri.parse('https://github.com/SNBogdanov/iptvs/releases/download/v1.2.3/iptvs-1.2.3-android.apk'),
         filename: 'iptvs-1.2.3-android.apk',
         byteSize: 123,
         sha256: List.filled(64, 'a').join(),
@@ -51,9 +52,10 @@ void main() {
       PendingUpdate(
         version: '1.2.3',
         path: '/cache/iptvs-1.2.3-android.apk',
-        releasePage: Uri.parse('https://github.com/GCHOfficial/iptvs/releases'),
+        releasePage: Uri.parse('https://github.com/SNBogdanov/iptvs/releases'),
         artifact: ReleaseArtifact(
           platform: 'android',
+          url: Uri.parse('https://github.com/SNBogdanov/iptvs/releases/download/v1.2.3/iptvs-1.2.3-android.apk'),
           filename: 'iptvs-1.2.3-android.apk',
           byteSize: 1,
           sha256: List.filled(64, 'b').join(),

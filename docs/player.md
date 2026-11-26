@@ -82,7 +82,8 @@ Both engines drive the same engine-agnostic `PlayerUiState` and respond to the s
 `PlayerUiState`) is at parity with the Windows overlay — play/pause, ±10s, mute/volume, scrubber,
 audio/subtitle/speed list-menus, aspect cycle, info panel, contextual hiding, a **live-channel
 favorite star** (see below), and **D-pad nav** (single-press Back peels menu→info→hide→exit;
-sliders are custom "OK to edit" controls, not Material `Slider`, so the D-pad isn't trapped).
+sliders are custom controls, not Material `Slider`, so the D-pad isn't trapped: while the scrubber
+or the volume slider holds focus, Left/Right *is* the seek/volume step and Up/Down leaves the row).
 
 **Back has one Activity-owned policy — and live zapping's key map sits at the same boundary, ahead
 of it.** `HdrPlayerActivity.dispatchKeyEvent` consults `ZapKeyPolicy` first (`dispatchZapKey`, live
@@ -845,6 +846,21 @@ the output again, and the forward leg makes its own armed decision), and by `rel
 Both budgets are generous on purpose, the same asymmetry the forward leg records: a false rebuild
 costs another codec release, another IDR wait and a catch-up against a running audio clock, while
 a late one costs only latency.
+
+**The return leg also restores the preview's own volume.** The engine is shared with fullscreen, and
+the Activity applies the user's audible level to it when it takes over, so nothing put the preview's
+level back: a preview came back **loud** after every unmuted fullscreen visit — including the first
+one, where the user had never asked for sound. `SharedEngine` now remembers `previewVolume` (written
+by `openPreview`'s `muted` argument and by `setPreviewVolume`) and re-applies it in
+`fullscreenDetached`; `LivePreviewController.play()` does the same on the embedded engine and on the
+native channel, so a paused-then-resumed preview cannot inherit fullscreen's level either way.
+
+**A zap covers the old frame.** A `SurfaceView` keeps its last decoded image until the next frame is
+rendered, and `player.stop()` does not clear it — so a channel change showed the channel being left
+for as long as the new one took to start, which from the sofa reads as "the key did nothing".
+`ExoPlayerEngine` puts an opaque black view over the video in `load()` and lifts it from the
+player's own `onRenderedFirstFrame` — never on a timer, so the picture appears exactly when there is
+a picture.
 
 **The case it was found on.** A live channel played fullscreen for ~36 minutes. Partway through,
 a clean `kind=ended` reconnect re-resolved to the same URL and the stream came back as a
@@ -1644,6 +1660,15 @@ press that drives the list still suppresses the reveal-on-input post). The whole
 
 ### The Escape back ladder on the native HWND surface
 
+**Hiding the chrome remembers where the focus was.** The Android overlay is composed through
+`AnimatedVisibility`, so hiding it removes its children — and the `FocusRequester` objects inside
+them — from composition. Re-showing therefore had nothing to restore and always landed on
+play/pause, which made "hide the bar, bring it back" restart the walk from the first button every
+time. Every control now attaches its own `FocusRequester` and reports it to a
+`PlayerFocusMemory` through a `CompositionLocal` when it takes focus; on re-show the bar asks that
+requester first and only falls back to play/pause when the control is no longer in the ring (Go to
+live once live, the step pair on another route, a menu that closed).
+
 **Implemented.** Escape used to call `ShowNativeControls(true)` and send `back` unconditionally,
 so it tore the player down from under an open menu, an open info panel or a control row the user
 had only just revealed. It now peels **menu → info → hide controls → exit**, one rung per press,
@@ -1875,7 +1900,13 @@ button press. The floor also makes the swipe reversible: from the bottom it alwa
 `PlayerUiState.mutedByButton`, and only that flag makes the volume half inert (`state.muted` alone
 would also match a `0` the engine produced on its own). **A mute restored from the previous session
 counts as the button's** — the same flag is seeded when the session opens muted, which is what stops
-the gesture's first pixel of travel from unmuting a player the user had deliberately silenced. The
+the gesture's first pixel of travel from unmuting a player the user had deliberately silenced.
+**Any level the user sets releases that claim**: the volume slider (or a hardware level change that
+routes through `onSetVolume`) clears `mutedByButton` as it raises the level, because raising it is
+itself an unmute — without that, unmuting with the slider left the swipe permanently inert, which is
+exactly how "unmuted with the slider, swipe stops working" was reported. The mute button sets the
+flag again on its own path, which writes the engine directly and never passes through the slider.
+The
 brightness half has no such rule; it floors at `SwipeLevel.BRIGHTNESS_MIN` (five percent) for the
 other reason: a black screen cannot be swiped back by someone who cannot see the picture.
 
@@ -2064,7 +2095,13 @@ configurable — the `-N`/`+N` buttons and their tooltips/semantics read `seekSt
 Material `replay_N`/`forward_N` glyph exists for 5/10/30 only, so 15 and 60 fall back to the plain
 arrow while the tooltip still prints the exact number). On the **Windows GDI overlay** the arrows
 walked the control row and the scrubber was unreachable from the remote, so the seek step rides
-with a structural change (below). Android/iOS/Linux are untouched for now.
+with a structural change (below). **Android now matches for the scrubber.** Its `SlimSlider` is two postures on
+purpose: the **scrubber** (`chip = false`) sits alone on its row, so Left/Right is the seek gesture
+outright — no mode, and Up/Down leaves the row, exactly like the GDI overlay. The **volume slider**
+(`chip = true`) lives *inside* the transport row between buttons, so leaving the arrows as "change
+the volume" trapped the cursor: there was no way to reach the neighbouring button. It keeps the
+original posture — arrows traverse, OK enters adjust mode (the chip lights), Left/Right step the
+level, OK/Back leaves. Touch keeps drag + tap-to-seek on both. iOS and Linux are untouched.
 
 **Windows' GDI overlay is now a three-row focus model** (`flutter_window.cpp`). `NativeFocusItem`
 gained `kScrubber`; `FocusRowOf` puts Back on row 0, the scrubber on row 1 (VOD only), and the
@@ -2075,8 +2112,7 @@ the same setting that labels the buttons. Everywhere else Left/Right behave as b
 the row you are on, and from Back (a one-item row) they step off into the transport row. OK on the
 scrubber is a deliberate no-op (`CommandForFocusedItem` → `show`). A focused scrubber draws the
 ordinary focus fill (`RGB(38, 34, 78)`) as a rounded rect around the whole track, because the 6 px
-bar alone does not read as a focus stop. `seek_step_seconds` (default 10, clamped to ≥1) rides
-every `setControlState` and labels/steps the `-N`/`+N` buttons; the `-10`/`+10` string literals are
+bar alone does not read as a focus stop. `seek_step_seconds` (default 10, clamped to ≥1) ridesevery `setControlState` and labels/steps the `-N`/`+N` buttons; the `-10`/`+10` string literals are
 gone. Live has no scrubber, so row 1 is simply absent there and Up/Down step Back ↔ transport
 exactly as the old two-row form did.
 

@@ -7,12 +7,12 @@ iptvs runs on Windows, Android (phones and tablets), Android TV, and Linux.
 
 ## Android and Android TV
 
-Install from Google Play, or download the APK from the
-[releases page](https://github.com/GCHOfficial/iptvs/releases).
+Download the APK from the
+[releases page](https://github.com/SNBogdanov/iptvs/releases).
 
-The two are **signed with different certificates and cannot be installed over each
-other** — Android refuses an update whose signing certificate changed. Pick one
-and stay on it. To switch, uninstall first; your sources are in the device
+There is **no store build**: an APK from Google Play (or from the original upstream
+project) is a *different app* signed with a different certificate, and Android
+refuses to update one with the other. To switch, uninstall first; your sources are in the device
 keychain and will be gone with the app, so
 [pair with the cloud panel](/guides/cloud-sync/) first if you want them back
 without retyping.
@@ -22,12 +22,13 @@ for whichever file manager you used.
 
 ## Windows
 
-Install from the Microsoft Store, or download the `.zip` from the releases page
-and unpack it anywhere you like.
+Download the `.msi` from the [releases page](https://github.com/SNBogdanov/iptvs/releases)
+and open it. Windows installs the package; the first install asks you to trust the
+publisher's certificate (the in-app updater imports it again, elevated, when a new
+machine updates).
 
-The Store build updates itself through the Store. The zip build updates itself
-from within the app: it downloads the new version, verifies it, and swaps itself
-out. Both are the same application.
+The MSI updates itself in place from within the app: it downloads the new version,
+verifies its size and hash, and hands it to `Add-AppxPackage`.
 
 ## Linux
 

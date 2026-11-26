@@ -2,8 +2,9 @@ name: Release
 
 # Cut a release by pushing a tag like `v1.2.3`, or run manually (workflow_dispatch)
 # with a version — a manual run creates the tag itself (see "Ensure the release
-# tag exists"), because the publish step verifies it. Builds Windows, Linux, and
-# Android and publishes a GitHub Release with the artifacts attached and
+# tag exists"), because the publish step verifies it. Builds Windows (MSI),
+# Linux (AppImage), and Android (APK) and publishes a GitHub Release with
+# the artifacts attached, an `update.json` the app's updater reads, and
 # auto-generated notes.
 on:
   push:
@@ -103,7 +104,7 @@ jobs:
           IPTVS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
           IPTVS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
           IPTVS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
-        run: flutter build apk --release --flavor githubDirect --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=UPDATE_MANIFEST_PUBLIC_KEY=${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
+        run: flutter build apk --release --flavor githubDirect --build-name ${{ needs.version.outputs.version }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Verify Android signing certificate
         env:
           EXPECTED_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
@@ -121,6 +122,9 @@ jobs:
   build-windows:
     name: Build Windows
     needs: version
+    # Same protected environment as the Android job: the signing certificate is
+    # an environment secret, so without this the PFX would resolve to empty.
+    environment: release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -141,13 +145,30 @@ jobs:
         # resolves the latest libmpv build (avoids the anonymous rate limit).
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=UPDATE_MANIFEST_PUBLIC_KEY=${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
-      - name: Package build
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
+        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+      # A per-machine MSI: installs into C:\Program Files\IPTVS, registers in
+      # "Apps & features", and upgrades itself through `msiexec` — no certificate
+      # trust and no package identity, which is why this fork left MSIX behind.
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.6
+          # WixUI_InstallDir (wizard chrome) lives in the UI extension; the
+          # Options page with the shortcut checkboxes is wired into it.
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add -g WixToolset.UI.wixext/4.0.6
+      - name: Package MSI
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ./tool/package_windows_msi.ps1 `
+            -BuildDirectory build/windows/x64/runner/Release `
+            -Version $env:RELEASE_VERSION `
+            -OutputPath "iptvs-$env:RELEASE_VERSION.msi"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows
-          path: iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
+          path: iptvs-${{ needs.version.outputs.version }}.msi
           if-no-files-found: error
 
   build-linux:
@@ -172,7 +193,7 @@ jobs:
       - run: flutter config --enable-linux-desktop
       - run: flutter pub get
       - name: Build release (Linux x86-64)
-        run: flutter build linux --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=UPDATE_MANIFEST_PUBLIC_KEY=${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
+        run: flutter build linux --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Fetch pinned linuxdeploy
         run: |
           curl -fL --retry 3 -o "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage
@@ -216,20 +237,25 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create and sign release manifest
+      # The `update.json` the app's updater reads
+      # (`releases/latest/download/update.json`, see lib/data/update_service.dart).
+      # Deliberately **unsigned** — the `tremotesf` model: HTTPS to GitHub plus the
+      # exact byte size and SHA-256 of every file is the check, and a signature
+      # shipped beside the thing it signs adds little over that.
+      #
+      # URLs are absolute and pinned to this tag (not `latest/download`), so the
+      # manifest always names the build it was actually generated from. Unknown
+      # platform keys are skipped by older clients, so adding one cannot break
+      # them (lib/data/update_manifest.dart `kReleaseManifestKeys`).
+      - name: Create update.json
         env:
-          UPDATE_MANIFEST_PRIVATE_KEY_BASE64: ${{ secrets.UPDATE_MANIFEST_PRIVATE_KEY_BASE64 }}
-          UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD }}
-          UPDATE_MANIFEST_PUBLIC_KEY: ${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
           VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
         run: |
           set -euo pipefail
-          if [ -z "$UPDATE_MANIFEST_PRIVATE_KEY_BASE64" ] || [ -z "$UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD" ] || [ -z "$UPDATE_MANIFEST_PUBLIC_KEY" ]; then
-            echo "::error::Update manifest signing key is not configured in the release environment."
-            exit 1
-          fi
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           android="dist/iptvs-$VERSION-android.apk"
-          windows="dist/iptvs-$VERSION-windows-x64.zip"
+          windows="dist/iptvs-$VERSION.msi"
           linux="dist/iptvs-$VERSION-linux-x86_64.AppImage"
           for artifact in "$android" "$windows" "$linux"; do
             if [ ! -f "$artifact" ]; then
@@ -237,40 +263,27 @@ jobs:
               exit 1
             fi
           done
-          key="$RUNNER_TEMP/update-manifest-ed25519.pem"
-          printf '%s' "$UPDATE_MANIFEST_PRIVATE_KEY_BASE64" | base64 --decode > "$key"
-          chmod 600 "$key"
-          derived_public=$(openssl pkey -in "$key" -passin env:UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD -pubout -outform DER | tail -c 32 | base64 -w0)
-          if [ "$derived_public" != "$UPDATE_MANIFEST_PUBLIC_KEY" ]; then
-            echo "::error::Update manifest public and private keys do not match."
-            exit 1
-          fi
-          manifest="dist/iptvs-$VERSION-manifest.json"
-          # The signed manifest lists all three release platforms. linux-x86_64
-          # was temporarily omitted during the 0.1.39–0.1.x rescue window: every
-          # <=0.1.37 client's strict {android, windows-x64} parser threw
-          # 'Unsupported release platform' on 0.1.38's linux entry and rejected
-          # the whole manifest, bricking auto-update on *all* platforms. It is
-          # restored now that the pre-fix cohort has drained — every install is
-          # 0.1.38+ with the skip-unknown parser (a missing/extra entry is 'no
-          # asset', not a crash). See docs/updates.md "Adding a release platform".
-          jq -cn \
+
+          # One platform entry: absolute URL, exact byte size, lowercase SHA-256.
+          entry() {
+            jq -cn \
+              --arg url "$base/$1" \
+              --argjson size "$(stat -c '%s' "$2")" \
+              --arg sha "$(sha256sum "$2" | cut -d' ' -f1)" \
+              '{url: $url, size: $size, sha256: $sha}'
+          }
+
+          windows_entry=$(entry "$(basename "$windows")" "$windows")
+
+          jq -n \
             --arg version "$VERSION" \
             --arg minimum "$MINIMUM_UPDATE_VERSION" \
-            --arg android_name "$(basename "$android")" \
-            --arg android_sha "$(sha256sum "$android" | cut -d ' ' -f 1)" \
-            --argjson android_size "$(stat -c '%s' "$android")" \
-            --arg windows_name "$(basename "$windows")" \
-            --arg windows_sha "$(sha256sum "$windows" | cut -d ' ' -f 1)" \
-            --argjson windows_size "$(stat -c '%s' "$windows")" \
-            --arg linux_name "$(basename "$linux")" \
-            --arg linux_sha "$(sha256sum "$linux" | cut -d ' ' -f 1)" \
-            --argjson linux_size "$(stat -c '%s' "$linux")" \
-            '{schema:1,version:$version,minimum_version:$minimum,artifacts:[{platform:"android",filename:$android_name,byte_size:$android_size,sha256:$android_sha},{platform:"windows-x64",filename:$windows_name,byte_size:$windows_size,sha256:$windows_sha},{platform:"linux-x86_64",filename:$linux_name,byte_size:$linux_size,sha256:$linux_sha}]}' \
-            > "$manifest"
-          openssl pkeyutl -sign -rawin -inkey "$key" -passin env:UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD -in "$manifest" -out "$RUNNER_TEMP/manifest.sig"
-          base64 -w0 "$RUNNER_TEMP/manifest.sig" > "$manifest.sig"
-          rm -f "$key" "$RUNNER_TEMP/manifest.sig"
+            --argjson android "$(entry "$(basename "$android")" "$android")" \
+            --argjson windows "$windows_entry" \
+            --argjson linux "$(entry "$(basename "$linux")" "$linux")" \
+            '{version: $version, minimum_version: $minimum, android: $android, windows: $windows, linux: $linux}' \
+            > dist/update.json
+          cat dist/update.json
       # A short human-readable changelog generated by Gemini from the commit
       # subjects since the previous tag. Tries a chain of models (the primary
       # 503s under load — it cut v0.1.29 with no changelog), two attempts each.
@@ -388,9 +401,9 @@ jobs:
             echo "$RELEASE_TAG already points at $GITHUB_SHA"
           else
             # Never move a tag that already exists. A published release is
-            # addressed by it, users may already hold the artifacts it named,
-            # and the signed update manifest authenticates a specific build —
-            # silently re-pointing it would invalidate all three.
+            # addressed by it, users may already hold the artifacts it named, and
+            # `update.json` names one exact build (URL + size + SHA-256) —
+            # silently re-pointing the tag would invalidate all of that.
             echo "::error::$RELEASE_TAG already exists at $existing, not $GITHUB_SHA." \
               "Refusing to move a published tag; pick a new version."
             exit 1

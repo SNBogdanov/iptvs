@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX v4 source for the Windows installer.
+
+  `tool/package_windows_msi.ps1` substitutes the `@...@` tokens and fills
+  `@DIRECTORIES@` / `@COMPONENTS@` from the Flutter Release payload.
+
+  Two values here are permanent, exactly like the MSIX identity they replace:
+
+  - **UpgradeCode** identifies "the IPTVS Player that this fork installs" for
+    ever. `MajorUpgrade` removes the previous version only when the codes match,
+    so changing it turns every future release into a second, parallel install
+    (and leaves the old one behind).
+  - The install directory (`[ProgramFiles64Folder]\IPTVS`) is what the in-app
+    updater relaunches and what `deploy` copies to; the registry value
+    `HKLM\SOFTWARE\SNBogdanov\IPTVS\InstallDir` publishes it so the elevated
+    helper does not have to guess.
+
+  UI follows WixUI (`WixUI_Common` + our own pages), the same shape as
+  tremotesf's installer:
+
+  - WixUI supplies Welcome, EULA, VerifyReady, Progress, Exit, the maintenance
+    welcome and all error dialogs. We define its fonts and artwork, so every
+    page uses Segoe UI and the IPTVS banner instead of the stock look.
+  - Our pages carry the product-specific content: folder + shortcut choices
+    (first install), the "Upgrade" notice, and the Repair/Remove page.
+
+  Artwork (`windows/packaging/`): `WixUIBannerBmp.bmp` is the 493x58 strip the
+  inner pages draw at 370x44, with the brand mark on the right because the title
+  and description sit on its left half. `WixUIDialogBmp.bmp` is the 493x312
+  full-page picture of Welcome / Exit / Maintenance Welcome; it is composed from
+  `side_panel_src.bmp` (the 164x312 brand panel) on the dialog face colour, which
+  is why that source is kept beside it.
+
+  Flows:
+  - first install: Welcome -> EULA -> folder & shortcuts -> Ready -> install;
+  - upgrade (older version found by FindRelatedProducts): Welcome -> "Upgrade"
+    -> Ready -> install; EULA and the folder page are skipped;
+  - same version already installed: Welcome -> Repair / Remove. That page has
+    no Change: the feature set is fixed after install, so WixUI's Change button
+    would be a dead end. "Изменить" in Programs and features opens the same
+    page (ARPNOMODIFY is *not* set, it would hide Modify), and ARPNOREMOVE is
+    set so the uninstall entry lives on that page as well, next to Repair,
+    where the wizard can explain that settings are kept.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="IPTVS Player"
+    Manufacturer="SNBogdanov"
+    Version="@VERSION@"
+    UpgradeCode="@UPGRADE_CODE@"
+    Scope="perMachine"
+    Language="1033">
+
+    <SummaryInformation
+      Description="IPTVS Player — IPTV player for live TV, movies and series"
+      Manufacturer="SNBogdanov" />
+
+    <!-- No `AllowSameVersionUpgrades`: that attribute widens the detection row to
+         "any version >= this one", so an OLDER package would happily remove a
+         newer install and downgrade. Without it, a newer version is detected by
+         the downgrade row and refused; re-running the very same MSI is still a
+         maintenance install (same ProductCode). -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of IPTVS Player is already installed. Setup will now exit." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="@ICON_PATH@" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/SNBogdanov/iptvs" />
+    <!-- Uninstall goes through the wizard (Изменить -> Remove), the same way
+         tremotesf does it: "Удалить" is not offered separately in Programs and
+         features, so the Remove page can explain that settings are kept. -->
+    <Property Id="ARPNOREMOVE" Value="1" />
+
+    <!-- Shortcut choices, both on by default. -->
+    <Property Id="IPTVS_CORE" Value="1" Secure="yes" />
+    <Property Id="IPTVS_STARTMENU" Value="1" Secure="yes" />
+    <Property Id="IPTVS_DESKTOP" Value="1" Secure="yes" />
+
+    <!-- Artwork shared by every WixUI page: the banner strip at the top of the
+         inner pages and the full-page background of Welcome / Exit. Overriding
+         these two variables replaces the stock WixUI pictures everywhere. -->
+    <WixVariable Id="WixUIBannerBmp" Value="@BANNER_BMP@" />
+    <WixVariable Id="WixUIDialogBmp" Value="@DIALOG_BMP@" />
+    <WixVariable Id="WixUILicenseRtf" Value="@LICENSE_RTF@" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="IPTVS">
+@DIRECTORIES@
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="IPTVS Player">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="IPTVS Player"
+            Description="IPTVS Player"
+            Target="[INSTALLFOLDER]iptvs.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="SOFTWARE\SNBogdanov\IPTVS"
+            Name="startMenu"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut
+          Id="DesktopShortcut"
+          Name="IPTVS Player"
+          Description="IPTVS Player"
+          Target="[INSTALLFOLDER]iptvs.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\SNBogdanov\IPTVS"
+          Name="desktopShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Where the elevated updater helper relaunches from. -->
+    <Component Id="InstallDirRegistry" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryValue
+        Root="HKLM"
+        Key="SOFTWARE\SNBogdanov\IPTVS"
+        Name="InstallDir"
+        Type="string"
+        Value="[INSTALLFOLDER]"
+        KeyPath="yes" />
+    </Component>
+
+    <ComponentGroup Id="AppFiles">
+@COMPONENTS@
+    </ComponentGroup>
+
+    <Feature Id="ProductFeature" Title="IPTVS Player" Level="1" AllowAbsent="no">
+      <Feature Id="CoreFeature" Title="Core components" Level="1" AllowAbsent="no">
+        <ComponentGroupRef Id="AppFiles" />
+        <ComponentRef Id="InstallDirRegistry" />
+      </Feature>
+
+      <Feature Id="StartMenuFeature" Title="Start menu shortcut" Level="1">
+        <Level Value="0" Condition="IPTVS_STARTMENU &lt;&gt; &quot;1&quot;" />
+        <ComponentRef Id="StartMenuShortcut" />
+      </Feature>
+
+      <Feature Id="DesktopFeature" Title="Desktop shortcut" Level="1">
+        <Level Value="0" Condition="IPTVS_DESKTOP &lt;&gt; &quot;1&quot;" />
+        <ComponentRef Id="DesktopShortcut" />
+      </Feature>
+    </Feature>
+
+    <!-- Referencing our own UI symbols pulls their dialogs and publishes into
+         the package; an unreferenced <UI> is dropped at link time. -->
+    <UI>
+      <UIRef Id="IptvsWixUI" />
+      <UIRef Id="IptvsDialogs" />
+    </UI>
+  </Package>
+
+  <!-- Wizard navigation plus the typography shared with the WixUI pages. -->
+  <Fragment>
+    <UI Id="IptvsWixUI">
+      <!-- WixUI's dialogs reference these three ids but the extension does not
+           define them, so the fonts are ours to choose. Segoe UI matches the
+           app; Tahoma (the WixUI default) would look dated next to it. -->
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Segoe UI" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="10" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="WelcomeDlg" />
+      <DialogRef Id="LicenseAgreementDlg" />
+      <DialogRef Id="VerifyReadyDlg" />
+      <DialogRef Id="MaintenanceWelcomeDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ExitDialog" />
+      <DialogRef Id="CancelDlg" />
+      <DialogRef Id="WaitForCostingDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="OutOfDiskDlg" />
+      <DialogRef Id="OutOfRbDiskDlg" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="IptvsInstallDirDlg" />
+      <DialogRef Id="IptvsUpgradeDlg" />
+      <DialogRef Id="IptvsMaintenanceTypeDlg" />
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <!-- Welcome: an older version found -> our Upgrade page; otherwise the
+           EULA and the folder page; an installed same version -> maintenance. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="IptvsUpgradeDlg" Condition="NOT Installed AND WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceWelcomeDlg" Condition="Installed AND NOT PATCH" />
+
+      <Publish Dialog="IptvsUpgradeDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="IptvsUpgradeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+
+      <Publish Dialog="LicenseAgreementDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="IptvsInstallDirDlg" Condition="LicenseAccepted = &quot;1&quot;" />
+
+      <Publish Dialog="IptvsInstallDirDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg" />
+      <Publish Dialog="IptvsInstallDirDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="IptvsUpgradeDlg" Order="0" Condition="NOT Installed AND WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="IptvsInstallDirDlg" Order="1" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="IptvsMaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="IptvsMaintenanceTypeDlg" />
+
+      <!-- Repair and Remove only. The mode property tells VerifyReadyDlg which
+           button (and which wording) it must show. -->
+      <Publish Dialog="IptvsMaintenanceTypeDlg" Control="RepairButton" Property="WixUI_InstallMode" Value="Repair" Order="1" />
+      <Publish Dialog="IptvsMaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+      <Publish Dialog="IptvsMaintenanceTypeDlg" Control="RemoveButton" Property="WixUI_InstallMode" Value="Remove" Order="1" />
+      <Publish Dialog="IptvsMaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+      <Publish Dialog="IptvsMaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+    </UI>
+
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
+
+  <!-- Our pages. Geometry matches the WixUI ones (370x270 dialog, banner strip
+       370x44, title at 15,6, description at 25,23) so switching between our
+       pages and the stock ones does not jump. -->
+  <Fragment>
+    <UI Id="IptvsDialogs">
+      <Dialog Id="IptvsInstallDirDlg" Width="370" Height="270" Title="IPTVS Player Setup" NoMinimize="yes">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="330" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Install IPTVS Player" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="340" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Choose the shortcuts, then click Next." />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="58" Width="60" Height="15"
+                 NoPrefix="yes" Text="Folder:" />
+        <Control Id="Folder" Type="Text" X="20" Y="74" Width="330" Height="15"
+                 NoPrefix="yes" Text="C:\Program Files\IPTVS" />
+        <Control Id="ShortcutsLabel" Type="Text" X="20" Y="108" Width="320" Height="15"
+                 NoPrefix="yes" Text="IPTVS Player" />
+        <Control Id="CoreCheck" Type="CheckBox" X="30" Y="126" Width="300" Height="17"
+                 Property="IPTVS_CORE" CheckBoxValue="1" Disabled="yes" Text="Core components" />
+        <Control Id="StartMenuCheck" Type="CheckBox" X="30" Y="144" Width="300" Height="17"
+                 Property="IPTVS_STARTMENU" CheckBoxValue="1" Text="Start menu shortcut" />
+        <Control Id="DesktopCheck" Type="CheckBox" X="30" Y="162" Width="300" Height="17"
+                 Property="IPTVS_DESKTOP" CheckBoxValue="1" Text="Desktop shortcut" />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="IptvsUpgradeDlg" Width="370" Height="270" Title="IPTVS Player Setup" NoMinimize="yes">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="330" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Upgrade IPTVS Player" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="340" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="An older version is already installed on this computer." />
+        <Control Id="UpgradeText" Type="Text" X="25" Y="60" Width="330" Height="70"
+                 NoPrefix="yes"
+                 Text="Setup will upgrade IPTVS Player to version [ProductVersion]. Only the program files are replaced; your sources, history and settings are kept." />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="IptvsMaintenanceTypeDlg" Width="370" Height="270" Title="IPTVS Player Setup" NoMinimize="yes">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="330" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Repair or remove IPTVS Player" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="340" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Select the operation you wish to perform." />
+
+        <!-- No Change, and no Next either: the feature set is fixed and the
+             buttons below are the only actions. DisableCondition deliberately
+             does not mention ARPNOREMOVE — that property only hides the
+             "Удалить" entry in Programs and features, Remove must still work
+             from here. -->
+        <Control Id="RepairButton" Type="PushButton" X="40" Y="65" Width="100" Height="18"
+                 Text="Repair" DisableCondition="ARPNOREPAIR" />
+        <Control Id="RepairText" Type="Text" X="40" Y="88" Width="290" Height="30"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Repairs missing or damaged program files, shortcuts and registry entries. Your sources, history and settings are not touched." />
+
+        <Control Id="RemoveButton" Type="PushButton" X="40" Y="125" Width="100" Height="18"
+                 Text="Remove" />
+        <Control Id="RemoveText" Type="Text" X="40" Y="148" Width="290" Height="30"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="Removes IPTVS Player from this computer. Your sources, history and settings are kept." />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+    </UI>
+  </Fragment>
+</Wix>

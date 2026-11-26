@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Android TV / Google TV launcher banner (320x180dp).
 
-     On-brand with assets/store/google-play/tv-banner.png: ink ground, the
+     On-brand TV banner: ink ground, the
      accent app tile with its white play glyph, and the "IPTVS Player"
      wordmark. Colours match lib/theme.dart AppColors (ink / accent / textHi).
 

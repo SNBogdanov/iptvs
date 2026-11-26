@@ -146,6 +146,27 @@ private const val HIDE_DELAY_VOD = 3500L
 private const val HIDE_DELAY_LIVE = 4500L
 
 /**
+ * Remembers which control in the player chrome held the D-pad focus **last**.
+ *
+ * The chrome is composed through `AnimatedVisibility`, so hiding it removes its
+ * children from composition — and every `FocusRequester` inside them with it.
+ * Re-showing therefore had nothing to restore and parked focus on play/pause,
+ * i.e. pressing OK to bring the bar back always landed on the first button
+ * instead of the one the user had been on. The requester objects themselves
+ * outlive the controls (they are `remember`ed per call site and re-attached
+ * when the child recomposes), so remembering the object is enough; a control
+ * that is gone for good fails to take focus and the caller falls back to
+ * play/pause.
+ *
+ * A process-wide object rather than a `CompositionLocal`: only one player
+ * route is ever composed, the chrome lives under a conditional whose scopes
+ * nest deeply, and `PlayerScreen` clears this on dispose.
+ */
+object PlayerFocusMemory {
+    var last: FocusRequester? = null
+}
+
+/**
  * Root of the native player UI: the ExoPlayer surface with a Compose control
  * overlay on top. Mirrors the Windows native overlay (top bar + badges, bottom
  * bar with contextual right cluster, list-menus, info panel) and is D-pad
@@ -159,6 +180,11 @@ fun PlayerScreen(
 ) {
     val rootFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    // The focus memory is process-wide (see [PlayerFocusMemory]); clear it when
+    // this player goes away so the next session starts on play/pause.
+    DisposableEffect(Unit) {
+        onDispose { PlayerFocusMemory.last = null }
+    }
     // Bumped on any interaction to (re)arm the auto-hide timer.
     var interaction by remember { mutableIntStateOf(0) }
     // Wall-clock tick driving the clock badge and the live EPG progress (slow —
@@ -208,9 +234,18 @@ fun PlayerScreen(
 
     // Move focus to the controls when shown; park it on the root when hidden so a
     // D-pad press can reveal them again.
+    //
+    // Shown again → the control that had focus when the bar hid, not the first
+    // one: the bar is the same bar, and re-entering it always at play/pause made
+    // every "hide, then bring it back" trip re-walk the row. A control that is no
+    // longer in the ring (Go to live once live, the step pair on another route,
+    // a menu that closed) fails `requestFocus` and the play button takes it.
     LaunchedEffect(state.controlsVisible) {
         if (state.controlsVisible) {
-            runCatching { playFocus.requestFocus() }
+            val remembered = PlayerFocusMemory.last
+            val restored =
+                remembered != null && runCatching { remembered.requestFocus() }.isSuccess
+            if (!restored) runCatching { playFocus.requestFocus() }
         } else {
             state.openMenu = PlayerMenu.None
             state.infoOpen = false
@@ -1302,11 +1337,17 @@ fun IconControlButton(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // A requester of its own when the caller did not hand one over (only
+    // play/pause does): the focus memory needs an object that outlives the
+    // control's removal, so that hiding the bar and bringing it back can land on
+    // the same button — see [PlayerFocusMemory].
+    val ownRequester = remember { FocusRequester() }
+    val requester = focusRequester ?: ownRequester
     val base = modifier
         .size(PlayerDimens.ButtonSize)
         .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
         .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
-    val withFocus = if (focusRequester != null) base.focusRequester(focusRequester) else base
+    val withFocus = base.focusRequester(requester)
     val press = if (onLongClick == null) {
         Modifier.clickable(onClick = onClick)
     } else {
@@ -1315,7 +1356,10 @@ fun IconControlButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = withFocus
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) PlayerFocusMemory.last = requester
+            }
             .then(press),
     ) {
         Icon(
@@ -1336,6 +1380,13 @@ fun IconControlButton(
  * It exists for controls that can *remove themselves* while focused — "Go to
  * live" is the only one — so the caller can hand focus somewhere else before it
  * goes; see [RightCluster].
+ *
+ * **A chip with a hold action is still a focus stop.** The hold path swaps
+ * `clickable` for a raw pointer detector, and that does not make a node
+ * focusable — which is why the aspect chip used to be skipped by the remote's
+ * cursor. `focusable()` is applied on that path (with an Enter/Center handler
+ * standing in for `clickable`'s OK action); the plain path keeps `clickable`,
+ * whose focusability it must not duplicate.
  *
  * [onHoldStart] / [onHoldEnd] add **press-and-hold** to a text chip. "Go to
  * live" is the one caller: a tap jumps to the edge by reloading, a hold plays the
@@ -1358,6 +1409,9 @@ fun TextControlButton(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // Own requester, remembered here like [IconControlButton]'s: the focus
+    // memory must survive this control leaving composition.
+    val ownRequester = remember { FocusRequester() }
     // Handlers as *updated state*, so the pointer detectors can key on nothing:
     // they must survive the recomposition that a hold causes (the label changes
     // to "Catching up ×2"). Keying them on the lambdas — which are rebuilt every
@@ -1375,8 +1429,7 @@ fun TextControlButton(
                     onTap = { tapHandler.value() },
                     onLongPress = { holdStartHandler.value?.invoke() },
                 )
-            }
-            .then(
+            }            .then(
                 if (onHoldEnd == null) {
                     Modifier
                 } else {
@@ -1397,12 +1450,37 @@ fun TextControlButton(
                 },
             )
     }
+    // **A raw pointer detector does not make a node focusable.** The hold path
+    // replaces `clickable` with `detectTapGestures`, so the aspect chip (and
+    // "Go to live") silently dropped out of D-pad traversal — the remote walked
+    // straight past them. `focusable()` restores the stop, and the key handler
+    // is the OK action `clickable` would otherwise have supplied.
+    val focusKeys = if (onHoldStart == null) {
+        Modifier
+    } else {
+        Modifier
+            .onPreviewKeyEvent { e ->
+                if (e.type == KeyEventType.KeyDown &&
+                    (e.key == Key.DirectionCenter ||
+                        e.key == Key.Enter ||
+                        e.key == Key.NumPadEnter)
+                ) {
+                    tapHandler.value()
+                    true
+                } else {
+                    false
+                }
+            }
+            .focusable()
+    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
             .height(PlayerDimens.ButtonSize)
             .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
             .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
+            .focusRequester(ownRequester)
+            .then(focusKeys)
             // A pinned aspect is the one control carrying a non-default,
             // per-item choice: the accent border is how the viewer sees that
             // *this* channel is framed differently from the global mode.
@@ -1419,6 +1497,7 @@ fun TextControlButton(
             )
             .onFocusChanged {
                 focused = it.isFocused
+                if (it.isFocused) PlayerFocusMemory.last = ownRequester
                 onFocusChanged?.invoke(it.isFocused)
             }
             .then(press)
@@ -1531,11 +1610,20 @@ fun Badge(text: String, accent: Boolean = false) {
 }
 
 /**
- * A slim slider that's D-pad friendly under the "OK to edit" model: focusing it
- * does nothing, and Left/Right pass through to normal focus traversal — so it's
- * never a trap. Press OK/Center to enter adjust mode (the thumb grows + gains an
- * accent ring); then Left/Right [step] the value and OK/Center or Back exits.
- * Touch keeps drag + tap-to-seek. Used for both the scrubber and volume.
+ * A slim slider with **two postures**, because its two uses need different
+ * D-pad rules:
+ *
+ *  * the VOD **scrubber** (`chip = false`) sits alone on its row, so Left/Right
+ *    is the seek gesture outright — no mode, matching the Windows GDI overlay's
+ *    scrubber row, and Up/Down leaves the row;
+ *  * the **volume slider** (`chip = true`) lives inside the transport row,
+ *    between buttons. Leaving the arrows as "change the volume" trapped the
+ *    cursor: from the volume control there was no way to reach the button beside
+ *    it. So it keeps the original posture — arrows traverse, OK enters adjust
+ *    mode, then Left/Right [step] it, and OK/Back leaves.
+ *
+ * Touch keeps drag + tap-to-seek on both. Used for the scrubber and the volume
+ * slider.
  */
 @Composable
 fun SlimSlider(
@@ -1546,10 +1634,12 @@ fun SlimSlider(
     chip: Boolean = false,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // Only the inline (chip) slider has a mode; the scrubber's arrows always act.
     var editing by remember { mutableStateOf(false) }
+    val adjusting = !chip || editing
+    val ownRequester = remember { FocusRequester() }
     var widthPx by remember { mutableFloatStateOf(0f) }
     val f = value.coerceIn(0f, 1f)
-    val thumbSize = if (editing) 18.dp else 14.dp
     // A focused chip is filled with `ButtonBgFocused`, which *is* `Accent` — the
     // same colour as the slider's own fill, so on accent the value has to be
     // drawn in white or it vanishes into its own background.
@@ -1594,23 +1684,49 @@ fun SlimSlider(
             )
             .onFocusChanged {
                 focused = it.isFocused
+                if (it.isFocused) PlayerFocusMemory.last = ownRequester
+                // Leaving the chip drops adjust mode, so coming back to it never
+                // starts with the arrows captured again.
                 if (!it.isFocused) editing = false
             }
+            .focusRequester(ownRequester)
             .focusable()
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (e.key) {
+                    // OK: the scrubber has nothing to activate (its arrows already
+                    // seek), the inline chip toggles adjust mode — which is how a
+                    // D-pad changes the volume without losing the row.
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        editing = !editing
+                        if (chip) editing = !editing
                         true
                     }
-                    // Only capture Left/Right (to change the value) while editing;
-                    // otherwise let them traverse focus to the neighbouring control.
-                    Key.DirectionLeft ->
-                        if (editing) { onValueChange((value - step).coerceIn(0f, 1f)); true } else false
-                    Key.DirectionRight ->
-                        if (editing) { onValueChange((value + step).coerceIn(0f, 1f)); true } else false
-                    Key.Back -> if (editing) { editing = false; true } else false
+                    // Left/Right **is** the seek gesture on the scrubber, and the
+                    // volume step on the chip once adjust mode is on. Otherwise
+                    // they are left to focus traversal, so the volume control is
+                    // not a trap between its neighbours.
+                    Key.DirectionLeft -> {
+                        if (adjusting) {
+                            onValueChange((value - step).coerceIn(0f, 1f))
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Key.DirectionRight -> {
+                        if (adjusting) {
+                            onValueChange((value + step).coerceIn(0f, 1f))
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Key.Back -> if (chip && editing) {
+                        editing = false
+                        true
+                    } else {
+                        false
+                    }
                     else -> false
                 }
             }
@@ -1649,13 +1765,13 @@ fun SlimSlider(
             if (f > 0f) Spacer(Modifier.weight(f))
             Box(
                 Modifier
-                    .size(thumbSize)
+                    .size(14.dp)
                     .clip(CircleShape)
                     .background(fillColor)
                     .then(
                         // On an accent chip the thumb is already white; a white
                         // ring around it would only blur its edge.
-                        if ((editing || focused) && !onAccent) {
+                        if (focused && !onAccent) {
                             Modifier.border(
                                 2.dp,
                                 androidx.compose.ui.graphics.Color.White.copy(alpha = 0.92f),

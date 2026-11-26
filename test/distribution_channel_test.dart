@@ -7,6 +7,14 @@ void main() {
     expect(parseDistributionChannel('typo'), DistributionChannel.development);
   });
 
+  test('store channels are gone and parse as development', () {
+    // This fork distributes through GitHub releases and AltStore only. The old
+    // store values must not resurrect an updater: an install still reporting one
+    // reads as `development`, i.e. no self-update — exactly its old behaviour.
+    expect(parseDistributionChannel('googlePlay'), DistributionChannel.development);
+    expect(parseDistributionChannel('microsoftStore'), DistributionChannel.development);
+  });
+
   test('altStore parses from its exact string', () {
     expect(parseDistributionChannel('altStore'), DistributionChannel.altStore);
   });
@@ -14,16 +22,7 @@ void main() {
   test('only GitHub-direct builds own the in-app updater', () {
     expect(DistributionChannel.githubDirect.ownsDirectUpdates, isTrue);
     expect(DistributionChannel.development.ownsDirectUpdates, isFalse);
-    expect(DistributionChannel.googlePlay.ownsDirectUpdates, isFalse);
-    expect(DistributionChannel.microsoftStore.ownsDirectUpdates, isFalse);
     expect(DistributionChannel.altStore.ownsDirectUpdates, isFalse);
-  });
-
-  test('both Store channels are Store-managed; altStore is not', () {
-    expect(DistributionChannel.googlePlay.isStoreManaged, isTrue);
-    expect(DistributionChannel.microsoftStore.isStoreManaged, isTrue);
-    expect(DistributionChannel.githubDirect.isStoreManaged, isFalse);
-    expect(DistributionChannel.altStore.isStoreManaged, isFalse);
   });
 
   test('altStore display name', () {

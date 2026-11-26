@@ -11,8 +11,9 @@ class AppLinks {
   AppLinks._();
 
   /// The legal and support pages live on the **panel** origin, not the website:
-  /// that is where the files are (`panel/public/`) and where the Play and
-  /// Microsoft Store listings point.
+  /// that is where the files are (`panel/public/`), and those URLs are the ones
+  /// a store listing would need — this fork ships without one, so the in-app
+  /// links are the only place they are used.
   static const privacyPolicy = 'https://panel.iptvs.click/privacy';
   static const support = 'https://panel.iptvs.click/support';
   static const deleteCloudAccount = 'https://panel.iptvs.click/delete-account';
@@ -21,7 +22,12 @@ class AppLinks {
   /// pairing, profiles, the remote, and troubleshooting.
   static const website = 'https://iptvs.click';
 
-  /// Public source repository — also the honest "report an issue" channel for
-  /// an open-source app (no in-app feedback form or analytics).
-  static const repository = 'https://github.com/GCHOfficial/iptvs';
+  /// This fork's public source repository — also the honest "report an issue"
+  /// channel for an open-source app (no in-app feedback form or analytics).
+  static const repository = 'https://github.com/SNBogdanov/iptvs';
+
+  /// The upstream project this build is a fork of. Kept as a separate link so
+  /// the About screen can credit it; issues with *this* build belong in
+  /// [repository], not upstream.
+  static const upstreamRepository = 'https://github.com/GCHOfficial/iptvs';
 }

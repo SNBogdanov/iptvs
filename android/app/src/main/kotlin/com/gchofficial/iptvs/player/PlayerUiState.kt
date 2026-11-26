@@ -430,7 +430,9 @@ class PlayerUiState(
      * flag the gesture could not tell "the user pressed mute" from "the user
      * swiped all the way down" — and the second case must stay adjustable,
      * because the swipe is a level control and never a mute. Set by the mute
-     * button's own callback and cleared by it again.
+     * button's own callback; cleared by it on unmute **and by any level the
+     * user sets** (the volume slider or the swipe), because raising the level
+     * is itself an unmute and must not leave the gesture gated behind it.
      */
     var mutedByButton by mutableStateOf(false)
 

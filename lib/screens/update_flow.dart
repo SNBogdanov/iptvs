@@ -493,8 +493,8 @@ Future<void> _downloadAndInstall(
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Updating — the app will restart…')),
           );
-          // Give the detached helper a beat to start, then quit so it can swap
-          // the portable Windows folder or running Linux AppImage.
+          // Give the detached helper a beat to start, then quit so it can install
+          // the MSI (Windows) or replace the running AppImage (Linux).
           await Future<void>.delayed(const Duration(milliseconds: 600));
           exit(0);
         }

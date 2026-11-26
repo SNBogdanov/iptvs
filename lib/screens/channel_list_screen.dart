@@ -4,7 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show SystemNavigator;
+import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
 import '../data/app_settings_store.dart';
@@ -638,10 +638,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// moved the cursor under a still-running preview would leave the two
   /// disagreeing about what is on screen).
   Future<void> _onNumberCommitted(Channel target) async {
-    // On a TV remote the preview is deliberate, so a number must not quietly
-    // unmute one; at start-up it is the reverse case, and always muted. The
-    // shared body takes the answer as an argument rather than deciding it.
-    await _revealAndPreview(target, muted: !_deliberatePreview);
+    // A preview is **never audible**, whatever surface started it: a picture
+    // the user only pointed at (typed a number for, hovered, or pressed OK on)
+    // must not make noise on a television. The preview panel's own mute button
+    // is the one way up; nothing here re-derives it.
+    await _revealAndPreview(target, muted: true);
   }
 
   /// Reveals [target] in the list and points the preview at it — the one
@@ -1647,12 +1648,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   /// Whether previews are *deliberate* on this platform. On Android (phone + TV)
   /// they are: a preview starts only on an explicit OK press (TV split-pane) or
-  /// long-press (phone), carries audio, and — once running — stays **locked** to
-  /// that channel. D-pad focus moving around never starts, stops, or retargets a
-  /// preview; only pressing OK on a different channel switches it. On desktop
-  /// previews are *not* deliberate: they auto-start muted, mouse-hover style,
-  /// after a short focus debounce (the branch at the end of
-  /// [_onChannelSelectionChanged]).
+  /// long-press (phone), is **silent** like every other preview, and — once
+  /// running — stays **locked** to that channel. D-pad focus moving around never
+  /// starts, stops, or retargets a preview; only pressing OK on a different
+  /// channel switches it. On desktop previews are *not* deliberate: they
+  /// auto-start muted, mouse-hover style, after a short focus debounce (the
+  /// branch at the end of [_onChannelSelectionChanged]).
   bool get _deliberatePreview => Platform.isAndroid;
 
   void _onChannelSelectionChanged(Channel channel, bool hasFocus) {
@@ -1672,6 +1673,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
 
     _previewTimer?.cancel();
+
+    // A narrow layout has no preview pane, so there is nothing to arm: the
+    // timer would fire 500 ms later into its own `isWide` guard and do
+    // nothing. Skipping it here also keeps a programmatic reveal (the start-up
+    // resume, a typed number) from leaving a pending timer behind when the
+    // screen goes away inside that window.
+    if (!_isWide()) return;
 
     // Debounce for 500ms (desktop mouse/keyboard).
     _previewTimer = Timer(const Duration(milliseconds: 500), () {
@@ -2638,11 +2646,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       case ChannelPlayAction.awaitPreviewThenOpen:
         await _openLivePlayerWhenPreviewReady(channel, repo: playRepo);
       case ChannelPlayAction.startPreview:
-        // First OK starts the preview; on a TV remote it's deliberate, so
-        // unmuted.
+        // First OK starts the preview — silently, like every other preview.
+        // "Deliberate" says the user asked for a *picture*, not for sound; a
+        // TV that starts talking because a channel was merely previewed is the
+        // complaint this answers. The preview panel's mute button unmutes.
         await _preview.start(
           channel,
-          muted: !_deliberatePreview,
+          muted: true,
           from: playRepo,
           bufferPreset: _bufferPresetForChannel(channel),
         );
@@ -3228,6 +3238,47 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (channel != null) await _playChannelFullscreen(channel);
   }
 
+  /// `CH+` / `CH-` on a TV remote while this list owns the screen.
+  ///
+  /// The in-player zapping rule, applied to the list: the *next* channel is the
+  /// next row **down**, both ends wrap, and the key does what OK on that row
+  /// would do — on a TV that starts its (silent) preview, on a phone it opens
+  /// the player. Dedicated channel keys are unambiguous, so this ignores the
+  /// chrome and the current focus ring, exactly like the player's own policy.
+  ///
+  /// The list used to bind nothing to these two codes, so a remote's channel
+  /// rocker did nothing at all on the screen the user watches from.
+  void _stepChannel(int delta) {
+    if (_tab != ContentKind.live || _resolving) return;
+    final visible = _focus.visibleChannels();
+    if (visible.isEmpty) return;
+    final length = visible.length;
+    final target =
+        ((_focus.selectedChannelIndex + delta) % length + length) % length;
+    _focus.selectChannel(target);
+    final channel = _focus.selectedChannel;
+    if (channel == null) return;
+    final playRepo = _repoForChannel(channel);
+    if (!isWideLayout(MediaQuery.sizeOf(context))) {
+      // No preview pane on a narrow layout: the key means "watch that
+      // channel", so it opens the player, exactly like the row's OK.
+      unawaited(_play(channel));
+      return;
+    }
+    // With a preview pane the key **retargets the preview**, never the
+    // fullscreen route: OK on a channel whose preview is already running opens
+    // the player, and a rocker must not do that just because it came back to a
+    // channel that is still previewing.
+    unawaited(
+      _preview.start(
+        channel,
+        muted: true,
+        from: playRepo,
+        bufferPreset: _bufferPresetForChannel(channel),
+      ),
+    );
+  }
+
   /// Open the TV-guide grid for the currently visible channels.
   void _openEpgGrid() {
     unawaited(_preview.stop());
@@ -3257,9 +3308,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     );
   }
 
-  /// Phone-only: open a compact, audible preview of [channel] in a bottom
+  /// Phone-only: open a compact, silent preview of [channel] in a bottom
   /// sheet (tap on a tile still goes straight to fullscreen). Reuses the single
   /// preview player; the sheet's Play button hands off to fullscreen.
+  ///
+  /// The preview is **silent**, like the TV hover preview: it starts while the
+  /// user is still browsing, and audio from a stream nobody chose is noise
+  /// rather than a feature. Sound arrives with the fullscreen handoff.
   Future<void> _showPreviewSheet(Channel channel) async {
     if (_resolving) return;
     // The owning source. This path used to resolve every row through the
@@ -3273,7 +3328,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     unawaited(
       _preview.start(
         channel,
-        muted: false,
+        muted: true,
         from: previewRepo,
         bufferPreset: _bufferPresetForChannel(channel),
       ),
@@ -3976,18 +4031,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // `_visible` and the guide maps are reassigned rather than mutated, so
   // identity is the cheap test.
   LiveRowLayout? _liveRowLayoutCache;
-  (
-    Object?,
-    Object?,
-    Object?,
-    Object?,
-    bool,
-    bool,
-    bool,
-    double,
-    double,
-  )?
-  _liveRowLayoutKey;
+  (Object?, Object?, Object?, Object?, bool, double, double)? _liveRowLayoutKey;
 
   LiveRowLayout get _liveRowLayout {
     final visible = _visible;
@@ -3995,8 +4039,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final metrics = _liveLayoutMetrics;
     final plain = metrics.channelRowExtentPlain;
     final tall = metrics.channelRowExtentWithEpg;
-    final expects = _live.expectsEpg;
-    final idOnly = _guideMatchesByIdOnly;
     final now = _live.now;
     final next = _live.next;
     final key = (
@@ -4005,8 +4047,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       next,
       _globalFavorites.items,
       crossSourceView,
-      expects,
-      idOnly,
       plain,
       tall,
     );
@@ -4022,17 +4062,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           final epg = _crossSourceEpgFor(channel);
           return epg.now != null || epg.next != null;
         }
-        if (now.containsKey(channel.id) || next.containsKey(channel.id)) {
-          return true;
-        }
-        if (!expects) return false;
-        // The guide is in flight. Rows that carry an epg id can still receive a
-        // programme from an id-only guide; a catalog without them is drawn
-        // compactly from the start instead of reserving space for data that
-        // cannot arrive (see `LiveController.expectsEpg`).
-        if (!idOnly) return true;
-        final tvg = channel.extra['tvgId'];
-        return tvg is String && tvg.isNotEmpty;
+        // **Tall only when there is a programme to draw.** "The guide is on its
+        // way" is deliberately *not* a reason: a row that reserves the now/next
+        // band before any data exists is exactly the empty card this was
+        // reported as (twice). The rows grow when the guide lands — one visible
+        // shift, chosen over a list of permanently half-empty cards.
+        return now.containsKey(channel.id) || next.containsKey(channel.id);
       },
     );
   }
@@ -4316,16 +4351,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   DateTime? _exitArmedAt;
   static const _exitConfirmWindow = Duration(seconds: 2);
 
-  /// Peels exactly one rung per Back press. The live ladder, in order:
+  /// Back **leaves**: one press arms the exit confirmation, the next exits.
   ///
-  ///   channel list (cursor not on the first row) → **first channel**
-  ///     → **categories** (wide) → **first category** ("All channels")
-  ///     → **search box** → **content tabs** → exit (double-Back).
-  ///
-  /// Because the live lists are a selection model, each rung is a plain check on
-  /// the coordinator's region + selected index — no focus-label archaeology.
-  /// Media: deep grid → top of the grid → tabs → exit. The app only ever exits
-  /// from the tabs, and only on a second Back within [_exitConfirmWindow].
+  /// It used to peel a ladder — reset the cursor to the first channel, leave the
+  /// list for the sidebar, reset the category cursor, out to the search box,
+  /// then the tabs — which meant leaving the app from the player took four or
+  /// five presses, and two of them (the jump to the first row, the hop into the
+  /// search box) looked like unrelated navigation rather than "getting out".
+  /// Arrows already move between the sidebar, search and tabs, so Back has one
+  /// meaning on this screen now: leave. A text field still owns Back while it is
+  /// being edited, and a pushed route (if this screen ever becomes one) still
+  /// pops instead of exiting.
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
     final label = focusRouteKey(FocusManager.instance.primaryFocus);
@@ -4334,120 +4370,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // being edited — it already exits edit mode on Back.
     if (label == 'TvTextField.field') return;
 
-    final wideLive = _tab == ContentKind.live && _isWide();
-
-    if (_tab == ContentKind.live) {
-      switch (_focus.region) {
-        case LiveFocusRegion.channels:
-          // Rung 0: with the intra-row cursor on the favorite star, Back
-          // mirrors Left — it peels the cursor back onto the row body.
-          if (_focus.channelColumn == ChannelRowColumn.favorite) {
-            _focus.resetChannelColumn();
-            return;
-          }
-          // Rung 1: climbing out of the list starts from its top.
-          if (!_focus.onFirstChannel) {
-            _focus.selectChannel(0);
-            return;
-          }
-          // Rung 2: out of the list into the sidebar (wide) — phones have no
-          // sidebar, so they peel straight to the search box.
-          if (wideLive) {
-            _focus.focusCategories();
-          } else {
-            _focus.focusSearch();
-          }
-          return;
-        case LiveFocusRegion.previewControls:
-          // The preview controls sit between the search box and the list.
-          if (wideLive) {
-            _focus.focusCategories();
-          } else {
-            _focus.focusSearch();
-          }
-          return;
-        case LiveFocusRegion.categories:
-          // Rung 3: move the *highlight* to "All channels" — this deliberately
-          // does not change the active filter (OK does that).
-          if (!_focus.onFirstCategory) {
-            _focus.selectCategory(0);
-            return;
-          }
-          // Rung 4: out of the sidebar into the search box.
-          _focus.focusSearch();
-          return;
-        case LiveFocusRegion.search:
-          // Rung 5: search → the section tabs.
-          _focusTabs();
-          return;
-        case LiveFocusRegion.none:
-          break; // fall through to the shared handling below
-      }
-    }
-
-    // Movies/series grid — same top-of-list rung as the channel list, then
-    // the tabs.
-    if (label.startsWith('media.')) {
-      final controller = _media(_tab);
-      final scroll = controller.scrollController;
-      if (scroll.hasClients &&
-          scroll.position.pixels > scroll.position.viewportDimension) {
-        scroll.jumpTo(0);
-        // The first tile may not be built until the frame after the jump —
-        // focus post-frame with one retry (same pattern as the coordinator's
-        // focusFirstChannel).
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          if (controller.firstFocusNode.context != null) {
-            controller.firstFocusNode.requestFocus();
-            return;
-          }
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) controller.firstFocusNode.requestFocus();
-          });
-        });
-      } else {
-        _focusTabs();
-      }
-      return;
-    }
-    // The media tabs' own search cell peels to the tabs (live's search box is
-    // handled by the region ladder above).
-    if (label == 'TvTextField.cell') {
-      _focusTabs();
-      return;
-    }
-    // The search field's clear (×) button is its own focusable stop beside the
-    // cell (see TvTextField); Back peels it to the search cell (live) / the
-    // tabs (media) instead of falling through to the exit prompt.
-    if (label == 'TvTextField.clear') {
-      if (_tab == ContentKind.live) {
-        _focus.focusSearch();
-      } else {
-        _focusTabs();
-      }
-      return;
-    }
-    // Un-routed focus (route key '') is the app **chrome** — the AppBar actions
-    // and the toolbar's buttons are plain IconButtons, while every *content*
-    // focusable on this screen carries a route key. The chrome sits above the
-    // ladder, so Back from it goes straight to the exit prompt rather than
-    // diving back down into the sections and making the user climb out again.
-    //
-    // The one exception is a bare scope / nothing actually focused (a transient
-    // state, e.g. right after a dialog is dismissed): that isn't somewhere the
-    // user can *be*, so recover to the tabs instead of offering to exit.
-    final focusedNode = FocusManager.instance.primaryFocus;
-    if (label.isEmpty &&
-        (focusedNode == null || focusedNode is FocusScopeNode)) {
-      _focusTabs();
-      return;
-    }
-    // Otherwise fall through: the content tabs and the chrome are both the top
-    // of the ladder — exit, behind a double-Back confirmation.
-    // The content tabs, or anything else routed but unhandled: nothing left to
-    // peel — exit, behind a double-Back confirmation so mashing Back up the
-    // ladder can't overshoot into the launcher.
     // This screen is HomeShell's root content (not a pushed route), so there
     // may be nothing to pop to — fall back to the platform default (exit).
     if (Navigator.of(context).canPop()) {
@@ -4869,8 +4791,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // [_resyncLiveRowLayout]. Checked here because this is the one place that
     // knows the geometry the list is about to be built with.
     _resyncLiveRowLayout();
-    return LiveTabView(
-      loading: _live.loading,
+    return CallbackShortcuts(
+      // A remote's dedicated channel rocker, bound on the list the same way the
+      // player's native policy binds it: `CHANNEL_UP` is the next channel down
+      // the list, `CHANNEL_DOWN` the previous one, both wrapping. A `Shortcuts`
+      // ancestor of the rows sees these after the focused row declines them.
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.channelUp): () =>
+            _stepChannel(1),
+        const SingleActivator(LogicalKeyboardKey.channelDown): () =>
+            _stepChannel(-1),
+      },
+      child: LiveTabView(
+        loading: _live.loading,
       error: _live.error,
       onRetry: () => _loadLive(forceRefresh: true),
       visible: visible,
@@ -4937,6 +4870,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       previewVideoBuilder: () => PreviewVideo(preview: _preview),
       previewLoading: _preview.loading,
       previewError: _preview.error,
+      ),
     );
   }
 

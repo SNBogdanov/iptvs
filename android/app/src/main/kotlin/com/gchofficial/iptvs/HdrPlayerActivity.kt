@@ -258,7 +258,13 @@ class HdrPlayerActivity : ComponentActivity() {
         } else if (decision.action == ZapKeyAction.CloseList) {
             zapQuickListOpenOptimistic = false
         }
-        decision.command?.let { sendZap(it) }
+        decision.command?.let { command ->
+            // Exportable, credential-free: a report of "the remote's channel
+            // keys do nothing" is otherwise indistinguishable from keys that
+            // never reached the window, since Dart logs only the applied zap.
+            logNative("zap key code=${event.keyCode} action=${decision.action}")
+            sendZap(command)
+        }
         return true
     }
 
@@ -1295,6 +1301,14 @@ class HdrPlayerActivity : ComponentActivity() {
         onSeekBy = { if (!uiState.isLive) engine?.seekBy(it) },
         onSetVolume = { value ->
             if (value > 0f) uiState.audibleVolume = value
+            // A level set by the slider **or the swipe** is also an unmute, and
+            // it must release the button's claim on silence: `mutedByButton`
+            // gates the volume swipe, so leaving it set after the slider raised
+            // the level trapped the gesture behind a mute that no longer
+            // existed (the reported "unmuted with the slider, swipe stops
+            // working"). The mute button sets this flag again on its own path,
+            // which writes the engine directly and never comes through here.
+            uiState.mutedByButton = false
             engine?.setVolume(value)
         },
         onToggleMute = {

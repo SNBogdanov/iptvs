@@ -12,9 +12,16 @@ import 'net.dart';
 import 'update_manifest.dart';
 import 'update_service.dart';
 
+/// The MSIX package identity this build ships as (see
+/// `windows/packaging/AppxManifest.xml.in`).
+///
+/// The Windows updater relaunches the app by package family name after
+/// installing, and an in-place update only works while this identity — and the
+/// publisher — stay unchanged.
+const String kWindowsMsixPackageName = 'SNBogdanov.IPTVSPlayer';
+
 /// Outcome of kicking off a platform install.
-enum InstallOutcome {
-  /// The OS installer (Android) or update helper (Windows) was launched. On
+enum InstallOutcome {  /// The OS installer (Android) or update helper (Windows) was launched. On
   /// desktop platforms the caller should now exit so the running binary can
   /// be replaced.
   launched,
@@ -30,9 +37,9 @@ enum InstallOutcome {
 
 /// Downloads a release asset and hands it to the platform's install path:
 /// Android fires the system package-installer via the `iptvs/updates`
-/// MethodChannel; Windows writes a detached PowerShell helper that swaps the
-/// portable folder and relaunches; Linux atomically replaces the running
-/// AppImage and relaunches it. Everything else falls back to the browser.
+/// MethodChannel; Windows starts an elevated helper that installs the signed
+/// MSI and relaunches the app; Linux atomically replaces the running AppImage
+/// and relaunches it. Everything else falls back to the browser.
 class UpdateInstaller {
   static const _channel = MethodChannel('iptvs/updates');
   final HttpClient _http;
@@ -117,7 +124,8 @@ class UpdateInstaller {
         sha256Digest: digestSink.value.toString(),
       );
       if (await file.exists()) await file.delete();
-      return partial.rename(file.path);
+      final renamed = await partial.rename(file.path);
+      return renamed;
     } catch (_) {
       if (!hashClosed) hashSink.close();
       if (await partial.exists()) await partial.delete();
@@ -138,7 +146,7 @@ class UpdateInstaller {
             : InstallOutcome.launched;
       }
       if (Platform.isWindows) {
-        await _launchWindowsUpdater(file);
+        await _launchWindowsMsiUpdater(file);
         return InstallOutcome.launched;
       }
       if (Platform.isLinux) {
@@ -175,22 +183,18 @@ class UpdateInstaller {
     }
   }
 
-  /// Writes a PowerShell helper that waits for this process to exit, unzips the
-  /// new build over the install folder, and relaunches — then starts it so it
-  /// survives the app quitting. The caller must then `exit(0)`.
-  Future<void> _launchWindowsUpdater(File zip) async {
-    final exePath = Platform.resolvedExecutable;
-    final installDir = File(exePath).parent.path;
-    final exeName = p.basename(exePath);
+  /// Starts an elevated helper that installs the downloaded MSI once this
+  /// process has exited. The caller must then `exit(0)`.
+  ///
+  /// MSI is a normal Windows installer: it upgrades the per-machine install in
+  /// `C:\Program Files\IPTVS` in place (`msiexec /i … /qn`), so there is no
+  /// certificate to trust and no package identity to keep stable — only the
+  /// MSI `UpgradeCode`, which the package itself carries.
+  Future<void> _launchWindowsMsiUpdater(File msi) async {
     final dir = await getTemporaryDirectory();
     final script = File(p.join(dir.path, 'iptvs_update.ps1'));
     await script.writeAsString(
-      windowsUpdateScript(
-        pid: pid,
-        zipPath: zip.path,
-        installDir: installDir,
-        exeName: exeName,
-      ),
+      windowsMsiUpdateScript(pid: pid, msiPath: msi.path),
     );
     final launch = windowsUpdaterLaunch(script.path);
     await Process.start(
@@ -200,7 +204,6 @@ class UpdateInstaller {
       workingDirectory: dir.path,
     );
   }
-
   /// Stages the verified AppImage beside the running one, then starts a
   /// detached helper which waits for this process, atomically swaps the files,
   /// relaunches, and restores the previous AppImage if launch fails.
@@ -319,176 +322,80 @@ class _DigestSink implements Sink<Digest> {
   void close() {}
 }
 
-/// How the Windows update helper is spawned. Routed through `cmd /c start`
-/// rather than launching `powershell.exe` directly, detached.
+/// How the Windows installer helper is spawned.
 ///
-/// The helper's first act is `Wait-Process` on this (GUI) app's PID: it blocks
-/// until the app exits, then swaps the install folder. A bare detached console
-/// child of a GUI process does not survive that parent exit reliably — it was
-/// torn down while still blocked in `Wait-Process`, so no staging folder was
-/// ever created and the update silently no-opped (the app closed and nothing
-/// happened). `start` launches PowerShell as an independent, console-owning
-/// process via the shell, so it outlives the app and runs to completion.
-/// Pure so the invocation is unit-testable.
+/// `Add-AppxPackage` and the certificate import both need elevation, so the
+/// helper is started with `Start-Process -Verb RunAs` (the UAC prompt the user
+/// sees). It is launched through a `-Command` wrapper rather than
+/// `-ExecutionPolicy Bypass -File`, because only `Start-Process` can request
+/// elevation; the wrapper then runs the script itself hidden.
+///
+/// The helper's first act is `Wait-Process` on this app's PID: `msiexec` cannot
+/// replace files a running process still holds. Pure so the invocation is
+/// unit-testable.
 ({String executable, List<String> arguments}) windowsUpdaterLaunch(
   String scriptPath,
-) => (
-  executable: 'cmd.exe',
-  arguments: <String>[
-    '/c',
-    'start',
-    '', // start's first quoted token is the (empty) window title.
-    '/min',
-    'powershell.exe',
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-WindowStyle',
-    'Hidden',
-    '-File',
-    scriptPath,
-  ],
-);
+) {
+  String q(String value) => "'${value.replaceAll("'", "''")}'";
+  return (
+    executable: 'powershell.exe',
+    arguments: <String>[
+      '-NoProfile',
+      '-WindowStyle',
+      'Hidden',
+      '-Command',
+      'Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden '
+          '-ArgumentList '
+          "'-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden',"
+          "'-File',${q(scriptPath)}",
+    ],
+  );
+}
 
-/// The Windows self-update helper script. It validates every archive path,
-/// extracts into a new sibling staging directory, verifies the expected
-/// executable, swaps whole directories, and restores the backup when launch
-/// fails. Split out as a pure string builder for readability/testability.
-String windowsUpdateScript({
+/// The Windows self-update helper script.
+///
+/// Waits for the app to exit, runs the MSI in quiet mode (`msiexec /i … /qn`)
+/// and relaunches the installed executable. A transcript lands in
+/// `%TEMP%\iptvs_update.log` so a failed run is diagnosable instead of silent.
+String windowsMsiUpdateScript({
   required int pid,
-  required String zipPath,
-  required String installDir,
-  required String exeName,
+  required String msiPath,
+  String installDir = r'C:\Program Files\IPTVS',
 }) {
-  // Single-quote + double any embedded quote for safe PowerShell literals.
   String q(String s) => "'${s.replaceAll("'", "''")}'";
   return '''
 \$ErrorActionPreference = 'Stop'
-\$zipPath = ${q(zipPath)}
-\$installDir = ${q(installDir)}
-\$exeName = ${q(exeName)}
-\$parentDir = [System.IO.Directory]::GetParent(\$installDir).FullName
-\$token = [Guid]::NewGuid().ToString('N')
-\$stageDir = Join-Path \$parentDir ('.iptvs-update-stage-' + \$token)
-\$backupDir = Join-Path \$parentDir ('.iptvs-update-backup-' + \$token)
-\$backupCreated = \$false
-\$swapped = \$false
-
-# Step out of the install directory before touching it. This helper inherits
-# its working directory from the app being replaced — i.e. the very folder
-# about to be renamed — and a directory that is a live process's CWD cannot be
-# deleted, which would strand the backup folder beside the install forever.
-try { Set-Location -LiteralPath \$parentDir } catch {}
-
-# Both scratch folders sit next to the install (they must share its volume for
-# the swap to be a rename rather than a copy), so they are created hidden: an
-# install on the Desktop would otherwise flash two junk folders at the user for
-# the few seconds the swap takes.
-function Hide-Dir(\$dir) {
-  try {
-    \$item = Get-Item -LiteralPath \$dir -Force
-    \$item.Attributes = \$item.Attributes -bor [System.IO.FileAttributes]::Hidden
-  } catch {}
-}
-
-# The backup is the pre-update install; losing the race to delete it is not
-# worth failing an otherwise-good update over, but one silent attempt left
-# litter behind whenever a scanner still held a handle. Retry briefly instead.
-function Remove-DirWithRetry(\$dir) {
-  for (\$i = 0; \$i -lt 5; \$i++) {
-    if (-not (Test-Path -LiteralPath \$dir)) { return }
-    Remove-Item -LiteralPath \$dir -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Path -LiteralPath \$dir)) { return }
-    Start-Sleep -Milliseconds 400
-  }
-}
-
-# Record what the (otherwise invisible) detached helper does, so a failed
-# self-update leaves a diagnosable trail instead of silently no-opping.
+\$msiPath = ${q(msiPath)}
 \$logPath = Join-Path ([System.IO.Path]::GetTempPath()) 'iptvs_update.log'
 try { Start-Transcript -Path \$logPath -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
 
-try { Wait-Process -Id $pid -Timeout 60 } catch {}
-Start-Sleep -Milliseconds 800
 try {
-  New-Item -ItemType Directory -Path \$stageDir -ErrorAction Stop | Out-Null
-  Hide-Dir \$stageDir
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  \$separator = [System.IO.Path]::DirectorySeparatorChar
-  \$stageRoot = [System.IO.Path]::GetFullPath(\$stageDir + \$separator)
-  \$archive = [System.IO.Compression.ZipFile]::OpenRead(\$zipPath)
-  try {
-    foreach (\$entry in \$archive.Entries) {
-      \$entryName = \$entry.FullName.Replace('/', \$separator)
-      if ([string]::IsNullOrWhiteSpace(\$entryName)) { continue }
-      if ([System.IO.Path]::IsPathRooted(\$entryName) -or
-          \$entryName.StartsWith('/') -or \$entryName.StartsWith('\\')) {
-        throw 'Update archive contains an absolute path.'
-      }
-      \$unixMode = (\$entry.ExternalAttributes -shr 16) -band 0xF000
-      if (\$unixMode -eq 0xA000) {
-        throw 'Update archive contains a symbolic link.'
-      }
-      \$target = [System.IO.Path]::GetFullPath(
-        [System.IO.Path]::Combine(\$stageDir, \$entryName)
-      )
-      if (-not \$target.StartsWith(
-          \$stageRoot,
-          [System.StringComparison]::OrdinalIgnoreCase
-      )) {
-        throw 'Update archive path escapes the staging directory.'
-      }
-    }
-  } finally {
-    \$archive.Dispose()
-  }
+  # The installer replaces files, so the running app has to exit first.
+  try { Wait-Process -Id $pid -Timeout 90 } catch {}
+  Start-Sleep -Milliseconds 500
 
-  Expand-Archive -LiteralPath \$zipPath -DestinationPath \$stageDir -Force
-  \$stagedExe = Join-Path \$stageDir \$exeName
-  if (-not (Test-Path -LiteralPath \$stagedExe -PathType Leaf)) {
-    throw 'Update archive is missing the expected executable.'
-  }
-
-  Move-Item -LiteralPath \$installDir -Destination \$backupDir
-  \$backupCreated = \$true
-  Hide-Dir \$backupDir
-  Move-Item -LiteralPath \$stageDir -Destination \$installDir
-  \$swapped = \$true
-  # The staging folder carries its Hidden attribute through the rename, and it
-  # is now the install folder — clear it or the app's own directory vanishes
-  # from Explorer.
+  # Where to relaunch from; the MSI writes this, the default is only a fallback
+  # for a machine whose registry entry a cleanup tool has removed.
+  \$installDir = ${q(installDir)}
   try {
-    \$installed = Get-Item -LiteralPath \$installDir -Force
-    \$installed.Attributes = \$installed.Attributes -band
-      -bnot [System.IO.FileAttributes]::Hidden
+    \$registered = (Get-ItemProperty 'HKLM:\\SOFTWARE\\SNBogdanov\\IPTVS' -Name InstallDir -ErrorAction Stop).InstallDir
+    if (-not [string]::IsNullOrWhiteSpace(\$registered)) { \$installDir = \$registered }
   } catch {}
-  \$newExe = Join-Path \$installDir \$exeName
-  \$newProcess = Start-Process -FilePath \$newExe -WorkingDirectory \$installDir -PassThru
-  Start-Sleep -Seconds 5
-  \$newProcess.Refresh()
-  if (\$newProcess.HasExited -and \$newProcess.ExitCode -ne 0) {
-    throw 'Updated application exited during startup.'
+
+  \$msiLog = Join-Path ([System.IO.Path]::GetTempPath()) 'iptvs_msi.log'
+  \$process = Start-Process 'msiexec.exe' -Wait -PassThru -ArgumentList @(
+    '/i', \$msiPath, '/qn', '/norestart', '/l*v', \$msiLog)
+  if (\$process.ExitCode -ne 0 -and \$process.ExitCode -ne 3010) {
+    throw "msiexec exited \$(\$process.ExitCode); see \$msiLog"
   }
-  Remove-DirWithRetry \$backupDir
+
+  \$exe = Join-Path \$installDir 'iptvs.exe'
+  if (Test-Path \$exe) { Start-Process \$exe }
 } catch {
-  if (\$backupCreated) {
-    if (\$swapped) {
-      Remove-DirWithRetry \$installDir
-    }
-    if (Test-Path -LiteralPath \$backupDir -PathType Container) {
-      Move-Item -LiteralPath \$backupDir -Destination \$installDir
-      # Restored from a hidden backup — put the install folder back on screen.
-      try {
-        \$restored = Get-Item -LiteralPath \$installDir -Force
-        \$restored.Attributes = \$restored.Attributes -band
-          -bnot [System.IO.FileAttributes]::Hidden
-      } catch {}
-      \$oldExe = Join-Path \$installDir \$exeName
-      Start-Process -FilePath \$oldExe -WorkingDirectory \$installDir
-    }
-  }
-  Remove-DirWithRetry \$stageDir
-  throw
+  Write-Error \$_
+  exit 1
+} finally {
+  try { Stop-Transcript | Out-Null } catch {}
 }
 ''';
 }

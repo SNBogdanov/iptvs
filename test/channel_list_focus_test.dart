@@ -461,8 +461,7 @@ void main() {
   // ── The Back ladder ────────────────────────────────────────────────────────
 
   focusTestWidgets(
-    'Back peels: channel -> first channel -> categories -> first category -> '
-    'search -> tabs -> exit',
+    'Back leaves: the first press arms the exit prompt, the second exits',
     (tester) async {
       final popMethods = <String>[];
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -487,42 +486,17 @@ void main() {
       await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
       expect(find.text('2 - Channel 1').hitTestable(), findsNothing);
 
-      // Rung 1: Back returns the cursor to the first channel (still in the list).
-      await back(tester);
-      expect(focusLabel(), 'live.channels');
-      expect(
-        find.text('2 - Channel 1'),
-        findsOneWidget,
-        reason: 'the first Back resets the cursor to the first channel',
-      );
-
-      // Rung 2: from the first channel, Back leaves the list for the sidebar.
-      await back(tester);
-      expect(focusLabel(), 'live.categories');
-
-      // Walk the category cursor down, then Rung 3: Back returns it to the first
-      // category ("All channels") without leaving the sidebar.
-      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 20);
-      expect(find.text('All channels'), findsNothing);
-      await back(tester);
-      expect(focusLabel(), 'live.categories');
-      expect(
-        find.text('All channels'),
-        findsOneWidget,
-        reason: 'Back resets the category cursor to the first row',
-      );
-
-      // Rung 4: from the first category, Back peels to the search box.
-      await back(tester);
-      expect(focusLabel(), 'live.search.cell');
-
-      // Rung 5: search → the section tabs.
-      await back(tester);
-      expect(focusLabel(), 'content.tab.live');
-
-      // Top of the ladder: the first Back arms the confirmation, no exit yet.
+      // Back is "leave" now: no first-row rung, no hop into the sidebar, no
+      // search box, no tabs. One press arms the confirmation and the cursor
+      // stays exactly where the viewer left it.
       await back(tester);
       expect(find.text('Press Back again to exit'), findsOneWidget);
+      expect(focusLabel(), 'live.channels');
+      expect(
+        find.text('2 - Channel 1').hitTestable(),
+        findsNothing,
+        reason: 'Back must not jump the list to its first row',
+      );
       expect(popMethods, isNot(contains('SystemNavigator.pop')));
 
       // A second Back inside the window exits.
@@ -622,11 +596,12 @@ void main() {
   );
 
   focusTestWidgets(
-    'Back recovers to the tabs from unlabeled focus instead of exiting',
+    'Back from unlabeled focus goes to the exit prompt too',
     (tester) async {
-      // Arrowing onto an un-routed node (toolbar / AppBar action) leaves
-      // focusRouteKey == '', which the ladder must treat as "recover to the tabs",
-      // not "top of the ladder → exit".
+      // There is no ladder to climb any more: whatever holds focus (or nothing
+      // at all), Back means "leave". The old recovery rung sent an un-routed
+      // focus back to the tabs, which made the number of presses depend on
+      // where the cursor happened to be.
       final popMethods = <String>[];
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         SystemChannels.platform,
@@ -648,12 +623,11 @@ void main() {
       expect(focusLabel(), '');
 
       await back(tester);
-      expect(
-        focusLabel(),
-        'content.tab.live',
-        reason: 'Back from unlabeled focus should recover to the tabs',
-      );
+      expect(find.text('Press Back again to exit'), findsOneWidget);
       expect(popMethods, isNot(contains('SystemNavigator.pop')));
+
+      await back(tester);
+      expect(popMethods, contains('SystemNavigator.pop'));
 
       await unmount(tester);
     },
@@ -812,33 +786,28 @@ void main() {
   );
 
   focusTestWidgets(
-    'Back mirrors Left: it peels the favorite column before the first-row rung',
+    'Back does not peel the favorite column — it offers to leave',
     (tester) async {
       await pumpWideScreenWith(tester, _ManySource());
       await settle(tester);
       expect(focusLabel(), 'live.channels');
 
-      // Walk the cursor down the list, then onto row 11's star, so both peels
-      // are observable (the row cursor must survive the first Back).
+      // Walk the cursor down the list, then onto row 11's star.
       await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
       expect(find.text('2 - Channel 1').hitTestable(), findsNothing);
       await press(tester, LogicalKeyboardKey.arrowRight);
       await settle(tester);
 
-      // Back #1: off the star, back onto the row body — the row cursor (and the
-      // scroll position) must not move.
+      // Back is the exit prompt now: it must not move the row cursor, the
+      // scroll position or the intra-row column.
       await back(tester);
+      expect(find.text('Press Back again to exit'), findsOneWidget);
       expect(focusLabel(), 'live.channels');
       expect(
         find.text('2 - Channel 1').hitTestable(),
         findsNothing,
-        reason: 'peeling the star column must not reset the row cursor',
+        reason: 'neither the star column nor the row cursor may move',
       );
-
-      // Back #2: now the normal first-channel rung runs.
-      await back(tester);
-      expect(focusLabel(), 'live.channels');
-      expect(find.text('2 - Channel 1'), findsOneWidget);
 
       await unmount(tester);
     },

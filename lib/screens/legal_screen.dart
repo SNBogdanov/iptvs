@@ -51,6 +51,14 @@ class LegalScreen extends StatelessWidget {
                   'built-in Demo (no account needed). Cloud sync is optional.',
                   style: TextStyle(color: AppColors.textLo),
                 ),
+                const SizedBox(height: 10),
+                const Text(
+                  'This build is a fork of the original IPTVS Player, maintained at '
+                  'github.com/SNBogdanov/iptvs. The original project lives at '
+                  'github.com/GCHOfficial/iptvs. Please report problems with this '
+                  'build in the fork, not upstream.',
+                  style: TextStyle(color: AppColors.textLo),
+                ),
                 const SizedBox(height: 16),
                 _LinkCard(
                   // A D-pad user entering this screen should land on a visible focus
@@ -71,9 +79,15 @@ class LegalScreen extends StatelessWidget {
                 ),
                 _LinkCard(
                   icon: Icons.code,
-                  title: 'Source code & issues',
-                  subtitle: 'View the code or report a problem on GitHub',
+                  title: 'This fork on GitHub',
+                  subtitle: 'Source code and issue tracker for this build',
                   onTap: () => _open(context, AppLinks.repository),
+                ),
+                _LinkCard(
+                  icon: Icons.fork_right,
+                  title: 'Original project',
+                  subtitle: 'Upstream IPTVS Player, which this fork is based on',
+                  onTap: () => _open(context, AppLinks.upstreamRepository),
                 ),
                 _LinkCard(
                   icon: Icons.privacy_tip_outlined,

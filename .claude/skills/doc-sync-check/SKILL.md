@@ -32,8 +32,8 @@ context. Run this check before calling work done, not just when asked.
 | `lib/player/player_screen.dart`, `lib/player/player_overlay.dart`, `lib/screens/live_preview_controller.dart`, `android/app/src/main/kotlin/**/player/**`, `windows/runner/flutter_window.cpp`, `packages/iptvs_ios_player/**` (Swift) | `docs/player.md` |
 | `packages/iptvs_ios_player/**`, anything iOS-native player/audio-session related | `docs/ios.md` (and `docs/player.md` "iOS" section) |
 | `supabase/migrations/**`, `supabase/tests/**`, `lib/data/cloud_*.dart`, `lib/data/local_profile_store.dart`, `lib/screens/profile_pick_screen.dart` | `docs/cloud-sync.md` |
-| `android/**` signing config, keystore, `docs/android-signing.md`-adjacent CI (`.github/workflows/build.yml`, `google-play.yml`) signing steps | `docs/android-signing.md` |
-| `.github/workflows/release.yml`, `.github/workflows/google-play.yml`, `.github/workflows/microsoft-store.yml`, packaging/versioning code | `docs/store-publishing.md` |
+| `android/**` signing config, keystore, `docs/android-signing.md`-adjacent CI (`.github/workflows/build.yml`) signing steps | `docs/android-signing.md` |
+| `.github/workflows/release.yml`, packaging/versioning code | `docs/updates.md` ("What the pipeline needs", "Manifest and package signing") |
 | `lib/data/update_service.dart`, `lib/data/update_store.dart`, `lib/data/update_installer.dart`, `lib/screens/*update*`, `lib/widgets/release_notes_view.dart` | `docs/updates.md` |
 | Large-ingestion workers (`decodeLiveChannelsBytes`, `decodeMediaItemsBytes`, `_ingestStalkerChannels`, `parseXmltvBatched`), migration fixture matrix | `docs/validation-baseline.md` |
 | Any file whose change contradicts a stated invariant in the CLAUDE.md body itself (sealed locators, generation guards, redaction, HTTP timeouts, etc.) | CLAUDE.md directly, in the matching section |

@@ -6,8 +6,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/update_installer.dart';
 import 'package:iptvs/data/update_manifest.dart';
 
-const _artifact = ReleaseArtifact(
+final _artifact = ReleaseArtifact(
   platform: 'android',
+  url: Uri.parse('https://github.com/SNBogdanov/iptvs/releases/download/v1.4.2/artifact.apk'),
   filename: 'iptvs-1.4.2-android.apk',
   byteSize: 5,
   sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -64,6 +65,7 @@ void main() {
       await apk.writeAsBytes(bytes);
       artifact = ReleaseArtifact(
         platform: 'android',
+        url: Uri.parse('https://github.com/SNBogdanov/iptvs/releases/download/v1.4.2/artifact.apk'),
         filename: 'iptvs-1.4.2-android.apk',
         byteSize: bytes.length,
         sha256: sha256.convert(bytes).toString(),
@@ -115,45 +117,28 @@ void main() {
     },
   );
 
-  group('Windows update script', () {
-    final script = windowsUpdateScript(
+  group('Windows MSI update script', () {
+    final script = windowsMsiUpdateScript(
       pid: 42,
-      zipPath: r"C:\Users\O'Brien\update.zip",
-      installDir: r'C:\Apps\IPTVS Player',
-      exeName: 'iptvs.exe',
+      msiPath: r"C:\Users\O'Brien\update.msi",
     );
 
-    test('quotes user-controlled paths as PowerShell literals', () {
-      expect(script, contains(r"$zipPath = 'C:\Users\O''Brien\update.zip'"));
-      expect(script, contains(r"$installDir = 'C:\Apps\IPTVS Player'"));
+    test('quotes user-controlled paths and waits for this process', () {
+      expect(script, contains(r"$msiPath = 'C:\Users\O''Brien\update.msi'"));
       expect(script, contains('Wait-Process -Id 42'));
     });
 
-    test('validates archive paths and links before extraction', () {
-      expect(script, contains('[System.IO.Compression.ZipFile]::OpenRead'));
-      expect(script, contains('[System.IO.Path]::IsPathRooted'));
-      expect(script, contains(r'$entry.ExternalAttributes'));
-      expect(script, contains('Update archive path escapes'));
-      expect(script, contains('Update archive contains a symbolic link'));
+    test('installs quietly and relaunches the installed executable', () {
+      expect(script, contains("'msiexec.exe'"));
+      expect(script, contains("'/i', \$msiPath, '/qn', '/norestart'"));
+      expect(script, contains(r'HKLM:\SOFTWARE\SNBogdanov\IPTVS'));
+      expect(script, contains(r"Join-Path $installDir 'iptvs.exe'"));
+      expect(script, contains('Start-Process \$exe'));
     });
 
-    test('extracts to staging and contains swap and rollback steps', () {
-      expect(
-        script,
-        contains(
-          r'Expand-Archive -LiteralPath $zipPath -DestinationPath $stageDir',
-        ),
-      );
-      expect(script, isNot(contains(r'-DestinationPath $installDir -Force')));
-      expect(
-        script,
-        contains(r'Move-Item -LiteralPath $installDir -Destination $backupDir'),
-      );
-      expect(
-        script,
-        contains(r'Move-Item -LiteralPath $backupDir -Destination $installDir'),
-      );
-      expect(script, contains('Updated application exited during startup'));
+    test('accepts a reboot-required result and keeps an MSI log', () {
+      expect(script, contains('3010'));
+      expect(script, contains('iptvs_msi.log'));
     });
 
     test('records a transcript so a failed helper is diagnosable', () {
@@ -162,29 +147,22 @@ void main() {
     });
   });
 
-  group('Windows updater launch', () {
-    // Regression: the helper's first act is Wait-Process on the GUI app's PID,
-    // so it is blocked when the app exits. Launched as a bare detached console
-    // child it was torn down at that moment — no staging folder was ever made
-    // and the update silently no-opped. It must be spawned via `cmd /c start`
-    // so it owns a console and outlives the app.
+  group('Windows MSI updater launch', () {
     final launch = windowsUpdaterLaunch(r'C:\Temp\iptvs_update.ps1');
 
-    test('routes through cmd /c start, not a bare powershell', () {
-      expect(launch.executable, 'cmd.exe');
-      expect(launch.arguments.first, '/c');
-      expect(launch.arguments[1], 'start');
+    test('asks for elevation through Start-Process -Verb RunAs', () {
+      expect(launch.executable, 'powershell.exe');
+      expect(launch.arguments, contains('-Command'));
+      final command = launch.arguments.last;
+      expect(command, contains('-Verb RunAs'));
+      expect(command, contains("'-File','C:\\Temp\\iptvs_update.ps1'"));
     });
 
     test('runs the helper script hidden without a profile', () {
-      expect(launch.arguments, containsAllInOrder(<String>['start', '/min']));
-      expect(launch.arguments, contains('powershell.exe'));
-      expect(launch.arguments, containsAllInOrder(<String>['-File', r'C:\Temp\iptvs_update.ps1']));
-      expect(launch.arguments, containsAllInOrder(<String>['-WindowStyle', 'Hidden']));
       expect(launch.arguments, contains('-NoProfile'));
+      expect(launch.arguments, contains('-WindowStyle'));
     });
   });
-
   group('Linux AppImage update script', () {
     test('waits for the app and swaps whole files', () {
       expect(linuxUpdateScript, contains('kill -0 "\$old_pid"'));

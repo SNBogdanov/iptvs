@@ -70,10 +70,10 @@ navigation code.
   and for the same reason: anything inside the barrier (a `suffixIcon`) can never be a D-pad
   target, because entering edit mode hands focus to the editor which eats the arrows. Right from
   the cell reaches it while text is present; OK runs `onClear` and parks focus back on the cell
-  (the button disappears once the text empties); Back from it peels to the search cell (live) /
-  the tabs (media) via the Back ladder's `TvTextField.clear` route-key branch.
-- **The same "OK to edit" model** governs the player's sliders (see docs/player.md) — focus
-  passes them freely; OK enters adjust mode.
+  (the button disappears once the text empties); Back from it is the exit prompt like anywhere
+  else on the screen, and Left returns to the cell.
+- **The same "always focusable when focused" model** governs the player's sliders (see
+  docs/player.md) — Left/Right changes the value while the slider holds focus.
 - **A control that removes itself must hand focus on first.** `TvTextField`'s clear (×) above does
   it (`onClear` parks focus on the cell before the button disappears); so does the player overlay's
   "Go to live", which vanishes the moment the reload reaches the live edge and used to take the
@@ -284,6 +284,13 @@ tile-width band.
 - A fixed row height means the tallest row (name + `Now ·` + progress + `Next ·`) must *fit*
   `kChannelRowExtentWithEpg`, or it overflows. Every source in the tests except `_EpgSource`
   returns an empty EPG, so that one test is the only thing guarding it — keep it.
+- **The remote's channel rocker steps the list** (`CHANNEL_UP`/`CHANNEL_DOWN`, bound through a
+  `CallbackShortcuts` around the live body — `ChannelListScreen._stepChannel`). It applies the
+  in-player rule to the list: **the next channel is the next row down**, both ends wrap, and the key
+  does what OK on that row does — on a TV that starts its (silent) preview, on a phone it opens the
+  player. Dedicated channel keys are unambiguous, so the binding ignores the chrome and the focus
+  ring, exactly like `ZapKeyPolicy` does inside the player; before this, the list bound nothing to
+  those two codes and a remote's rocker did nothing on the screen the user watches from.
 
 ## Typed channel numbers
 
@@ -400,8 +407,9 @@ Three refusals are load-bearing:
   while leaving one press from anywhere else.
 - **Never a preview on the narrow layout.** There is no preview panel there, so the engine would
   spend a provider connection on video nobody can see.
-- **Never unmuted.** Muted on every platform, including Android where a deliberate preview carries
-  audio: unprompted sound at launch is a worse failure than a silent picture.
+- **Never unmuted.** Muted on every platform, Android's deliberate preview included — the rule is
+  about *previews*, not about how they were started: unprompted sound is a worse failure than a
+  silent picture, and the preview panel's own mute button is the one way up.
 
 Two implementation notes that are easy to get wrong:
 
@@ -508,8 +516,9 @@ with no dialog to route focus through and no hold-timing gesture to discover.
   category pane. **Up/Down**, and every (re)entry into the channel pane (`selectChannel`,
   `focusChannels`, `focusChannelsFromCategory`, the Up-escape at row 0), reset the column to
   `body`, so the star column is never sticky across rows.
-- **Back mirrors Left**: with the cursor on the star, Back peels it back onto the row body before
-  the ladder's first-row rung runs (rung 0 in the Back ladder below).
+- **Back does not mirror Left any more**: Back is the exit prompt (below), so the star column is
+  left only by Left/Up/Down. Arrows are the way out of the column, the same as every other
+  intra-row cursor.
 - **Drawing**: the row body carries the accent border only while the `body` column holds the
   cursor; on the `favorite` column the star cell draws its own accent ring + panel lift instead.
   That border is a **`foregroundDecoration`, not a `decoration`** — `Container` reserves
@@ -546,38 +555,23 @@ with no dialog to route focus through and no hold-timing gesture to discover.
 
 ## The Back ladder
 
-`channel_list_screen` `_handleRootBack`: Back never changes data or filters — it peels exactly
-**one rung** per press toward the exit. Because the live lists are a selection model, each live
-rung is a plain check on the coordinator's `region` + selected index (no focus-label
-archaeology). Live:
+`channel_list_screen` `_handleRootBack`: **Back leaves.** One press arms the exit confirmation
+("Press Back again to exit", 2 s window), the next exits (stopping the preview engine on the way
+out). A text field still owns Back while it is being edited (`TvTextField.field`), and a pushed
+`channel_list_screen` (should it ever become one) pops instead of exiting.
 
-0. channel list, cursor on the **favorite star** (`ChannelRowColumn.favorite`) → the **row body**
-   (Back mirrors Left; the row cursor and scroll position don't move);
-1. channel list, cursor **not** on the first row → **first channel**;
-2. first channel → **categories** (wide) / the **search box** (phone, no sidebar);
-3. preview controls (`live.preview.*`) → same as (2);
-4. categories, cursor **not** on the first row → **first category** ("All channels") — this moves
-   the *highlight only*, it does **not** change the active filter (OK does that);
-5. first category → the **search box**;
-6. search → the **section tabs**; the search field's **clear button**
-   (`TvTextField.clear`) peels to the search cell on live / the tabs on media;
-7. tabs → **exit**, behind a double-Back inside a 2s window (first press shows a "Press Back
-   again to exit" snackbar), stopping the preview engine on the actual exit.
+It used to peel **one rung per press** — favorite star → row body, list cursor → first channel,
+list → categories/search, category cursor → first category, search → tabs, tabs → exit. That made
+leaving the app from the player cost four or five presses, two of which (the jump to the first row,
+the hop into the search box) read as unrelated navigation rather than "getting out", and the number
+of presses depended on where the cursor happened to be. Arrows already move between the sidebar,
+the search box and the tabs on every layout, so none of those rungs was the only way anywhere.
 
-Browsing bottom sheets capture the focus node that opened them and restore it
-after ordinary dismissal when it is still attached. If a lazy rebuild removed
-that node, the live list, media first tile, or current tab is used as a
-route-safe fallback. Playback launched from a sheet uses the dedicated
-post-player restoration path.
+Media keeps no rungs either: Back no longer scrolls a grid to its top. The in-player surface has
+its own ladder (menu → info → hide chrome → exit, docs/player.md), which is separate and unchanged.
 
-Media keeps its own rungs (deep grid → top of grid → tabs). The **chrome** — the AppBar actions
-and the toolbar's buttons, which are plain `IconButton`s with **no route key** (`''`), while every
-*content* focusable carries one — sits *above* the ladder: Back from it goes straight to the exit
-prompt rather than diving back down into the sections to be climbed out of again. The one
-exception is a bare `FocusScopeNode` / nothing actually focused (a transient state, e.g. just
-after a dialog is dismissed) — that isn't somewhere the user can *be*, so it recovers to the tabs
-instead of offering to exit. Pinned end-to-end by `test/channel_list_focus_test.dart` (whose
-`_ManySource` gives both lists enough rows to actually scroll).
+Pinned end-to-end by `test/channel_list_focus_test.dart` (whose `_ManySource` gives both lists
+enough rows to actually scroll).
 
 **iOS has no hardware Back**, so *both* iOS player surfaces render the same peel/exit shape
 through touch. This paragraph describes the presented `IptvsPlayerViewController`

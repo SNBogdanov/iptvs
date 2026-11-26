@@ -22,24 +22,13 @@ hero:
       variant: minimal
 ---
 
-import StoreBadges from '../../components/StoreBadges.astro';
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-{/* Identities are recorded in docs/store-publishing.md: the Play application id
-    is `com.gchofficial.iptvs.player`, the Microsoft Store ID `9P8KK9T379WN`.
-    Both listings verified live before wiring these. */}
-<StoreBadges
-  play="https://play.google.com/store/apps/details?id=com.gchofficial.iptvs.player"
-  microsoft="https://apps.microsoft.com/detail/9P8KK9T379WN"
-/>
-
-Prefer a direct download, or on Linux? Every build is on the
-[releases page](https://github.com/GCHOfficial/iptvs/releases) — Linux AppImage,
-Windows zip and Android APK.
-
-{/* The trademark attribution these badges require lives in the site footer
-    (`src/components/Footer.astro`), which is both where a legal footnote
-    belongs and how it ends up on every page rather than only this one. */}
+{/* This build is not published to any store, so there are no store badges: one
+    download page, the GitHub releases of this fork. */}
+Every build is on the
+[releases page](https://github.com/SNBogdanov/iptvs/releases) — Windows MSIX,
+Linux AppImage and Android APK.
 
 <CardGrid stagger>
   <Card title="Plays what a browser can't" icon="seti:video">

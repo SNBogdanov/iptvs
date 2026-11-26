@@ -67,8 +67,8 @@ The shipping path below is a **sideload** path. It does not involve App Review.
 
 Consequences that follow from this and must not be quietly reversed:
 
-- **No direct updater on iOS, ever.** The Ed25519-signed manifest + binary
-  replacement in `docs/updates.md` is impossible inside the iOS sandbox.
+- **No direct updater on iOS, ever.** The download-and-replace update flow in
+  `docs/updates.md` (APK/MSI/AppImage) is impossible inside the iOS sandbox.
   AltStore owns the update lifecycle.
 - The demo content reachable through `DemoSource` should stay rights-clear
   (public domain or self-hosted test streams). That is now a hygiene matter
@@ -122,7 +122,8 @@ a side-by-side install and a cloud push/pull migration, not an in-place upgrade.
 
 ### Bundle identities
 
-Following the existing side-by-side convention in `docs/store-publishing.md`:
+Following the side-by-side convention the Android identities used before this
+fork dropped its store path:
 
 | Channel | Bundle identifier |
 |---|---|
@@ -184,7 +185,7 @@ plumbing is small: `DistributionConfig` is consumed at exactly three sites
 ([update_installer.dart:52](../lib/data/update_installer.dart#L52),
 [home_shell.dart:98](../lib/screens/home_shell.dart#L98),
 [sources_screen.dart:279](../lib/screens/sources_screen.dart#L279)), all gated on
-`directUpdaterEnabled`, and `isStoreManaged` currently has no consumer at all.
+`directUpdaterEnabled`.
 
 Setting `ownsDirectUpdates = false` switches off the entire update UI without
 touching those three call sites. AltStore owns the update lifecycle by reading

@@ -7,6 +7,12 @@ void main() {
   testWidgets('exposes support, source, privacy, and cloud deletion paths', (
     tester,
   ) async {
+    // Tall enough that every link card is built: a lazy ListView only builds what
+    // its viewport shows, and this screen now has five links.
+    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const MaterialApp(home: LegalScreen()));
     await tester.pump();
 
@@ -16,7 +22,8 @@ void main() {
     // TV remote can reach and activate it.
     for (final label in const [
       'Support',
-      'Source code & issues',
+      'This fork on GitHub',
+      'Original project',
       'Privacy policy',
       'Delete cloud account',
     ]) {

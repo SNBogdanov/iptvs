@@ -57,6 +57,18 @@ object SharedEngine {
     private var previewStatsEmitted = 0
     private var previewStatsLastDropped = -1
 
+    /**
+     * The level the **preview** wants (0 while it is meant to be silent).
+     *
+     * The engine is handed to the fullscreen Activity across a session, and the
+     * Activity applies the user's audible volume to it. Nothing on the return
+     * leg put the preview's own level back, so a preview came back loud after
+     * every fullscreen visit — including the very first one, where the user
+     * never asked for sound. Kept here (not read back from the player, which by
+     * then holds the fullscreen level) so it can be restored on detach.
+     */
+    private var previewVolume: Float = 0f
+
     var engine: ExoPlayerEngine? = null
         private set(value) {
             // Balances DebugCounters.sharedEngineLive across every assignment
@@ -189,7 +201,8 @@ object SharedEngine {
             previewSurface?.let { fresh.attachPreviewSurface(it) }
             fresh.load(streamUrl, emptyList())
         }
-        engine?.setVolume(if (muted) 0f else 1f)
+        previewVolume = if (muted) 0f else 1f
+        engine?.setVolume(previewVolume)
         engine?.play()
         startPreviewStats()
     }
@@ -328,7 +341,8 @@ object SharedEngine {
     }
 
     fun setPreviewVolume(volume: Float) {
-        engine?.setVolume(volume)
+        previewVolume = volume.coerceIn(0f, 1f)
+        engine?.setVolume(previewVolume)
     }
 
     /**
@@ -387,6 +401,11 @@ object SharedEngine {
         }
         val e = engine ?: return
         bindPreviewCallbacks(e)
+        // The fullscreen session left *its* volume on the engine; the preview
+        // is silent unless the user unmuted it in the panel, so put that level
+        // back before the picture returns. (`setPreviewVolume` and every
+        // `openPreview` keep [previewVolume] current.)
+        e.setVolume(previewVolume)
         val surface = previewSurface
         previewDiagnostics("fullscreen detached surface=${surface != null}")
         if (surface == null) return
