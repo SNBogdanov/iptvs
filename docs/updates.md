@@ -41,7 +41,10 @@ anything else is transient and fails the step rather than being mistaken for it.
 
 That step never *moves* an existing tag. A published release is addressed by it, users may already
 hold the artifacts it named, and `update.json` names one exact build (URL + size + SHA-256) — so a
-tag that exists at a different commit is a hard failure asking for a new version instead.
+tag that exists at a different commit is a hard failure asking for a new version instead. An
+**annotated** tag's ref points at a tag object rather than the commit, so the guard dereferences it
+(`/git/tags/<sha>`) before comparing; without that, every annotated tag looked like "already exists
+at <tag object sha>" and the publish job aborted after all three builds had succeeded (v1.0.1).
 
 ## Release changelog
 

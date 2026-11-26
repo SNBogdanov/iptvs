@@ -385,6 +385,15 @@ jobs:
           probe=""
           if probe=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --silent 2>&1); then
             existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')
+            # An **annotated** tag's ref points at a tag object, not at the
+            # commit, so comparing that Sha with `$GITHUB_SHA` made every
+            # annotated tag look like "already exists at <tag object>": exactly
+            # how v1.0.1's publish died. Dereference the tag object first, so
+            # the comparison below is always commit-to-commit.
+            existing_type=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.type')
+            if [ "$existing_type" = "tag" ]; then
+              existing=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$existing" --jq '.object.sha')
+            fi
           elif grep -q "HTTP 404" <<<"$probe"; then
             existing=""
           else
