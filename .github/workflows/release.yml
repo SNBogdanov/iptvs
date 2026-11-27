@@ -49,6 +49,24 @@ jobs:
             echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
             echo "track=stable" >> "$GITHUB_OUTPUT"
           fi
+      # Never publish a build that quietly lacks the cloud configuration. 1.0.1
+      # did exactly that: the build steps below read `vars.SUPABASE_*`, the
+      # variables did not exist, `--dart-define=SUPABASE_URL=` compiled an empty
+      # string, and `CloudConfig.isConfigured` turned the whole cloud feature off
+      # with no error anywhere — the artifacts looked perfectly healthy.
+      - name: Require the cloud configuration
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+        run: |
+          missing=0
+          for name in SUPABASE_URL SUPABASE_ANON_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not configured as a repository variable; a release built without it ships as a local-only app."
+              missing=1
+            fi
+          done
+          exit "$missing"
 
   build-android:
     name: Build Android (phone + TV)

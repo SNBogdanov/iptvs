@@ -55,8 +55,14 @@ class UpdateInstaller {
 
   /// Whether an in-app download+install is supported here (the two release
   /// targets). Elsewhere the flow degrades to opening the release page.
+  ///
+  /// A **development** build is included: it owns no update lifecycle, but the
+  /// explicit "install the published release" action is exactly how a
+  /// side-loaded dev build gets back to a release (`runReleaseInstall`), and it
+  /// must use the same verified download path as everything else.
   static bool get isSupported =>
-      DistributionConfig.directUpdaterEnabled &&
+      (DistributionConfig.directUpdaterEnabled ||
+          DistributionConfig.channel.offersReleaseInstall) &&
       (Platform.isAndroid ||
           Platform.isWindows ||
           (Platform.isLinux && _runningAppImage != null));

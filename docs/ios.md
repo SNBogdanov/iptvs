@@ -182,9 +182,9 @@ release body.
 
 `lib/data/distribution_channel.dart` needs **one** new member — `altStore`. The
 plumbing is small: `DistributionConfig` is consumed at exactly three sites
-([update_installer.dart:52](../lib/data/update_installer.dart#L52),
-[home_shell.dart:98](../lib/screens/home_shell.dart#L98),
-[sources_screen.dart:279](../lib/screens/sources_screen.dart#L279)), all gated on
+([update_installer.dart:59](../lib/data/update_installer.dart#L59),
+[home_shell.dart:236](../lib/screens/home_shell.dart#L236),
+[legal_screen.dart:74](../lib/screens/legal_screen.dart#L74)), all gated on
 `directUpdaterEnabled`.
 
 Setting `ownsDirectUpdates = false` switches off the entire update UI without

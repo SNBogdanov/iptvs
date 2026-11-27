@@ -29,7 +29,10 @@ void main() {
     ]) {
       expect(find.text(label), findsOneWidget);
       final card = tester.widget<FocusableCard>(
-        find.ancestor(of: find.text(label), matching: find.byType(FocusableCard)),
+        find.ancestor(
+          of: find.text(label),
+          matching: find.byType(FocusableCard),
+        ),
       );
       expect(card.onTap, isNotNull);
     }
@@ -48,5 +51,33 @@ void main() {
       ),
     );
     expect(firstCard.autofocus, isTrue);
+  });
+
+  testWidgets('a development build offers the published release', (
+    tester,
+  ) async {
+    // The suite builds without DISTRIBUTION_CHANNEL, i.e. as a development
+    // build — exactly the channel that has no updater of its own and needs the
+    // explicit way back to a release.
+    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const MaterialApp(home: LegalScreen()));
+    await tester.pump();
+
+    expect(find.text('Updates'), findsOneWidget);
+    expect(find.text('This is a development build'), findsOneWidget);
+    final card = tester.widget<FocusableCard>(
+      find.ancestor(
+        of: find.text('This is a development build'),
+        matching: find.byType(FocusableCard),
+      ),
+    );
+    expect(card.onTap, isNotNull);
+    // A development build has no update track or manual check: both belong to
+    // the direct updater.
+    expect(find.text('Check for updates'), findsNothing);
+    expect(find.text('GitHub update track'), findsNothing);
   });
 }

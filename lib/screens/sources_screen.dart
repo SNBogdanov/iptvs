@@ -3,15 +3,12 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart' show KeyRepeatEvent;
 
 import '../data/app_database.dart';
-import '../data/distribution_channel.dart';
 import '../data/cloud_config.dart';
 import '../data/diagnostics_log.dart';
 import '../data/expiry_cache.dart';
 import '../data/metadata_config.dart';
 import '../data/net.dart';
 import '../data/source_store.dart';
-import '../data/update_service.dart';
-import '../data/update_store.dart';
 import '../sources/source_config.dart';
 import '../sources/source.dart';
 import '../sources/m3u_upgrade.dart';
@@ -23,7 +20,6 @@ import 'cloud_sync_screen.dart';
 import 'legal_screen.dart';
 import 'profile_pick_screen.dart';
 import 'source_settings_screen.dart';
-import 'update_flow.dart';
 
 IconData _kindIcon(SourceKind k) {
   switch (k) {
@@ -290,16 +286,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
             ? const Center(child: CircularProgressIndicator())
             : Column(
                 children: [
-                  if (DistributionConfig.directUpdaterEnabled) ...[
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                      child: _UpdateTrackCard(),
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                      child: _UpdateCard(),
-                    ),
-                  ],
                   Expanded(
                     child: _sources.isEmpty
                         ? const Center(
@@ -1530,185 +1516,6 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   ),
                 ),
               ),
-      ),
-    );
-  }
-}
-
-class _UpdateTrackCard extends StatefulWidget {
-  const _UpdateTrackCard();
-
-  @override
-  State<_UpdateTrackCard> createState() => _UpdateTrackCardState();
-}
-
-class _UpdateTrackCardState extends State<_UpdateTrackCard> {
-  UpdateTrack _track = UpdateTrack.stable;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final track = await const UpdateStore().track();
-    if (mounted) setState(() => _track = track);
-  }
-
-  Future<void> _choose() async {
-    final selected = await showDialog<UpdateTrack>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.panelHi,
-        title: const Text('GitHub update track'),
-        content: const Text(
-          'Stable receives normal releases. Beta also receives signed GitHub '
-          'prereleases intended for testing. Switching back to Stable never '
-          'downgrades the app; it waits for a newer stable release.',
-        ),
-        actions: [
-          TextButton(
-            autofocus: _track == UpdateTrack.stable,
-            onPressed: () => Navigator.pop(context, UpdateTrack.stable),
-            child: const Text('Stable'),
-          ),
-          FilledButton(
-            autofocus: _track == UpdateTrack.beta,
-            onPressed: () => Navigator.pop(context, UpdateTrack.beta),
-            child: const Text('Beta'),
-          ),
-        ],
-      ),
-    );
-    if (selected == null || selected == _track) return;
-    await const UpdateStore().setTrack(selected);
-    if (mounted) setState(() => _track = selected);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FocusableCard(
-      onTap: _choose,
-      scrollOnFocus: false,
-      debugLabel: 'sources.updateTrack',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            const Icon(
-              Icons.science_outlined,
-              size: 20,
-              color: AppColors.textLo,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('GitHub update track'),
-                  Text(
-                    _track.displayName,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.textLo,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right, size: 20, color: AppColors.textLo),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// "Check for updates" row. A single focus stop (like the update-track row);
-/// OK/tap runs a manual GitHub check and drives the update flow. The hint shows
-/// the running version (see [appVersion]).
-class _UpdateCard extends StatefulWidget {
-  const _UpdateCard();
-
-  @override
-  State<_UpdateCard> createState() => _UpdateCardState();
-}
-
-class _UpdateCardState extends State<_UpdateCard> {
-  String? _version; // null while loading
-  bool _checking = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadVersion();
-  }
-
-  Future<void> _loadVersion() async {
-    try {
-      final version = await appVersion();
-      if (mounted) setState(() => _version = version);
-    } catch (_) {
-      // Leave the generic label if the platform version is unavailable.
-    }
-  }
-
-  Future<void> _check() async {
-    if (_checking) return;
-    setState(() => _checking = true);
-    try {
-      await runUpdateCheck(context, manual: true);
-    } finally {
-      if (mounted) setState(() => _checking = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FocusableCard(
-      onTap: _check,
-      scrollOnFocus: false,
-      debugLabel: 'sources.checkUpdate',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            const Icon(
-              Icons.system_update_outlined,
-              size: 20,
-              color: AppColors.textLo,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Check for updates'),
-                  Text(
-                    _version == null ? 'Current version' : 'Version $_version',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.textLo,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (_checking)
-              const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            else
-              const Icon(
-                Icons.chevron_right,
-                size: 20,
-                color: AppColors.textLo,
-              ),
-          ],
-        ),
       ),
     );
   }

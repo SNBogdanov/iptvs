@@ -23,6 +23,14 @@ DistributionChannel parseDistributionChannel(String value) {
 extension DistributionChannelPolicy on DistributionChannel {
   bool get ownsDirectUpdates => this == DistributionChannel.githubDirect;
 
+  /// Whether the app may offer the **published release** as an explicit
+  /// install. Only development builds do: a GitHub-direct build has the normal
+  /// updater (which only ever offers newer versions), and an AltStore build
+  /// owns its lifecycle through the store. A side-loaded development build has
+  /// no way back on its own, so this is the escape hatch — see
+  /// `runReleaseInstall`.
+  bool get offersReleaseInstall => this == DistributionChannel.development;
+
   String get displayName => switch (this) {
     DistributionChannel.development => 'Development',
     DistributionChannel.githubDirect => 'GitHub direct',

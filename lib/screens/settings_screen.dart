@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/device_class.dart';
 import '../data/local_profile_store.dart';
 import '../data/proxy_config.dart';
 import '../data/stream_kind.dart';
@@ -463,24 +464,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
               subtitle:
                   'Choose which buttons the player shows over the picture. '
                   'Play/pause always stays.',
-              trailing: playerControlsPrefs.value.hidden.isEmpty
-                  ? 'All'
-                  : '${PlayerControl.values.length - playerControlsPrefs.value.hidden.length}'
-                        ' of ${PlayerControl.values.length}',
+              trailing: _playerControlsTrailing(),
               onTap: _openPlayerControls,
             ),
-            _SettingTile(
-              icon: Icons.touch_app_outlined,
-              title: 'Double tap on the picture',
-              subtitle:
-                  'Double tap the left half for back / previous, the right half '
-                  'for forward / next. **Live channels always step** — this '
-                  'choice is for films and episodes: Previous/Next steps to the '
-                  'neighbouring title, Seek moves by the VOD seek step below.',
-              trailing: (_doubleTap ?? DoubleTapAction.previousNext).label,
-              onTap: _cycleDoubleTap,
-            ),
-            if (Platform.isAndroid)
+            // Touch gestures: only the phone/tablet surfaces wire them. A TV has
+            // a remote; a desktop overlay keeps the double *click* as "toggle
+            // fullscreen" and never reads this setting.
+            if (hasTouchPlayerGestures)
+              _SettingTile(
+                icon: Icons.touch_app_outlined,
+                title: 'Double tap on the picture',
+                subtitle:
+                    'Double tap the left half for back / previous, the right half '
+                    'for forward / next. **Live channels always step** — this '
+                    'choice is for films and episodes: Previous/Next steps to the '
+                    'neighbouring title, Seek moves by the VOD seek step below.',
+                trailing: (_doubleTap ?? DoubleTapAction.previousNext).label,
+                onTap: _cycleDoubleTap,
+              ),
+            if (Platform.isAndroid && hasTouchPlayerGestures)
               _SettingTile(
                 icon: Icons.swap_horiz_outlined,
                 title: 'Volume and brightness swipes',
@@ -535,6 +537,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // The tile's trailing count reads the notifier directly, so only a rebuild
     // of this route is needed after the sub-screen pops.
     if (mounted) setState(() {});
+  }
+
+  /// "All" or "n of m", counted over the controls **this device** offers: a
+  /// television has no picture-in-picture, so a total that included it would
+  /// read "9 of 10" on a screen that only lists nine rows.
+  String _playerControlsTrailing() {
+    final available = playerControlsForDevice();
+    final prefs = playerControlsPrefs.value;
+    if (prefs.hidden.isEmpty) return 'All';
+    final shown = available.where(prefs.shows).length;
+    return '$shown of ${available.length}';
   }
 
   String _proxyServerLabel() {
@@ -720,6 +733,9 @@ class PlayerControlsScreen extends StatelessWidget {
           listenable: playerControlsPrefs,
           builder: (context, _) {
             final prefs = playerControlsPrefs.value;
+            // A television offers no picture-in-picture, so its row is not
+            // drawn at all — see [playerControlsForDevice].
+            final available = playerControlsForDevice().toSet();
             Widget tile(PlayerControl control) => _SettingTile(
               icon: _iconFor(control),
               title: control.label,
@@ -739,7 +755,7 @@ class PlayerControlsScreen extends StatelessWidget {
                   PlayerControl.mute,
                   PlayerControl.volume,
                 ])
-                  tile(control),
+                  if (available.contains(control)) tile(control),
                 const _GroupLabel('Buttons'),
                 for (final control in const [
                   PlayerControl.quickList,
@@ -749,7 +765,7 @@ class PlayerControlsScreen extends StatelessWidget {
                   PlayerControl.pip,
                   PlayerControl.info,
                 ])
-                  tile(control),
+                  if (available.contains(control)) tile(control),
                 const Padding(
                   padding: EdgeInsets.only(top: 14),
                   child: Text(

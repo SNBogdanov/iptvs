@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/app_links.dart';
+import '../data/distribution_channel.dart';
 import '../data/update_service.dart' show appVersion;
+import '../data/update_store.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import 'update_flow.dart';
 
 /// Help & about — reachable from the channel-list AppBar and the first-run
 /// empty state. Intentionally link-based (no in-app feedback form, no
@@ -60,6 +63,31 @@ class LegalScreen extends StatelessWidget {
                   style: TextStyle(color: AppColors.textLo),
                 ),
                 const SizedBox(height: 16),
+                // The in-app update controls live here rather than on Sources:
+                // that screen is about provider accounts, and a "Check for
+                // updates" row buried under them was reported as impossible to
+                // find. Help & about is where a user looks for "is my app
+                // current", and it is reachable from the channel list's Help
+                // action. Hidden entirely for builds that do not own their
+                // updates (development, AltStore) — the same gate the installer
+                // and the startup check use.
+                if (DistributionConfig.directUpdaterEnabled ||
+                    DistributionConfig.channel.offersReleaseInstall) ...[
+                  const Text(
+                    'Updates',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  if (DistributionConfig.directUpdaterEnabled) ...[
+                    const _UpdateTrackCard(),
+                    const SizedBox(height: 8),
+                    const _UpdateCard(),
+                  ] else
+                    // A development build: no updater of its own, but this is
+                    // the way back to the published release.
+                    const _ReleaseInstallCard(),
+                  const SizedBox(height: 16),
+                ],
                 _LinkCard(
                   // A D-pad user entering this screen should land on a visible focus
                   // ring immediately, not on an unfocused scaffold.
@@ -86,7 +114,8 @@ class LegalScreen extends StatelessWidget {
                 _LinkCard(
                   icon: Icons.fork_right,
                   title: 'Original project',
-                  subtitle: 'Upstream IPTVS Player, which this fork is based on',
+                  subtitle:
+                      'Upstream IPTVS Player, which this fork is based on',
                   onTap: () => _open(context, AppLinks.upstreamRepository),
                 ),
                 _LinkCard(
@@ -184,6 +213,267 @@ class _VersionLine extends StatelessWidget {
           style: const TextStyle(color: AppColors.textLo, fontSize: 12),
         );
       },
+    );
+  }
+}
+
+/// Which GitHub release track this build follows (Stable / Beta).
+///
+/// Moved here from the Sources screen together with [_UpdateCard]: a TV user
+/// looking for "is there a new version" opens Help & about, not the provider
+/// list.
+class _UpdateTrackCard extends StatefulWidget {
+  const _UpdateTrackCard();
+
+  @override
+  State<_UpdateTrackCard> createState() => _UpdateTrackCardState();
+}
+
+class _UpdateTrackCardState extends State<_UpdateTrackCard> {
+  UpdateTrack _track = UpdateTrack.stable;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final track = await const UpdateStore().track();
+    if (mounted) setState(() => _track = track);
+  }
+
+  Future<void> _choose() async {
+    final selected = await showDialog<UpdateTrack>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.panelHi,
+        title: const Text('GitHub update track'),
+        content: const Text(
+          'Stable receives normal releases. Beta also receives signed GitHub '
+          'prereleases intended for testing. Switching back to Stable never '
+          'downgrades the app; it waits for a newer stable release.',
+        ),
+        actions: [
+          TextButton(
+            autofocus: _track == UpdateTrack.stable,
+            onPressed: () => Navigator.pop(context, UpdateTrack.stable),
+            child: const Text('Stable'),
+          ),
+          FilledButton(
+            autofocus: _track == UpdateTrack.beta,
+            onPressed: () => Navigator.pop(context, UpdateTrack.beta),
+            child: const Text('Beta'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || selected == _track) return;
+    await const UpdateStore().setTrack(selected);
+    if (mounted) setState(() => _track = selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: _choose,
+      scrollOnFocus: false,
+      debugLabel: 'help.updateTrack',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.science_outlined,
+              size: 20,
+              color: AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('GitHub update track'),
+                  Text(
+                    _track.displayName,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, size: 20, color: AppColors.textLo),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "Check for updates" row. A single focus stop (like the update-track row);
+/// OK/tap runs a manual GitHub check and drives the update flow. The hint shows
+/// the running version (see [appVersion]).
+class _UpdateCard extends StatefulWidget {
+  const _UpdateCard();
+
+  @override
+  State<_UpdateCard> createState() => _UpdateCardState();
+}
+
+class _UpdateCardState extends State<_UpdateCard> {
+  String? _version; // null while loading
+  bool _checking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVersion();
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final version = await appVersion();
+      if (mounted) setState(() => _version = version);
+    } catch (_) {
+      // Leave the generic label if the platform version is unavailable.
+    }
+  }
+
+  Future<void> _check() async {
+    if (_checking) return;
+    setState(() => _checking = true);
+    try {
+      await runUpdateCheck(context, manual: true);
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: _check,
+      scrollOnFocus: false,
+      debugLabel: 'help.checkUpdate',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.system_update_outlined,
+              size: 20,
+              color: AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Check for updates'),
+                  Text(
+                    _version == null ? 'Current version' : 'Version $_version',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_checking)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Icon(
+                Icons.chevron_right,
+                size: 20,
+                color: AppColors.textLo,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A **development build's** way back to the published release.
+///
+/// The ordinary updater is hidden here on purpose (a dev build owns no update
+/// lifecycle), which left a side-loaded build with no in-app escape. This card
+/// asks for the release explicitly: it checks `update.json`, refuses an older
+/// release before downloading anything, and then reuses the verified
+/// download+install path.
+class _ReleaseInstallCard extends StatefulWidget {
+  const _ReleaseInstallCard();
+
+  @override
+  State<_ReleaseInstallCard> createState() => _ReleaseInstallCardState();
+}
+
+class _ReleaseInstallCardState extends State<_ReleaseInstallCard> {
+  bool _busy = false;
+
+  Future<void> _install() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await runReleaseInstall(context);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: _install,
+      scrollOnFocus: false,
+      debugLabel: 'help.installRelease',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.science_outlined,
+              size: 20,
+              color: AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('This is a development build'),
+                  Text(
+                    'Install the latest published release',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_busy)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Icon(
+                Icons.chevron_right,
+                size: 20,
+                color: AppColors.textLo,
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

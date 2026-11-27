@@ -78,21 +78,49 @@ void main() {
     });
   });
 
+  group('what the device offers', () {
+    test('a television has no picture-in-picture row', () {
+      final tv = playerControlsForDevice(
+        television: true,
+        pictureInPicture: true,
+      );
+      expect(tv, isNot(contains(PlayerControl.pip)));
+      // Everything else still applies: the TV player draws the same chrome.
+      expect(tv, contains(PlayerControl.quickList));
+      expect(tv.length, PlayerControl.values.length - 1);
+      // And the hidden set is untouched by the filtering, so a phone choice
+      // of "PiP off" is still there if the same account returns to a phone.
+      expect(
+        const PlayerControlsPrefs(
+          hidden: {PlayerControl.pip},
+        ).shows(PlayerControl.volume),
+        isTrue,
+      );
+    });
+
+    test('only the surfaces that draw PiP offer the row', () {
+      // Windows' mini-player and Android's PiP window.
+      expect(
+        playerControlsForDevice(television: false, pictureInPicture: true),
+        PlayerControl.values,
+      );
+      // Linux, iOS — no mini-player, so the toggle would be dead.
+      final noPip = playerControlsForDevice(
+        television: false,
+        pictureInPicture: false,
+      );
+      expect(noPip, isNot(contains(PlayerControl.pip)));
+      expect(noPip.length, PlayerControl.values.length - 1);
+    });
+  });
+
   group('storage', () {
     test('set publishes first and persists the hidden set', () async {
-      await setPlayerControlVisible(
-        PlayerControl.volume,
-        false,
-        store: store,
-      );
+      await setPlayerControlVisible(PlayerControl.volume, false, store: store);
       expect(playerControlsPrefs.value.shows(PlayerControl.volume), isFalse);
       expect(await store.rawHiddenPlayerControls(), 'volume');
 
-      await setPlayerControlVisible(
-        PlayerControl.aspect,
-        false,
-        store: store,
-      );
+      await setPlayerControlVisible(PlayerControl.aspect, false, store: store);
       expect(await store.rawHiddenPlayerControls(), 'aspect,volume');
     });
 

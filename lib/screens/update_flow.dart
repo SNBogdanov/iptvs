@@ -88,6 +88,112 @@ Future<void> runUpdateCheck(
   }
 }
 
+/// The way **back from a development build** to the published release.
+///
+/// A development build owns no update lifecycle, so nothing ever offers it a
+/// newer version — which leaves a side-loaded dev build stuck on itself. This
+/// is the explicit half of that contract: the user asks for the release, we
+/// read `update.json`, and we refuse **before downloading** when the published
+/// release is *older* than the running build ([releaseInstallAllowed]).
+Future<void> runReleaseInstall(
+  BuildContext context, {
+  UpdateService? service,
+  UpdateStore? store,
+  Future<String> Function()? currentVersion,
+}) async {
+  final prefs = store ?? const UpdateStore();
+  final svc = service ?? UpdateService();
+
+  ReleaseInfo? release;
+  String current;
+  try {
+    current = await (currentVersion ?? svc.currentVersion)();
+    release = await svc.fetchLatest();
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Release check failed: $e')));
+    }
+    return;
+  } finally {
+    svc.close();
+  }
+  if (!context.mounted) return;
+
+  if (release == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('No published release was found')),
+    );
+    return;
+  }
+
+  if (!releaseInstallAllowed(release.version, current)) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'The latest release (${release.version}) is older than this build '
+          '($current) — nothing to install.',
+        ),
+      ),
+    );
+    return;
+  }
+
+  final confirmed = await showDevelopmentReleaseDialog(
+    context,
+    release,
+    current,
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  await _downloadAndInstall(
+    context,
+    release,
+    current,
+    prefs,
+    fromDevelopmentBuild: true,
+  );
+}
+
+/// "This is a development build — install the release?" confirmation.
+///
+/// Public so tests can pin the wording and the autofocused primary action.
+Future<bool?> showDevelopmentReleaseDialog(
+  BuildContext context,
+  ReleaseInfo release,
+  String current,
+) {
+  final android = Platform.isAndroid;
+  return showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      backgroundColor: AppColors.panelHi,
+      title: Text('Install release ${release.version}?'),
+      content: Text(
+        'This is a development build ($current).\n\n'
+        'IPTVS Player ${release.version} is the latest published release. It is '
+        'downloaded from GitHub and checked against its published size and '
+        'SHA-256 before installation.'
+        '${android ? '\n\nOn Android the release installs as a separate app '
+                  '(the .direct package) beside this one; uninstall this build '
+                  'afterwards if you no longer need it.' : ''}',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          autofocus: true,
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Install'),
+        ),
+      ],
+    ),
+  );
+}
+
 /// The "Update available" prompt. The primary action autofocuses so a TV
 /// remote's OK acts immediately; Back returns null (= Later). Public so the
 /// D-pad focus behaviour can be pinned by a widget test.
@@ -398,10 +504,19 @@ Future<void> _downloadAndInstall(
   BuildContext context,
   ReleaseInfo release,
   String current,
-  UpdateStore store,
-) async {
-  if (!isUpdateAllowed(release, current)) {
+  UpdateStore store, {
+
+  /// A development build installing the published release on purpose: the
+  /// release may be the *same* version (or newer), which [isUpdateAllowed]
+  /// deliberately refuses for the ordinary updater.
+  bool fromDevelopmentBuild = false,
+}) async {
+  if (!fromDevelopmentBuild && !isUpdateAllowed(release, current)) {
     throw StateError('Refusing to install a non-upgrade release');
+  }
+  if (fromDevelopmentBuild &&
+      !releaseInstallAllowed(release.version, current)) {
+    throw StateError('Refusing to install an older release from a dev build');
   }
   final installer = UpdateInstaller();
   final asset = release.assetForCurrentPlatform();

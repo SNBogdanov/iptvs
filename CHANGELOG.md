@@ -11,6 +11,31 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-27
+
+### Changed
+
+- **The update controls moved from Sources to Help & about.** "Check for updates" and the GitHub
+  update track now sit at the top of the Help page — where a user looks to ask "is my app current" —
+  instead of being buried under the provider accounts on the Sources screen. The gate is unchanged:
+  only GitHub-direct builds show them.
+- **A development build can now install the published release from inside the app.** Its Help page
+  shows "This is a development build — install the latest published release"; the release version is
+  checked against the running build **before** anything is downloaded, and an older release is
+  refused instead of silently downgrading.
+- **Settings only offer what the device can do.** The double-tap gesture is hidden on a television
+  (remote only) and on desktop (where a double *click* still toggles fullscreen and the setting is
+  never read); the volume/brightness swipes stay Android-phone only; and the picture-in-picture
+  toggle is gone wherever nothing draws it — Android TV, Linux and iOS — while Windows (mini-player)
+  and Android phones keep it.
+
+### Fixed
+
+- **Cloud sync is back in the published builds.** The 1.0.1 artifacts were compiled without the
+  Supabase URL and anon key — the release pipeline reads them from repository variables that did not
+  exist yet — so cloud profiles, cross-device favourites and watch state fell back to local-only
+  without any error. The variables are configured now and every build gets them.
+
 ## [1.0.1] - 2026-11-26
 
 ### Added
@@ -344,5 +369,6 @@ each release's notes also appear on GitHub Releases. New work lands under
   maximized window and a window hidden to the tray across a display sleep/wake.
 - Windows: Back/Escape can close playback while "Reconnecting..." is shown.
 
-[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.1...main
+[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.2...main
+[1.0.2]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.2
 [1.0.1]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.1

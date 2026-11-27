@@ -65,6 +65,21 @@ void main() {
     });
   });
 
+  group('releaseInstallAllowed', () {
+    test('a development build may install the same or a newer release', () {
+      // The dev build is normally cut from the same tree as the release, so
+      // "equal" must be installable — that is how a dev build gets back.
+      expect(releaseInstallAllowed('1.2.0', '1.2.0'), isTrue);
+      expect(releaseInstallAllowed('1.3.0', '1.2.0'), isTrue);
+      // A dev build ahead of the last release may install that release too.
+      expect(releaseInstallAllowed('1.2.0', '1.3.0'), isFalse);
+    });
+
+    test('refuses an older release before any download', () {
+      expect(releaseInstallAllowed('1.1.9', '1.2.0'), isFalse);
+    });
+  });
+
   group('release manifest discovery', () {
     test('reads the version and every platform from update.json', () {
       final manifest = ReleaseManifest.parse(
@@ -99,7 +114,11 @@ void main() {
         utf8.encode(
           jsonEncode({
             'version': '1.2.3',
-            'macos': {'url': 'https://github.com/a/b/c.dmg', 'size': 1, 'sha256': 'c' * 64},
+            'macos': {
+              'url': 'https://github.com/a/b/c.dmg',
+              'size': 1,
+              'sha256': 'c' * 64,
+            },
           }),
         ),
       );

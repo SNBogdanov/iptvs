@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/device_class.dart';
 
 /// One optional control in the player's chrome.
 ///
@@ -34,6 +35,28 @@ enum PlayerControl {
     }
     return null;
   }
+}
+
+/// The controls this device can actually show.
+///
+/// Picture-in-picture is the one entry that depends on the device class rather
+/// than the platform alone: Windows draws it as the mini-player and Android as
+/// the system PiP window, while Android TV reports no PiP support at all and
+/// Linux/iOS have no mini-player to open ([hasPictureInPicture]).
+///
+/// [television] and [pictureInPicture] are injectable so the rule can be tested
+/// without a TV (and without depending on the host's `Platform`).
+List<PlayerControl> playerControlsForDevice({
+  bool? television,
+  bool? pictureInPicture,
+}) {
+  final tv = television ?? isTelevision;
+  final pip = !tv && (pictureInPicture ?? hasPictureInPicture);
+  if (pip) return PlayerControl.values;
+  return [
+    for (final control in PlayerControl.values)
+      if (control != PlayerControl.pip) control,
+  ];
 }
 
 /// Which of [PlayerControl] the user has switched off.
@@ -87,12 +110,14 @@ class PlayerControlsPrefs {
 
 /// Live mirror of the stored choice; the settings screen and every overlay read
 /// this, and nothing re-reads the keychain.
-final ValueNotifier<PlayerControlsPrefs> playerControlsPrefs =
-    ValueNotifier(const PlayerControlsPrefs());
+final ValueNotifier<PlayerControlsPrefs> playerControlsPrefs = ValueNotifier(
+  const PlayerControlsPrefs(),
+);
 
 /// Reads the stored choice into [playerControlsPrefs]. Called once at boot.
 Future<void> loadPlayerControlsPrefs({AppSettingsStore? store}) async {
-  final raw = await (store ?? const AppSettingsStore()).rawHiddenPlayerControls();
+  final raw = await (store ?? const AppSettingsStore())
+      .rawHiddenPlayerControls();
   playerControlsPrefs.value = PlayerControlsPrefs.decode(raw);
 }
 

@@ -20,6 +20,26 @@ bool _isTelevision = false;
 @visibleForTesting
 set debugIsTelevision(bool value) => _isTelevision = value;
 
+/// Whether the player implements the **touch gestures** these settings describe
+/// (the double-tap halves and the volume/brightness swipes).
+///
+/// Only the phone/tablet surfaces do: Android's Compose overlay and the iOS
+/// controller's Flutter overlay. A television has a remote, and a desktop
+/// overlay deliberately leaves the double **click** as "toggle fullscreen" (it
+/// is a pointer gesture users asked to keep), so offering either setting there
+/// switches on a gesture nothing reads.
+bool get hasTouchPlayerGestures =>
+    !isTelevision && (Platform.isAndroid || Platform.isIOS);
+
+/// Whether any surface on this build draws a **picture-in-picture** control.
+///
+/// Windows shrinks to its frameless mini-player and Android hands the stream to
+/// the system PiP window. Android TV advertises no PiP support (see
+/// `HdrPlayerActivity`), and the other platforms have no mini-player at all, so
+/// the toggle would switch on a control that can never be drawn.
+bool get hasPictureInPicture =>
+    !isTelevision && (Platform.isWindows || Platform.isAndroid);
+
 /// Resolves [isTelevision] from the platform. Call once, before the first
 /// frame; safe to call again (idempotent).
 ///

@@ -78,6 +78,12 @@ manual dispatch from minting a release for a tag that was never pushed.
 | var | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | cloud sync (empty in a plain fork → the feature stays off) |
 | secret | `GEMINI_API_KEY`, `DISCORD_RELEASE_WEBHOOK` | optional changelog / announcement |
 
+The two Supabase values are **repository variables**, and the release workflow now refuses to start
+without them: they are compiled in with `--dart-define`, so a missing one produces a build whose
+cloud feature is silently off — exactly what 1.0.1 shipped (the artifacts were healthy, the app just
+had no cloud). The `version` job fails with `::error::SUPABASE_URL is not configured…` before any
+build runs.
+
 The Android job fails when its keystore secrets are missing rather than publishing an unsigned APK.
 Windows needs **no secrets**: the MSI is not signed, it installs per-machine without certificate
 trust (see "Manifest and package signing"). Assets attached to the tag:
@@ -195,12 +201,22 @@ in-app updates are available only from a writable AppImage; `flutter run` and
 system-installed binaries fall back to the release page.
 - **`lib/screens/update_flow.dart`** — `runUpdateCheck(context, manual:)` drives prompt →
   download → install (the "Update available" dialog with **Skip this version / Later / Update**,
-  and the progress dialog). Entry points: a **manual** "Check for updates" `FocusableCard` on
-  `sources_screen.dart` (`_UpdateCard`), and a **throttled startup** check in `home_shell.dart`
+  and the progress dialog). Entry points: a **manual** "Check for updates" `FocusableCard` on the
+  **Help & about** page (`legal_screen.dart`, `_UpdateCard`) next to the GitHub update-track row,
+  and a **throttled startup** check in `home_shell.dart`
   (post-frame, release platforms only, honours the skipped version). Android records a verified
   APK before launching the system installer. Returning after an OEM Auto Blocker/settings detour,
   or recreating the app process, presents a **ready to install** prompt that reuses the cached APK;
   an already-upgraded app silently clears the pending record.
+- **`runReleaseInstall` — the way back from a development build.** A development build owns no
+  update lifecycle, so nothing ever offers it anything newer; the Help & about page therefore shows
+  **"This is a development build — install the latest published release"** instead of the track and
+  check rows. It reads `update.json` and compares **before downloading**:
+  `releaseInstallAllowed` is `release >= current` (a dev build is normally cut from the same tree as
+  the last release, so *equal* must be installable), and an **older** release is refused with a
+  snackbar rather than silently downgrading. The confirmed install reuses the same verified
+  download path; on Android the release is the `.direct` package, so it lands beside a `.dev` build
+  (the dialog says so), while Windows/Linux replace the installed copy in place.
 
 ## D-pad behaviour
 

@@ -275,6 +275,17 @@ bool isUpdateAllowed(
 bool isNewer(ReleaseInfo release, String current) =>
     compareVersions(release.version, current) > 0;
 
+/// Whether a **development** build may install this release.
+///
+/// Deliberately `>=` where [isUpdateAllowed] is `>`: a dev build is often the
+/// same version as the last release (it is cut from the same tree) or ahead of
+/// it, and "install the release" must still be possible for the equal case —
+/// that is the whole point of leaving a dev build. An **older** release is
+/// refused before anything is downloaded: silently downgrading is the one
+/// outcome that must never happen.
+bool releaseInstallAllowed(String releaseVersion, String current) =>
+    compareVersions(releaseVersion, current) >= 0;
+
 /// Throttle for the boot-time auto-check: run only if we've never checked or
 /// the last check was at least [minGap] ago. Pure so it's unit-testable.
 bool shouldAutoCheck(
