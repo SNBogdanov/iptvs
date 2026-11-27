@@ -94,7 +94,7 @@ void main() {
               favorite: false,
               onToggleFavorite: () {},
               onPlay: null,
-              onPlayEpisode: (_, __) {},
+              onPlayEpisode: (_, _) {},
             ),
           ),
         ),

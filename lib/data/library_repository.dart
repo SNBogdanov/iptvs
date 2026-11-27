@@ -1241,7 +1241,10 @@ class LibraryRepository {
         (provider) => !provider.ratingsOnly,
         orElse: () => metadataProviders.first,
       );
-      return cachedExternalMetadata(merged, provider.provider);
+      // `await` so a failure lands in the catch below (the lint's point): the
+      // caller sees a logged refresh error, not an unhandled future from a
+      // function that already reported success.
+      return await cachedExternalMetadata(merged, provider.provider);
     } catch (error) {
       _logMetadata('refresh error ${item.kind.name}:${item.id}: $error');
       rethrow;
