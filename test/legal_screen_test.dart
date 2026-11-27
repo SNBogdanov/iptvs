@@ -67,16 +67,16 @@ void main() {
     await tester.pump();
 
     expect(find.text('Updates'), findsOneWidget);
-    expect(find.text('This is a development build'), findsOneWidget);
+    expect(find.text('Return to release'), findsOneWidget);
     final card = tester.widget<FocusableCard>(
       find.ancestor(
-        of: find.text('This is a development build'),
+        of: find.text('Return to release'),
         matching: find.byType(FocusableCard),
       ),
     );
     expect(card.onTap, isNotNull);
-    // A development build has no update track or manual check: both belong to
-    // the direct updater.
+    // A developer build has no update track or manual check: both belong to
+    // the published updater.
     expect(find.text('Check for updates'), findsNothing);
     expect(find.text('GitHub update track'), findsNothing);
   });

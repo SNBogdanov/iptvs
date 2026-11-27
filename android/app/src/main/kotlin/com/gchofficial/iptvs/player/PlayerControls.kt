@@ -180,6 +180,9 @@ fun PlayerScreen(
 ) {
     val rootFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    // The bolt (auto-switch) button: the pace menu is opened by a long press on
+    // it, and closing that menu must hand focus back to it.
+    val zapFocus = remember { FocusRequester() }
     // The focus memory is process-wide (see [PlayerFocusMemory]); clear it when
     // this player goes away so the next session starts on play/pause.
     DisposableEffect(Unit) {
@@ -240,18 +243,32 @@ fun PlayerScreen(
     // every "hide, then bring it back" trip re-walk the row. A control that is no
     // longer in the ring (Go to live once live, the step pair on another route,
     // a menu that closed) fails `requestFocus` and the play button takes it.
+    //
+    // The *show* half runs inside [ControlsOverlay] instead of here: the bar is
+    // wrapped in an `AnimatedVisibility`, so on the frame the flag flips its
+    // children are composed but not yet placed, and a `requestFocus` made now
+    // fails silently — the bar then appeared with **no control focused at all**
+    // and the next OK landed on the first one. The overlay waits one frame in
+    // its own `LaunchedEffect`, by which point the buttons are placed.
     LaunchedEffect(state.controlsVisible) {
-        if (state.controlsVisible) {
-            val remembered = PlayerFocusMemory.last
-            val restored =
-                remembered != null && runCatching { remembered.requestFocus() }.isSuccess
-            if (!restored) runCatching { playFocus.requestFocus() }
-        } else {
+        if (!state.controlsVisible) {
             state.openMenu = PlayerMenu.None
             state.infoOpen = false
             state.dwellMenuOpen = false
             runCatching { rootFocus.requestFocus() }
         }
+    }
+
+    // The pace menu is a long press on the bolt; closing it — by choosing a
+    // period or by Back — hands focus back to that button instead of dropping it
+    // on nothing (the next OK then landed on the first control).
+    var dwellMenuWasOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(state.dwellMenuOpen) {
+        if (dwellMenuWasOpen && !state.dwellMenuOpen) {
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching { zapFocus.requestFocus() }
+        }
+        dwellMenuWasOpen = state.dwellMenuOpen
     }
 
     // The system reserves the strip along the very top for the notification
@@ -300,7 +317,12 @@ fun PlayerScreen(
         // Skipped in PiP: the tiny window shows video only, no control chrome.
         // Skipped with the quick list up for the same reason the root key
         // handler is: the list owns the screen until it is dismissed.
-        if (!state.inPip && !state.quickList.open) {
+        // A tap must not hide the chrome while a menu or the info panel is up.
+        // The pointer-up of the very long press that OPENED the pace menu
+        // otherwise landed on this layer and hid the chrome — and hiding the
+        // chrome closes every menu, so the list of periods flashed and vanished
+        // in the same instant. Panels are dismissed by Back or by choosing a row.
+        if (!state.inPip && !state.quickList.open && !state.pinned) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -498,7 +520,7 @@ fun PlayerScreen(
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
-            ControlsOverlay(state, callbacks, playFocus, nowMillis) { poke() }
+            ControlsOverlay(state, callbacks, playFocus, zapFocus, nowMillis) { poke() }
         }
 
         // What the corners keep while the chrome is down: the wall clock and,
@@ -580,9 +602,24 @@ private fun ControlsOverlay(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
+    zapFocus: FocusRequester,
     nowMillis: Long,
     onInteract: () -> Unit,
 ) {
+    // First composition == the bar just became visible. Wait one frame so the
+    // buttons are placed, then hand focus to the control the viewer had before
+    // (a requester from the *previous* bar instance is gone with it, so
+    // `requestFocus` fails and play/pause takes the ring). Requesting it in
+    // `PlayerScreen`'s effect instead ran on the same frame the `AnimatedVisibility`
+    // entered, when nothing was placed yet: the bar came up with no focused
+    // control, and the next OK landed on the first one.
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.withFrameNanos { }
+        val remembered = PlayerFocusMemory.last
+        val restored =
+            remembered != null && runCatching { remembered.requestFocus() }.isSuccess
+        if (!restored) runCatching { playFocus.requestFocus() }
+    }
     // The scrim stays full-bleed (it has to reach the screen edge to be readable
     // over the video), while the controls themselves are inset: the display
     // cutout is always excluded, and the system bars are excluded whenever a
@@ -602,7 +639,7 @@ private fun ControlsOverlay(
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
             TopBar(state, callbacks, nowMillis, onInteract)
             Spacer(Modifier.weight(1f))
-            BottomBar(state, callbacks, playFocus, nowMillis, onInteract)
+            BottomBar(state, callbacks, playFocus, zapFocus, nowMillis, onInteract)
         }
     }
 }
@@ -883,6 +920,7 @@ private fun BottomBar(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
+    zapFocus: FocusRequester,
     nowMillis: Long,
     onInteract: () -> Unit,
 ) {
@@ -962,7 +1000,7 @@ private fun BottomBar(
                         }
                         // The parent supplies the gaps, so skip the cluster's own
                         // inter-button spacers (`spread = true`).
-                        RightCluster(state, callbacks, playFocus, onInteract, spread = true)
+                        RightCluster(state, callbacks, playFocus, zapFocus, onInteract, spread = true)
                     }
                 }
             } else {
@@ -976,7 +1014,7 @@ private fun BottomBar(
                         VolumeSlider(state, callbacks, onInteract, Modifier.width(120.dp))
                     }
                     Spacer(Modifier.weight(1f))
-                    RightCluster(state, callbacks, playFocus, onInteract)
+                    RightCluster(state, callbacks, playFocus, zapFocus, onInteract)
                 }
             }
         }
@@ -1081,6 +1119,7 @@ private fun RightCluster(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
+    zapFocus: FocusRequester,
     onInteract: () -> Unit,
     spread: Boolean = false,
 ) {
@@ -1266,6 +1305,7 @@ private fun RightCluster(
         IconControlButton(
             icon = Icons.Filled.Bolt,
             contentDescription = "Auto-switch channels",
+            focusRequester = zapFocus,
             active = state.autoSwitchEnabled,
             // A long press is the *pace*: tap still toggles the mode, and the
             // number lives one gesture deeper rather than in an extra control.
@@ -1381,19 +1421,19 @@ fun IconControlButton(
  * live" is the only one — so the caller can hand focus somewhere else before it
  * goes; see [RightCluster].
  *
- * **A chip with a hold action is still a focus stop.** The hold path swaps
- * `clickable` for a raw pointer detector, and that does not make a node
- * focusable — which is why the aspect chip used to be skipped by the remote's
- * cursor. `focusable()` is applied on that path (with an Enter/Center handler
- * standing in for `clickable`'s OK action); the plain path keeps `clickable`,
- * whose focusability it must not duplicate.
+ * **A chip with a hold action is still a focus stop.** Every chip goes through
+ * `combinedClickable` — the same modifier [IconControlButton] uses — so the hold
+ * path keeps the focus target and the OK/Enter handling that `clickable`
+ * supplies. It used to be a raw `detectTapGestures` with a hand-applied
+ * `focusable()`: a pointer detector is not a focus node, and the remote walked
+ * straight past the aspect chip even with `focusable()` on it.
  *
  * [onHoldStart] / [onHoldEnd] add **press-and-hold** to a text chip. "Go to
  * live" is the one caller: a tap jumps to the edge by reloading, a hold plays the
- * stream faster until it catches up. The hold is detected by the tap detector's
- * own `onLongPress`; a second, passive pointer loop only reports when the finger
- * lifts, because `detectTapGestures` has no "long press ended" callback and the
- * speed must not stay raised after the user lets go.
+ * stream faster until it catches up. The hold is `combinedClickable`'s own
+ * `onLongClick`; a second, passive pointer loop only reports when the finger
+ * lifts, because there is no "long press ended" callback and the speed must not
+ * stay raised after the user lets go.
  */
 @Composable
 fun TextControlButton(
@@ -1420,24 +1460,30 @@ fun TextControlButton(
     val tapHandler = rememberUpdatedState(onClick)
     val holdStartHandler = rememberUpdatedState(onHoldStart)
     val holdEndHandler = rememberUpdatedState(onHoldEnd)
+    // **One press mechanism for every chip**, `combinedClickable` — the same
+    // modifier [IconControlButton] uses. It supplies the focus target *and* the
+    // OK/Enter key handling that `clickable` would, which is exactly what the
+    // aspect chip lost while this path was a raw `detectTapGestures` plus a
+    // hand-applied `focusable()`: a pointer detector is not a focus node, and
+    // the remote walked straight past the chip even after `focusable()` was
+    // bolted on. `onLongClick` is the hold.
     val press = if (onHoldStart == null) {
         Modifier.clickable(onClick = { tapHandler.value() })
     } else {
         Modifier
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { tapHandler.value() },
-                    onLongPress = { holdStartHandler.value?.invoke() },
-                )
-            }            .then(
+            .combinedClickable(
+                onClick = { tapHandler.value() },
+                onLongClick = { holdStartHandler.value?.invoke() },
+            )
+            .then(
                 if (onHoldEnd == null) {
                     Modifier
                 } else {
+                    // Passive: never consumes, so `combinedClickable` above still
+                    // owns the gesture. It only watches for the press to end —
+                    // `onLongClick` has no "released" callback, and the held
+                    // speed must not outlive the hold.
                     Modifier.pointerInput(Unit) {
-                        // Passive: never consumes, so the tap detector above
-                        // still owns the gesture. It only watches for the press
-                        // to end — `detectTapGestures` has no "long press ended"
-                        // callback, and the held speed must not outlive the hold.
                         awaitEachGesture {
                             awaitFirstDown(requireUnconsumed = false)
                             while (true) {
@@ -1450,29 +1496,6 @@ fun TextControlButton(
                 },
             )
     }
-    // **A raw pointer detector does not make a node focusable.** The hold path
-    // replaces `clickable` with `detectTapGestures`, so the aspect chip (and
-    // "Go to live") silently dropped out of D-pad traversal — the remote walked
-    // straight past them. `focusable()` restores the stop, and the key handler
-    // is the OK action `clickable` would otherwise have supplied.
-    val focusKeys = if (onHoldStart == null) {
-        Modifier
-    } else {
-        Modifier
-            .onPreviewKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown &&
-                    (e.key == Key.DirectionCenter ||
-                        e.key == Key.Enter ||
-                        e.key == Key.NumPadEnter)
-                ) {
-                    tapHandler.value()
-                    true
-                } else {
-                    false
-                }
-            }
-            .focusable()
-    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
@@ -1480,7 +1503,6 @@ fun TextControlButton(
             .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
             .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
             .focusRequester(ownRequester)
-            .then(focusKeys)
             // A pinned aspect is the one control carrying a non-default,
             // per-item choice: the accent border is how the viewer sees that
             // *this* channel is framed differently from the global mode.

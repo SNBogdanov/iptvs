@@ -41,26 +41,22 @@ void main() {
     }
   });
 
-  test('release publishes the Linux AppImage in the update manifest', () {
+  test('release does not publish a Linux AppImage', () {
+    // This fork ships and supports only Windows and Android. The AppImage
+    // packaging script stays for a local build, but no release job builds it and
+    // `update.json` carries no `linux` key — otherwise a release would advertise
+    // a target nobody tests.
     final workflow = File('.github/workflows/release.yml').readAsStringSync();
-    expect(workflow, contains('build-linux:'));
-    expect(workflow, contains('linux-x86_64.AppImage'));
-    // `update.json` carries one object per platform under a lowercase key; the
-    // Linux one is `linux`, pointing at the AppImage (`lib/data/update_manifest.dart`).
+    expect(workflow, isNot(contains('build-linux:')));
+    expect(workflow, isNot(contains('linux-x86_64.AppImage')));
+    expect(workflow, isNot(contains(r'--argjson linux')));
     expect(
       workflow,
-      contains('dist/iptvs-\$VERSION-linux-x86_64.AppImage'),
+      isNot(contains('releases/download/12/appimagetool-x86_64.AppImage')),
     );
-    expect(workflow, contains(r'--argjson linux'));
-    // The manifest is unsigned now: no Ed25519 key is consumed or compiled in.
-    expect(workflow, isNot(contains('UPDATE_MANIFEST_PUBLIC_KEY')));
-    expect(workflow, isNot(contains('platform:"linux-x86_64"')));
-    expect(
-      workflow,
-      contains('releases/download/12/appimagetool-x86_64.AppImage'),
-    );
-    expect(workflow, contains('releases/download/20251108/runtime-x86_64'));
-    expect(workflow, isNot(contains('releases/download/continuous/')));
+    expect(workflow, isNot(contains('releases/download/20251108/runtime-x86_64')));
+    // The packaging script itself is still available for a local build.
+    expect(File('tool/package_linux_appimage.sh').existsSync(), isTrue);
   });
 
   test('CI no longer bundles a build-time mpv into the AppImage', () {

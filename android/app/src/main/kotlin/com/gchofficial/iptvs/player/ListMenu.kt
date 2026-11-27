@@ -163,6 +163,11 @@ fun ListMenu(
     val selectedIndex = options.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
 
     LaunchedEffect(header) {
+        // The menu is composed the frame it opens; its rows are placed one frame
+        // later. Requesting focus in the same frame fails silently, which is
+        // exactly "the buttons are shown but none is selected" — the same class
+        // of bug the control bar had.
+        androidx.compose.runtime.withFrameNanos { }
         runCatching { firstFocus.requestFocus() }
     }
 

@@ -4801,6 +4801,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             _stepChannel(1),
         const SingleActivator(LogicalKeyboardKey.channelDown): () =>
             _stepChannel(-1),
+        // Some remotes report the channel rocker as media next/previous.
+        const SingleActivator(LogicalKeyboardKey.mediaTrackNext): () =>
+            _stepChannel(1),
+        const SingleActivator(LogicalKeyboardKey.mediaTrackPrevious): () =>
+            _stepChannel(-1),
       },
       child: LiveTabView(
         loading: _live.loading,

@@ -972,6 +972,22 @@ and the cross-source Favorites launch range has no single "whole source" to fall
 number no channel in range carries shows "No channel `N`" in the banner and leaves playback
 untouched, exactly like a miss in the live tab.
 
+#### Boxes that never deliver the rocker
+
+Some Android TV boxes consume `CHANNEL_UP`/`CHANNEL_DOWN` in the system layer: the keys never reach
+`dispatchKeyEvent`, so no ordinary app can bind them. (Verified on a 4K dongle: a key test shows
+`channel_up`/`channel_down` only for an app holding the Accessibility "extended access" permission,
+and Sparkle TV without it sees nothing either — same as this player.) That is a platform limit, not
+a gap in `ZapKeyPolicy`, and it is not worth an `AccessibilityService` of our own: such a service
+receives *all* input and has to be granted by the user.
+
+The supported workaround is an external per-app remapper (Key Mapper, Button Mapper): map the
+rocker to **`MEDIA_NEXT` / `MEDIA_PREVIOUS`**. Those are already bound on both surfaces —
+`ZapKeyPolicy` treats 87/88 as channel up/down, and the live tab binds
+`LogicalKeyboardKey.mediaTrackNext` / `mediaTrackPrevious` — so one mapping works in the channel
+list *and* in fullscreen, on live and on VOD (where the same commands step titles). Mapping to
+`PAGE_UP`/`PAGE_DOWN` also works in the player, but not in the list.
+
 ### Linux's key map (the Lua OSD, implemented)
 
 `linux/mpv/iptvs_overlay.lua`'s `zap_key_command` is the same rule set again, in mpv's own key

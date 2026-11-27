@@ -240,7 +240,20 @@ class HdrPlayerActivity : ComponentActivity() {
             isRepeat = event.repeatCount > 0,
             quickListOpen = quickListOpen(),
         )
-        if (!decision.consumed) return false
+        if (!decision.consumed) {
+            // Diagnostic, on screen instead of in a log: a remote whose channel
+            // rocker does nothing must not be indistinguishable from a key that
+            // never reached the window. A candidate "next/previous" code that
+            // the policy did not claim is echoed in the zap banner for a moment,
+            // so the viewer can read the number off the TV. D-pad moves, Back
+            // and the digit keys are far too common to echo.
+            if (isChannelKeyCandidate(event.keyCode)) {
+                uiState.zapMessage = "key ${event.keyCode}"
+                uiState.zapBannerVisible = true
+                uiState.zapBannerAtMs = System.currentTimeMillis()
+            }
+            return false
+        }
         zapConsumedKeyCode = event.keyCode
         // A digit keeps the banner up while the number is being typed; the
         // authoritative buffer still comes back from Dart on `setZapBanner`,
@@ -266,6 +279,26 @@ class HdrPlayerActivity : ComponentActivity() {
             sendZap(command)
         }
         return true
+    }
+
+    /**
+     * Whether a key code is one a remote might use for "next/previous channel"
+     * — the set worth echoing in the banner when the policy does not claim it.
+     *
+     * Deliberately excludes the D-pad, Back and the digit row: those are every
+     * ordinary press, and echoing them would turn the banner into a key logger.
+     */
+    private fun isChannelKeyCandidate(code: Int): Boolean = when (code) {
+        KeyEvent.KEYCODE_CHANNEL_UP,
+        KeyEvent.KEYCODE_CHANNEL_DOWN,
+        KeyEvent.KEYCODE_MEDIA_NEXT,
+        KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+        KeyEvent.KEYCODE_GUIDE,
+        KeyEvent.KEYCODE_LAST_CHANNEL,
+        KeyEvent.KEYCODE_PAGE_UP,
+        KeyEvent.KEYCODE_PAGE_DOWN,
+        -> true
+        else -> false
     }
 
     /**

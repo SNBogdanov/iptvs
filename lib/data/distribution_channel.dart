@@ -49,6 +49,21 @@ class DistributionConfig {
   static final channel = parseDistributionChannel(rawChannel);
 
   static bool get directUpdaterEnabled => channel.ownsDirectUpdates;
+
+  /// Whether this binary is a **developer build**: an iteration build made to
+  /// test a change, not the published release.
+  ///
+  /// Compile-time, because a release-mode iteration APK is otherwise
+  /// indistinguishable from a published one — same package id, same release
+  /// signing key, and the same version name while a release is being prepared.
+  /// Iteration builds pass `--dart-define=IPTVS_DEV_BUILD=true`; the release
+  /// pipeline never does.
+  ///
+  /// It changes the About page, not the update plumbing: a developer build shows
+  /// **"Return to release"** instead of "Check for updates", so the tester can
+  /// install the release cut from the very build they just debugged — including
+  /// when it carries the same version number.
+  static const bool devBuild = bool.fromEnvironment('IPTVS_DEV_BUILD');
 }
 
 /// GitHub-direct users may opt into signed prereleases.

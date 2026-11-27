@@ -60,8 +60,18 @@
          "any version >= this one", so an OLDER package would happily remove a
          newer install and downgrade. Without it, a newer version is detected by
          the downgrade row and refused; re-running the very same MSI is still a
-         maintenance install (same ProductCode). -->
+         maintenance install (same ProductCode).
+
+         `Schedule="afterInstallExecute"`: the default (afterInstallValidate)
+         removes the old product **before** the new one is installed, so every
+         upgrade deleted the Start Menu and Desktop shortcuts and then recreated
+         them — the icons visibly blinked, and a shortcut pinned or moved by the
+         user lost its place. Installing first and removing afterwards leaves
+         them alone: the shortcut components below carry **permanent GUIDs**, so
+         the old product's uninstall finds the same component still registered by
+         the new one and leaves its files and registry values in place. -->
     <MajorUpgrade
+      Schedule="afterInstallExecute"
       DowngradeErrorMessage="A newer version of IPTVS Player is already installed. Setup will now exit." />
 
     <MediaTemplate EmbedCab="yes" />
@@ -94,7 +104,7 @@
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="IPTVS Player">
-        <Component Id="StartMenuShortcut" Guid="*">
+        <Component Id="StartMenuShortcut" Guid="CD280A48-56EA-59E3-989C-5A5FA1639607">
           <Shortcut
             Id="StartMenuShortcut"
             Name="IPTVS Player"
@@ -114,7 +124,7 @@
     </StandardDirectory>
 
     <StandardDirectory Id="DesktopFolder">
-      <Component Id="DesktopShortcut" Guid="*">
+      <Component Id="DesktopShortcut" Guid="DC91130C-0DEE-5028-A8CE-B58E31B6065D">
         <Shortcut
           Id="DesktopShortcut"
           Name="IPTVS Player"
@@ -132,7 +142,7 @@
     </StandardDirectory>
 
     <!-- Where the elevated updater helper relaunches from. -->
-    <Component Id="InstallDirRegistry" Directory="INSTALLFOLDER" Guid="*">
+    <Component Id="InstallDirRegistry" Directory="INSTALLFOLDER" Guid="7AF6EAED-9B7A-52B5-9D27-FA87DB713CF2">
       <RegistryValue
         Root="HKLM"
         Key="SOFTWARE\SNBogdanov\IPTVS"

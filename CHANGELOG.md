@@ -11,6 +11,44 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-27
+
+### Fixed
+
+- **A Windows update no longer deletes the shortcuts to recreate them.** The installer now removes
+  the previous version *after* installing the new one (`RemoveExistingProducts` scheduled
+  `afterInstallExecute`) and the shortcut components carry the permanent GUIDs every earlier release
+  already used, so an upgrade overwrites the `.lnk` in place instead of removing it first — desktop
+  and Start Menu shortcuts (including pinned or moved ones) no longer blink or lose their place.
+- **The player's control bar restores focus when it reappears**, instead of coming back with no
+  control highlighted and sending the next OK to the first button: the request used to race the
+  fade-in and silently fail.
+- **The auto-switch pace menu opens with its current row focused, and hands focus back to the
+  zapping button when it closes** (both on choosing a period and on Back).
+- **A tap no longer hides the chrome — and with it every open menu — while a panel is up.** The
+  pointer-up of the long press that opened the pace menu used to land on the tap layer, which closed
+  the menu it had just opened (the list of periods flashed and vanished).
+- **The aspect-ratio chip is reachable by the D-pad again.** It was the one chip drawn through a raw
+  pointer detector plus a hand-applied `focusable()`, which is not a focus stop the remote can walk
+  onto; it now uses `combinedClickable` like every other control.
+- `CH+`/`CH−` are also accepted as `MEDIA_NEXT`/`MEDIA_PREVIOUS` (player and channel list), which is
+  what some remotes send. Boxes that swallow the channel keys before any app sees them need an
+  external key remapper — documented in `docs/tv-navigation.md`.
+- **The release pipeline is pinned to Flutter `3.47.5`** instead of `3.44.5`: the older engine
+  repainted the UI incompletely on a 32-bit Android TV box (parts of the interface flickering while
+  moving with the remote), which the newer engine does not.
+
+### Changed
+
+- **Linux is no longer published.** The fork ships and supports Windows and Android only, so
+  `release.yml` builds no AppImage and `update.json` carries no `linux` key; the packaging script
+  stays for a local build. Publishing a target nobody tests made every release claim support it did
+  not have.
+- **Developer builds show "Return to release"** in Help & about (with
+  `--dart-define=IPTVS_DEV_BUILD=true`): they are signed with the release key and carry the release
+  package id, so the published release installs over them — including at the same version number.
+  The release pipeline never sets that define.
+
 ## [1.0.2] - 2026-11-27
 
 ### Changed
@@ -19,10 +57,12 @@ each release's notes also appear on GitHub Releases. New work lands under
   update track now sit at the top of the Help page — where a user looks to ask "is my app current" —
   instead of being buried under the provider accounts on the Sources screen. The gate is unchanged:
   only GitHub-direct builds show them.
-- **A development build can now install the published release from inside the app.** Its Help page
-  shows "This is a development build — install the latest published release"; the release version is
-  checked against the running build **before** anything is downloaded, and an older release is
-  refused instead of silently downgrading.
+- **A developer build can now return to the published release from inside the app.** Iteration
+  builds (`--dart-define=IPTVS_DEV_BUILD=true`) and `.dev` builds show **"Return to release"** on the
+  Help page instead of "Check for updates"; the release version is checked against the running build
+  **before** anything is downloaded (`release >= current`, so the release cut from the very build
+  being tested installs even at the same version), and an older release is refused instead of
+  silently downgrading.
 - **Settings only offer what the device can do.** The double-tap gesture is hidden on a television
   (remote only) and on desktop (where a double *click* still toggles fullscreen and the setting is
   never read); the volume/brightness swipes stay Android-phone only; and the picture-in-picture
@@ -369,6 +409,7 @@ each release's notes also appear on GitHub Releases. New work lands under
   maximized window and a window hidden to the tray across a display sleep/wake.
 - Windows: Back/Escape can close playback while "Reconnecting..." is shown.
 
-[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.2...main
+[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.3...main
+[1.0.3]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.3
 [1.0.2]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.2
 [1.0.1]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.1

@@ -1,8 +1,8 @@
 # In-app updates — full detail
 
 The app self-updates from its own **GitHub Releases** (`SNBogdanov/iptvs`; the `release.yml`
-pipeline attaches `iptvs-<ver>-android.apk`, `iptvs-<ver>.msi`, `iptvs-<ver>-linux-x86_64.AppImage`
-and an **`update.json`** manifest to a `v<ver>` tag).
+pipeline attaches `iptvs-<ver>-android.apk`, `iptvs-<ver>.msi` and an **`update.json`** manifest to a
+`v<ver>` tag).
 The compact rules live in CLAUDE.md; read this before changing the update flow, the release
 pipeline, or the update dialog.
 
@@ -15,10 +15,14 @@ signature — the trust anchor is HTTPS to GitHub plus the per-file hash):
   "version": "1.2.3",
   "minimum_version": "1.0.0",
   "windows": {"url": "…/iptvs-1.2.3.msi", "size": 73422891, "sha256": "…"},
-  "android": {"url": "…/iptvs-1.2.3.apk", "size": 55123456, "sha256": "…"},
-  "linux":   {"url": "…/iptvs-1.2.3.AppImage", "size": 81234567, "sha256": "…"}
+  "android": {"url": "…/iptvs-1.2.3.apk", "size": 55123456, "sha256": "…"}
 }
 ```
+
+**There is no `linux` entry, and this fork publishes no Linux build**: Linux is untested here, so no
+AppImage is produced for a release (`tool/package_linux_appimage.sh` remains for a local build). The
+client still knows the `linux` key — a manifest that carries one would be accepted — it simply never
+receives one.
 
 There is no `windows.cert`: an MSI needs no publisher trust to install. The old field named the
 certificate the updater imported into `Cert:\LocalMachine\TrustedPeople` before `Add-AppxPackage`;
@@ -87,8 +91,8 @@ build runs.
 The Android job fails when its keystore secrets are missing rather than publishing an unsigned APK.
 Windows needs **no secrets**: the MSI is not signed, it installs per-machine without certificate
 trust (see "Manifest and package signing"). Assets attached to the tag:
-`iptvs-<ver>-android.apk`, `iptvs-<ver>.msi`, `iptvs-<ver>-linux-x86_64.AppImage`, and
-`update.json`. Nothing signs the manifest any more — the Ed25519 secrets and the
+`iptvs-<ver>-android.apk`, `iptvs-<ver>.msi` and `update.json` — no Linux AppImage (see above).
+Nothing signs the manifest any more — the Ed25519 secrets and the
 `UPDATE_MANIFEST_PUBLIC_KEY` variable are gone, together with the `--dart-define` that embedded the
 public key.
 
@@ -194,11 +198,11 @@ the final install step is the only platform-specific part.
   upgrades **in place**: `MajorUpgrade` with the package's permanent `UpgradeCode` removes the
   previous version in the same transaction, so the old install never coexists with the new one and
   a failed install rolls back to it. `flutter run` and an unpacked folder are not what the MSI
-  upgrades, so they fall back to the release page. **Linux** copies the verified AppImage beside the
-running `APPIMAGE`, then a detached POSIX helper waits for our PID, atomically
-swaps the file, relaunches it, and restores the backup if startup fails. Linux
-in-app updates are available only from a writable AppImage; `flutter run` and
-system-installed binaries fall back to the release page.
+  upgrades, so they fall back to the release page. **Linux** is not published, but the client code still handles a `linux` manifest entry
+for anyone building the AppImage locally: it copies the verified AppImage beside the running
+`APPIMAGE`, then a detached POSIX helper waits for our PID, atomically swaps the file, relaunches
+it, and restores the backup if startup fails; in-app updates are available only from a writable
+AppImage.
 - **`lib/screens/update_flow.dart`** — `runUpdateCheck(context, manual:)` drives prompt →
   download → install (the "Update available" dialog with **Skip this version / Later / Update**,
   and the progress dialog). Entry points: a **manual** "Check for updates" `FocusableCard` on the
@@ -208,15 +212,19 @@ system-installed binaries fall back to the release page.
   APK before launching the system installer. Returning after an OEM Auto Blocker/settings detour,
   or recreating the app process, presents a **ready to install** prompt that reuses the cached APK;
   an already-upgraded app silently clears the pending record.
-- **`runReleaseInstall` — the way back from a development build.** A development build owns no
-  update lifecycle, so nothing ever offers it anything newer; the Help & about page therefore shows
-  **"This is a development build — install the latest published release"** instead of the track and
-  check rows. It reads `update.json` and compares **before downloading**:
-  `releaseInstallAllowed` is `release >= current` (a dev build is normally cut from the same tree as
-  the last release, so *equal* must be installable), and an **older** release is refused with a
-  snackbar rather than silently downgrading. The confirmed install reuses the same verified
-  download path; on Android the release is the `.direct` package, so it lands beside a `.dev` build
-  (the dialog says so), while Windows/Linux replace the installed copy in place.
+- **`runReleaseInstall` — "Return to release" on a developer build.** A build made for testing
+  (`--dart-define=IPTVS_DEV_BUILD=true`, see `DistributionConfig.devBuild`; the release pipeline
+  never sets it) is signed with the release key and carries the release package id, so the published
+  release installs **over** it. Its Help & about page therefore shows **"Return to release"**
+  instead of the track and check rows: the question there is not "is something newer" but "put me
+  back on the release", which must work **at the same version number** — that is exactly the
+  workflow of installing an iteration APK, finding and fixing a bug, cutting the release, and then
+  returning to it from the device. A `.dev` build (development channel) shows the same card, for the
+  same reason; on Android its release lands beside the `.dev` app rather than over it.
+
+  It reads `update.json` and compares **before downloading**: `releaseInstallAllowed` is
+  `release >= current`, and an **older** release is refused with a snackbar rather than silently
+  downgrading. The confirmed install reuses the same verified download path.
 
 ## D-pad behaviour
 

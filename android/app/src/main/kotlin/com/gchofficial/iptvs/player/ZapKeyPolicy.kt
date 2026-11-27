@@ -106,6 +106,9 @@ object ZapKeyPolicy {
     const val KEYCODE_NUMPAD_ENTER = 160
     const val KEYCODE_CHANNEL_UP = 166
     const val KEYCODE_CHANNEL_DOWN = 167
+    // Some remote rockers report these instead of CHANNEL_UP/DOWN.
+    const val KEYCODE_MEDIA_NEXT = 87
+    const val KEYCODE_MEDIA_PREVIOUS = 88
     const val KEYCODE_GUIDE = 172
     const val KEYCODE_LAST_CHANNEL = 229
 
@@ -176,6 +179,15 @@ const val ZAP_PAGE_ROWS = 39
             KEYCODE_CHANNEL_UP ->
                 return ZapKeyDecision(ZapKeyAction.ChannelUp)
             KEYCODE_CHANNEL_DOWN ->
+                return ZapKeyDecision(ZapKeyAction.ChannelDown)
+            // A remote whose channel rocker reports MEDIA_NEXT/PREVIOUS instead
+            // of CHANNEL_UP/DOWN (common on Android TV boxes) means exactly the
+            // same thing on a live stream: those keys have no other job here —
+            // VOD stepping is a command of its own — so they are the same
+            // gesture, not a second feature.
+            KEYCODE_MEDIA_NEXT ->
+                return ZapKeyDecision(ZapKeyAction.ChannelUp)
+            KEYCODE_MEDIA_PREVIOUS ->
                 return ZapKeyDecision(ZapKeyAction.ChannelDown)
             // The page keys run **against** the channel keys, and deliberately:
             // Page Down is "step forward" to a remote, the same gesture as a

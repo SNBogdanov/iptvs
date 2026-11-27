@@ -171,8 +171,8 @@ Future<bool?> showDevelopmentReleaseDialog(
       backgroundColor: AppColors.panelHi,
       title: Text('Install release ${release.version}?'),
       content: Text(
-        'This is a development build ($current).\n\n'
-        'IPTVS Player ${release.version} is the latest published release. It is '
+        'This is a developer build ($current).\n\n'
+        'IPTVS Player ${release.version} is the published release. It is '
         'downloaded from GitHub and checked against its published size and '
         'SHA-256 before installation.'
         '${android ? '\n\nOn Android the release installs as a separate app '

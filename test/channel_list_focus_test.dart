@@ -99,8 +99,16 @@ void main() {
   // a single source — so it stays empty and that view never appears.
   final store = SourceStore();
 
-  Future<void> pumpUntil(WidgetTester tester, Finder until) async {
-    for (var i = 0; i < 60; i++) {
+  Future<void> pumpUntil(
+    WidgetTester tester,
+    Finder until, {
+    // A ceiling, not a delay: the loop leaves as soon as the target appears.
+    // The default covers a normal ingest; a *replacement* source ingests again
+    // and, on a loaded machine, that can outlast it — the failure then reads as
+    // "Found 0 widgets" even though the app is only slower.
+    int attempts = 60,
+  }) async {
+    for (var i = 0; i < attempts; i++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
       );
@@ -940,6 +948,21 @@ void main() {
     );
     await pumpUntil(tester, find.text('1 - Big Buck Bunny (H.264)'));
 
+    // Let the first source's ingest **settle** before replacing it. The row
+    // appears as soon as the catalogue is committed, while the controller's own
+    // now/next refresh and its transaction are still in flight; disposing that
+    // controller mid-transaction makes sqflite park the replacement's first
+    // query on the lock ("database has been locked for 0:00:10") and, under
+    // load, the two have wedged against each other until the test timed out.
+    // Production hits this path on a source switch, seconds after a load, never
+    // in the same frame.
+    for (var i = 0; i < 25; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+
     final replacementRepo = LibraryRepository(source: _ManySource(), db: db);
     await tester.pumpWidget(
       MaterialApp(
@@ -950,7 +973,7 @@ void main() {
         ),
       ),
     );
-    await pumpUntil(tester, find.text('1 - Channel 0'));
+    await pumpUntil(tester, find.text('1 - Channel 0'), attempts: 300);
 
     expect(find.text('1 - Channel 0'), findsOneWidget);
     expect(find.text('1 - Big Buck Bunny (H.264)'), findsNothing);

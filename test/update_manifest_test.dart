@@ -154,13 +154,21 @@ void main() {
       expect(workflow, contains('> dist/update.json'));
       expect(workflow, contains(r'--arg version "$VERSION"'));
       expect(workflow, contains(r'--arg minimum "$MINIMUM_UPDATE_VERSION"'));
-      for (final key in ['android', 'windows', 'linux']) {
+      // Only the platforms this fork publishes. A missing platform key is
+      // skipped by the client's tolerant parser, so the absence of `linux` is
+      // safe for a client that used to receive one.
+      for (final key in ['android', 'windows']) {
         expect(
           workflow,
           contains('--argjson $key'),
           reason: 'update.json must carry the $key platform key',
         );
       }
+      expect(
+        workflow,
+        isNot(contains(r'--argjson linux')),
+        reason: 'Linux is not published, so update.json must not name it',
+      );
       // Absolute, tag-pinned URLs: the manifest names the build it was made from.
       expect(
         workflow,

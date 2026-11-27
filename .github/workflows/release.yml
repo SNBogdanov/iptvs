@@ -2,10 +2,14 @@ name: Release
 
 # Cut a release by pushing a tag like `v1.2.3`, or run manually (workflow_dispatch)
 # with a version — a manual run creates the tag itself (see "Ensure the release
-# tag exists"), because the publish step verifies it. Builds Windows (MSI),
-# Linux (AppImage), and Android (APK) and publishes a GitHub Release with
-# the artifacts attached, an `update.json` the app's updater reads, and
-# auto-generated notes.
+# tag exists"), because the publish step verifies it. Builds Windows (MSI) and
+# Android (APK) and publishes a GitHub Release with the artifacts attached, an
+# `update.json` the app's updater reads, and auto-generated notes.
+#
+# There is deliberately **no Linux job**: this fork ships and supports only
+# Windows and Android. `tool/package_linux_appimage.sh` still exists for a local
+# build, but nothing Linux is published and `update.json` carries no `linux`
+# key (the client skips a missing platform key).
 on:
   push:
     tags: ['v*']
@@ -27,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  FLUTTER_VERSION: 3.44.5
+  FLUTTER_VERSION: 3.47.5
   MINIMUM_UPDATE_VERSION: 0.1.0
 
 jobs:
@@ -189,55 +193,9 @@ jobs:
           path: iptvs-${{ needs.version.outputs.version }}.msi
           if-no-files-found: error
 
-  build-linux:
-    name: Build Linux AppImage
-    needs: version
-    # The AppImage no longer bundles mpv (Noble's system mpv is 0.37, which has
-    # no Wayland HDR and exits on --target-colorspace-hint=auto, added in 0.41)
-    # — LinuxNativeSession discovers and version-gates the *host's* mpv at
-    # runtime (>=0.40 required, 0.41 recommended) and falls back to the
-    # embedded media_kit/libmpv SDR path otherwise. `mpv` stays installed here
-    # only so the embedded fallback build has libmpv-dev to link against.
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-      - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev mpv libsecret-1-dev libepoxy-dev
-      - run: flutter config --enable-linux-desktop
-      - run: flutter pub get
-      - name: Build release (Linux x86-64)
-        run: flutter build linux --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
-      - name: Fetch pinned linuxdeploy
-        run: |
-          curl -fL --retry 3 -o "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage
-          echo '4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a  '${RUNNER_TEMP}'/linuxdeploy-x86_64.AppImage' | sha256sum --check
-          chmod +x "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage"
-          curl -fL --retry 3 -o "$RUNNER_TEMP/appimagetool-x86_64.AppImage" https://github.com/AppImage/AppImageKit/releases/download/12/appimagetool-x86_64.AppImage
-          echo 'd918b4df547b388ef253f3c9e7f6529ca81a885395c31f619d9aaf7030499a13  '${RUNNER_TEMP}'/appimagetool-x86_64.AppImage' | sha256sum --check
-          chmod +x "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
-          curl -fL --retry 3 -o "$RUNNER_TEMP/runtime-x86_64" https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
-          echo '2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  '${RUNNER_TEMP}'/runtime-x86_64' | sha256sum --check
-      - name: Package AppImage
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: '1'
-          LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
-          APPIMAGETOOL: ${{ runner.temp }}/appimagetool-x86_64.AppImage
-          APPIMAGE_RUNTIME_FILE: ${{ runner.temp }}/runtime-x86_64
-        run: ./tool/package_linux_appimage.sh ${{ needs.version.outputs.version }} build/linux/x64/release/bundle
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: linux
-          path: iptvs-${{ needs.version.outputs.version }}-linux-x86_64.AppImage
-          if-no-files-found: error
-
   release:
     name: Publish GitHub Release
-    needs: [version, build-android, build-windows, build-linux]
+    needs: [version, build-android, build-windows]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -274,8 +232,7 @@ jobs:
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           android="dist/iptvs-$VERSION-android.apk"
           windows="dist/iptvs-$VERSION.msi"
-          linux="dist/iptvs-$VERSION-linux-x86_64.AppImage"
-          for artifact in "$android" "$windows" "$linux"; do
+          for artifact in "$android" "$windows"; do
             if [ ! -f "$artifact" ]; then
               echo "::error::Missing release artifact: $artifact"
               exit 1
@@ -298,8 +255,7 @@ jobs:
             --arg minimum "$MINIMUM_UPDATE_VERSION" \
             --argjson android "$(entry "$(basename "$android")" "$android")" \
             --argjson windows "$windows_entry" \
-            --argjson linux "$(entry "$(basename "$linux")" "$linux")" \
-            '{version: $version, minimum_version: $minimum, android: $android, windows: $windows, linux: $linux}' \
+            '{version: $version, minimum_version: $minimum, android: $android, windows: $windows}' \
             > dist/update.json
           cat dist/update.json
       # A short human-readable changelog generated by Gemini from the commit

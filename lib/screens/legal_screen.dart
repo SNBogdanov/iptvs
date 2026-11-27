@@ -71,21 +71,29 @@ class LegalScreen extends StatelessWidget {
                 // action. Hidden entirely for builds that do not own their
                 // updates (development, AltStore) — the same gate the installer
                 // and the startup check use.
-                if (DistributionConfig.directUpdaterEnabled ||
+                if (DistributionConfig.devBuild ||
                     DistributionConfig.channel.offersReleaseInstall) ...[
                   const Text(
                     'Updates',
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
-                  if (DistributionConfig.directUpdaterEnabled) ...[
-                    const _UpdateTrackCard(),
-                    const SizedBox(height: 8),
-                    const _UpdateCard(),
-                  ] else
-                    // A development build: no updater of its own, but this is
-                    // the way back to the published release.
-                    const _ReleaseInstallCard(),
+                  // A developer build — an iteration APK or a `.dev` build — is
+                  // not the published release, so the question is not "is there
+                  // something newer" but "put me back on the release". Same card
+                  // for both: the action and the version rule are identical
+                  // (`runReleaseInstall` installs an equal or newer release).
+                  const _ReleaseInstallCard(),
+                  const SizedBox(height: 16),
+                ] else if (DistributionConfig.directUpdaterEnabled) ...[
+                  const Text(
+                    'Updates',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  const _UpdateTrackCard(),
+                  const SizedBox(height: 8),
+                  const _UpdateCard(),
                   const SizedBox(height: 16),
                 ],
                 _LinkCard(
@@ -448,9 +456,9 @@ class _ReleaseInstallCardState extends State<_ReleaseInstallCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('This is a development build'),
+                  const Text('Return to release'),
                   Text(
-                    'Install the latest published release',
+                    'Developer build — install the published release',
                     style: const TextStyle(
                       fontSize: 12,
                       color: AppColors.textLo,

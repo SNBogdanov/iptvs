@@ -62,15 +62,17 @@ element can't.
 |----------|--------|
 | Windows (x64) | Supported — native D3D11 HDR path |
 | Android phone / **Android TV** | Supported — single universal APK |
-| Linux x86-64 | Supported — AppImage, libmpv hardware decode, signed GitHub-direct updates |
+| Linux x86-64 | **Not supported** — builds from source (libmpv), untested, not published |
 | macOS / iOS | Builds via Flutter; not a focus / untested |
 
 ## Download
 
 Every artifact comes from this fork's [**Releases**](https://github.com/SNBogdanov/iptvs/releases)
-page: the universal Android APK (phones and Android TV), the MSI installer for Windows, and the
-Linux AppImage. There is **no store listing** — Google Play and the Microsoft Store are not used,
+page: the universal Android APK (phones and Android TV) and the MSI installer for Windows.
+There is **no store listing** — Google Play and the Microsoft Store are not used,
 so an APK from a store (or from upstream) is a different app that cannot be updated by this one.
+There is also **no Linux release asset**: that target is unmaintained here, so no AppImage is
+built for a release and `update.json` carries no `linux` key.
 
 The APK installs on both phones and Android TV. The AppImage is portable and updates itself from
 the same GitHub release channel when launched from a writable location; the MSI updates itself
@@ -78,7 +80,7 @@ in place through the in-app updater.
 
 ## Build from source
 
-Requires the **Flutter `3.44.5`** stable toolchain (the version CI pins).
+Requires the **Flutter `3.47.5`** stable toolchain (the version CI pins).
 
 ```bash
 flutter pub get
