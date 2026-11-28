@@ -667,6 +667,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       from: _repoForChannel(target),
       muted: muted,
       bufferPreset: _bufferPresetForChannel(target),
+      aspectLabel: _aspectLabelFor(_configForChannel(target), target.id),
     );
   }
 
@@ -756,6 +757,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           from: _repoForChannel(channel),
           muted: true,
           bufferPreset: _bufferPresetForChannel(channel),
+          aspectLabel: _aspectLabelFor(_configForChannel(channel), channel.id),
         );
       }
     } catch (e) {
@@ -1117,6 +1119,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void _persistGlobalAspect(String label) {
     playerAspectLabel.value = label;
     unawaited(const AppSettingsStore().setPlayerAspectMode(label));
+    _syncPreviewAspect();
+  }
+
+  /// Hands a framing change to the **running** preview.
+  ///
+  /// The player's aspect chip reports back through these persist paths, and the
+  /// panel underneath keeps its preview alive across the fullscreen trip (the
+  /// engine is handed over, not rebuilt). Without this the picture came back
+  /// from fullscreen framed the old way until the next channel change.
+  void _syncPreviewAspect() {
+    final id = _preview.channelId;
+    if (id == null) return;
+    final channel = _findChannelById(id);
+    if (channel == null) return;
+    _preview.setAspectLabel(_aspectLabelFor(_configForChannel(channel), id));
   }
 
   /// Pins [label] to [itemKey] in [owner]'s settings, or clears the pin when
@@ -1138,6 +1155,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       pins[itemKey] = label;
     }
     if (pins.isEmpty) _aspectPins.remove(owner.id);
+    _syncPreviewAspect();
 
     SourceConfig? fresh;
     for (final config in await widget.store.list()) {
@@ -1252,6 +1270,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           from: _repoForChannel(channel),
           muted: wasMuted,
           bufferPreset: _bufferPresetForChannel(channel),
+          aspectLabel: _aspectLabelFor(_configForChannel(channel), channel.id),
         ),
       );
     }
@@ -1679,6 +1698,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           channel,
           from: _repoForChannel(channel),
           bufferPreset: _bufferPresetForChannel(channel),
+          aspectLabel: _aspectLabelFor(_configForChannel(channel), channel.id),
         );
       }
     });
@@ -2623,6 +2643,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           muted: true,
           from: playRepo,
           bufferPreset: _bufferPresetForChannel(channel),
+          aspectLabel: _aspectLabelFor(_configForChannel(channel), channel.id),
         );
     }
   }
@@ -3095,6 +3116,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             muted: previewWasMuted,
             from: _repoFor(ended.config),
             bufferPreset: _bufferPresetForChannel(ended.channel),
+            aspectLabel: _aspectLabelFor(
+              _configForChannel(ended.channel),
+              ended.channel.id,
+            ),
           );
         case PreviewReturnAction.restartSameChannel:
           // Same-channel cross-engine stop is the one stop case that restarts:
@@ -3106,6 +3131,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             muted: previewWasMuted,
             from: playRepo,
             bufferPreset: _bufferPresetForChannel(channel),
+            aspectLabel: _aspectLabelFor(
+              _configForChannel(channel),
+              channel.id,
+            ),
           );
         case PreviewReturnAction.resumeAdopted:
           await _preview.play();
@@ -3141,6 +3170,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             muted: previewWasMuted,
             from: playRepo,
             bufferPreset: _bufferPresetForChannel(channel),
+            aspectLabel: _aspectLabelFor(
+              _configForChannel(channel),
+              channel.id,
+            ),
           );
         } catch (_) {}
       }
@@ -3240,6 +3273,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         muted: true,
         from: playRepo,
         bufferPreset: _bufferPresetForChannel(channel),
+        aspectLabel: _aspectLabelFor(_configForChannel(channel), channel.id),
       ),
     );
   }
@@ -3296,6 +3330,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         muted: true,
         from: previewRepo,
         bufferPreset: _bufferPresetForChannel(channel),
+        aspectLabel: _aspectLabelFor(_configForChannel(channel), channel.id),
       ),
     );
     // Set when Play hands the preview to fullscreen — the handoff owns the

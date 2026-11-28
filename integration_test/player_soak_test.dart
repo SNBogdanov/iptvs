@@ -98,6 +98,7 @@ void main() {
         channel,
         muted: true,
         bufferPreset: BufferPreset.normal,
+        aspectLabel: null,
       );
       await tester.pump(const Duration(milliseconds: 200));
       await preview.stop(clearSelection: true);

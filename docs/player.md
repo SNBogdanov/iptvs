@@ -641,6 +641,19 @@ to Stretch"). Now:
   so on those surfaces a pin has to be set from a Flutter surface (or, on Windows, the embedded
   one).
 
+**The live preview draws with the same framing.** The channel list's preview panel used to ignore
+the mode entirely: the native preview's `AspectRatioFrameLayout` always took the picture's own
+ratio, and the embedded one kept media_kit's default fit — so a channel pinned (or globally set) to
+Fill played boxed in the list, and the panel and the fullscreen player disagreed about the same
+channel. `LivePreviewController.start` now carries the label (`aspectLabel`, **required** like the
+buffer preset, because a restart that forgot it would silently fall back to the default). Both paths
+honour it: the Android shared engine applies it to `previewAspectFrame` under the same rules as
+`ExoPlayerEngine.applyAspect` (ZOOM for Fill, FILL for Stretch, a forced ratio for 16:9/4:3, FIT
+otherwise), and the embedded surface gets the mode's `BoxFit` plus mpv
+`panscan`/`video-aspect-override`/`keepaspect` before the first frame. A change made in the
+fullscreen player reaches the preview that is still running underneath through
+`ChannelListScreen._syncPreviewAspect`, which the persist paths call.
+
 **The default is chosen by the shape of the container, not by taste.** `defaultAspectModeIndex()`
 returns **Fill on a television**, **Fit on a desktop**, and on a **handset or tablet** whichever
 the window's own shape asks for. A TV is a fixed 16:9 panel that never rotates and usually matches

@@ -13,6 +13,7 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.DebugCounters
+import com.gchofficial.iptvs.player.AspectMode
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.SharedEngine
@@ -195,6 +196,25 @@ class MainActivity : FlutterActivity() {
                             (args["proxyPort"] as? Number)?.toInt() ?: 0,
                             args["proxyType"] as? String,
                         ),
+                        // The framing this channel opens fullscreen in (a
+                        // per-item pin, else the device-wide choice). Absent
+                        // keeps the preview's default letterbox.
+                        AspectMode.entries.firstOrNull {
+                            it.label.equals(args?.get("aspect") as? String, true)
+                        },
+                    )
+                    result.success(true)
+                }
+
+                // A framing chosen in the fullscreen player's aspect chip, or
+                // the pin it wrote back, applied to the preview that is still
+                // running underneath.
+                "aspect" -> {
+                    val args = call.arguments as? Map<*, *>
+                    SharedEngine.setPreviewAspect(
+                        AspectMode.entries.firstOrNull {
+                            it.label.equals(args?.get("label") as? String, true)
+                        },
                     )
                     result.success(true)
                 }

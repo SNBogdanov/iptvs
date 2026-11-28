@@ -15,6 +15,7 @@ import '../data/net.dart';
 import '../data/proxy_config.dart';
 import '../data/stream_kind.dart';
 import '../player/channel_owner.dart';
+import '../player/aspect_mode.dart';
 import '../player/buffer_preset.dart';
 import '../player/hwdec_policy.dart';
 import '../player/mpv_options.dart';
@@ -316,6 +317,9 @@ class LivePreviewController extends ChangeNotifier {
         muted: muted,
         from: _activeRepo,
         bufferPreset: _bufferPreset,
+        // An EOF restart is the *same* channel: it keeps the framing it was
+        // started with, not the default.
+        aspectLabel: aspectLabel,
       ),
     );
   }
@@ -522,6 +526,62 @@ class LivePreviewController extends ChangeNotifier {
   /// `LoadControl`.
   BufferPreset _bufferPreset = BufferPreset.normal;
 
+  /// The framing the preview draws with — the **same label** the fullscreen
+  /// player opens this channel with: the per-item pin when there is one, else
+  /// the device's global choice.
+  ///
+  /// Required on every [start], like [BufferPreset], because a restart that
+  /// forgot it would quietly come back in the default framing — and on a
+  /// television the default is Fill, a crop the user may never have chosen.
+  /// Until now the preview had no framing at all: both paths letterboxed at the
+  /// video's own ratio, so a channel the viewer had set to Fill played in the
+  /// list boxed.
+  String? aspectLabel;
+
+  /// The label resolved to a mode, with the platform default when none was
+  /// chosen yet.
+  AspectMode get aspectMode =>
+      kAspectModes[resolveAspectModeIndex(aspectLabel)];
+
+  /// The embedded surface's lever for that mode.
+  BoxFit get aspectFit => aspectMode.fit;
+
+  /// A framing chosen elsewhere — the fullscreen player's aspect chip, or the
+  /// pin it wrote back — reaches the **running** preview without a restart.
+  void setAspectLabel(String? label) {
+    if (label == aspectLabel) return;
+    aspectLabel = label;
+    unawaited(_applyAspect());
+    _set(() {});
+  }
+
+  /// Pushes the current framing to whichever surface is playing.
+  Future<void> _applyAspect() async {
+    if (nativeActive) {
+      try {
+        await _nativeChannel.invokeMethod('aspect', {'label': aspectLabel});
+      } catch (_) {
+        // An older native build without the method: the next `open` carries it.
+      }
+      return;
+    }
+    final player = _player;
+    if (player == null) return;
+    final platform = player.platform;
+    if (platform is! NativePlayer) return;
+    final mode = aspectMode;
+    try {
+      await platform.setProperty('panscan', mode.panscan);
+      await platform.setProperty('video-aspect-override', mode.aspect);
+      await platform.setProperty('keepaspect', mode.keepaspect);
+    } catch (error) {
+      DiagnosticsLog.instance.add(
+        'player',
+        'preview mpv aspect failed: ${redactText('$error')}',
+      );
+    }
+  }
+
   /// Resolve [channel] and open it in the preview player. [muted] is true for
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
@@ -542,6 +602,9 @@ class LivePreviewController extends ChangeNotifier {
     // invisible until someone read a diagnostics export. Making it required
     // moves that from a runtime surprise to a compile error.
     required BufferPreset bufferPreset,
+    // The same argument, for the same reason: a preview must open in the
+    // framing this channel would open fullscreen in.
+    required String? aspectLabel,
   }) {
     // Re-applied on every start, not just at player creation. `_createPlayer`
     // runs once behind `_player ??=`, and an ordinary `stop()` keeps that
@@ -554,6 +617,7 @@ class LivePreviewController extends ChangeNotifier {
     final changed = bufferPreset != _bufferPreset;
     _bufferPreset = bufferPreset;
     if (changed) unawaited(_applyBufferOptions());
+    this.aspectLabel = aspectLabel;
     final pending = _start(channel, muted: muted, from: from);
     _pendingStart = pending;
     return pending;
@@ -670,6 +734,10 @@ class LivePreviewController extends ChangeNotifier {
             'preview mpv http-proxy failed: ${redactText('$error')}',
           );
         }
+        // Framing before the first frame: `panscan`/`video-aspect-override`
+        // are read as the video output starts, so setting them afterwards
+        // showed one letterboxed frame that then jumped to cropped.
+        await _applyAspect();
       }
       if (_disposed || requestId != _requestId) return;
       await embeddedPlayer.open(
@@ -714,6 +782,10 @@ class LivePreviewController extends ChangeNotifier {
           'proxyPort': route.port,
           'proxyType': route.type,
         },
+        // The framing this channel would open fullscreen in. Sent with every
+        // open so an engine reused across channels still gets this channel's
+        // choice (a per-item pin can differ from the neighbour's).
+        if (aspectLabel != null) 'aspect': aspectLabel,
       });
       if (opened == true) {
         DiagnosticsLog.instance.add('library', 'preview native engine open');
@@ -977,7 +1049,14 @@ class PreviewVideo extends StatelessWidget {
     if (preview.nativeActive) {
       return const _NativePreviewView();
     }
-    return Video(controller: preview.controller, controls: NoVideoControls);
+    return Video(
+      controller: preview.controller,
+      controls: NoVideoControls,
+      // The same framing the fullscreen player would use. Before this the
+      // preview always letterboxed at the video's own ratio, so a channel set
+      // to Fill played boxed in the list.
+      fit: preview.aspectFit,
+    );
   }
 }
 

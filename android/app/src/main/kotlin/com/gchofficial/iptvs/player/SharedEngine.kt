@@ -108,6 +108,7 @@ object SharedEngine {
         val muted: Boolean,
         val preset: BufferPreset,
         val proxy: StreamRoute?,
+        val aspect: AspectMode?,
     )
 
     /**
@@ -128,6 +129,16 @@ object SharedEngine {
     private var previewSurface: SurfaceView? = null
     private var previewAspectFrame: AspectRatioFrameLayout? = null
 
+    /**
+     * The framing the preview draws with — the same mode the fullscreen player
+     * would open this channel in. Null means "the picture's own ratio,
+     * letterboxed", which is what the preview always did.
+     */
+    private var previewAspectMode: AspectMode? = null
+
+    /** The last picture ratio seen, so a mode change can re-apply it at once. */
+    private var previewVideoRatio: Float? = null
+
     // Dart-facing preview callbacks (installed by MainActivity per session).
     var onPreviewError: ((String) -> Unit)? = null
     var onPreviewUnsupported: (() -> Unit)? = null
@@ -146,7 +157,16 @@ object SharedEngine {
         muted: Boolean,
         bufferPreset: BufferPreset = BufferPreset.NORMAL,
         streamProxy: StreamRoute? = null,
+        aspect: AspectMode? = null,
     ) {
+        // The framing this channel opens with fullscreen. Applied before the
+        // engine starts so the first frame is already cropped/letterboxed the
+        // way the viewer chose — the preview used to always letterbox at the
+        // picture's own ratio, so a channel set to Fill played boxed.
+        if (aspect != null) {
+            previewAspectMode = aspect
+            applyPreviewAspectMode()
+        }
         if (adoptedByFullscreen) {
             // Never steal the surface out from under the Activity — but never
             // drop the request either (see [pendingOpen]).
@@ -159,6 +179,7 @@ object SharedEngine {
                 muted,
                 bufferPreset,
                 streamProxy,
+                previewAspectMode,
             )
             return
         }
@@ -477,7 +498,15 @@ object SharedEngine {
 
     private fun replayOpen(p: PendingOpen) {
         previewDiagnostics("deferred open replayed")
-        openPreview(p.context, p.url, p.headers, p.muted, p.preset, p.proxy)
+        openPreview(
+            p.context,
+            p.url,
+            p.headers,
+            p.muted,
+            p.preset,
+            p.proxy,
+            p.aspect,
+        )
     }
 
     /** Fullscreen released the adopted engine — swapped for mpv because the
@@ -491,10 +520,7 @@ object SharedEngine {
     fun registerPreviewView(surface: SurfaceView, aspectFrame: AspectRatioFrameLayout) {
         previewSurface = surface
         previewAspectFrame = aspectFrame
-        val s = uiState
-        if (s != null && s.videoWidth > 0 && s.videoHeight > 0) {
-            aspectFrame.setAspectRatio(s.videoWidth.toFloat() / s.videoHeight.toFloat())
-        }
+        applyPreviewAspectMode()
         previewDiagnostics("surface registered adopted=$adoptedByFullscreen")
         if (!adoptedByFullscreen) engine?.attachPreviewSurface(surface)
     }
@@ -524,6 +550,36 @@ object SharedEngine {
 
     private fun applyPreviewAspect(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
-        previewAspectFrame?.setAspectRatio(width.toFloat() / height.toFloat())
+        previewVideoRatio = width.toFloat() / height.toFloat()
+        applyPreviewAspectMode()
+    }
+
+    /**
+     * Pushes [previewAspectMode] onto the preview's frame.
+     *
+     * The same rules the fullscreen engine applies to its `PlayerView`: the
+     * frame carries the **picture's** ratio for Fit/Fill/Stretch (so Fill's
+     * ZOOM crops instead of stretching), a forced ratio for 16:9/4:3, and the
+     * resize mode carries the difference between cropping and distorting.
+     */
+    private fun applyPreviewAspectMode() {
+        val frame = previewAspectFrame ?: return
+        val ratio = when (previewAspectMode) {
+            AspectMode.Ratio16x9 -> 16f / 9f
+            AspectMode.Ratio4x3 -> 4f / 3f
+            else -> previewVideoRatio ?: 16f / 9f
+        }
+        frame.setAspectRatio(ratio)
+        frame.resizeMode = when (previewAspectMode) {
+            AspectMode.Fill -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            AspectMode.Stretch -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
+
+    /** A framing chosen in the player reaches the running preview at once. */
+    fun setPreviewAspect(mode: AspectMode?) {
+        previewAspectMode = mode
+        applyPreviewAspectMode()
     }
 }
