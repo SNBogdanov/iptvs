@@ -12,6 +12,7 @@ import '../data/app_settings_store.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_endpoint.dart';
 import '../data/cloud_runtime.dart';
+import '../data/cloud_schema.dart';
 import '../data/cloud_sync.dart';
 import '../data/device_label.dart';
 import '../data/settings_auto_sync.dart';
@@ -68,6 +69,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   bool _serverBusy = false;
   String? _serverError;
   bool _manualServer = false;
+
+  /// The schema version the server reported, or null while it has not answered
+  /// (offline) / before a server exists. `0` is a pre-versioning server.
+  int? _schemaVersion;
 
   /// A server change was saved while a Supabase client already exists in this
   /// process. Nothing else may talk to either server until the app restarts.
@@ -128,6 +133,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     }
     try {
       await _sync.ensureAnonSession();
+      await _refreshSchema();
       if (await _sync.isPaired()) {
         if (mounted) setState(() => _paired = true);
         await _loadProfiles();
@@ -146,6 +152,73 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
 
   /// Load the account's profiles and the device's active one, defaulting to the
   /// first profile when the device hasn't picked one yet.
+  /// Reads the public schema version once per screen visit. A missing function
+  /// is reported by [CloudSync.schemaVersion] as 0; a network error leaves
+  /// [_schemaVersion] null so the banner does not claim the server is old.
+  Future<void> _refreshSchema() async {
+    if (!CloudRuntime.hasServer) return;
+    try {
+      final version = await _sync.schemaVersion();
+      if (mounted && version != null) {
+        setState(() => _schemaVersion = version);
+      }
+    } catch (_) {
+      // Offline: leave the last known value (or null) alone.
+    }
+  }
+
+  /// A single line explaining a version mismatch, or null when the server and
+  /// this build agree (or the answer is not known yet).
+  Widget? _schemaBanner() {
+    final version = _schemaVersion;
+    if (version == null) return null;
+    final state = CloudSchema.stateFor(version);
+    final String message;
+    switch (state) {
+      case CloudSchemaState.legacy:
+        message =
+            'Server schema is not reported (an older server). Apply the '
+            'database migrations to enable device settings backup.';
+      case CloudSchemaState.outdated:
+        message =
+            'Server schema $version; this app expects '
+            '${CloudSchema.currentVersion}. Some cloud features are disabled '
+            'until the server is updated.';
+      case CloudSchemaState.newer:
+        message =
+            'Server schema $version is newer than this app '
+            '(${CloudSchema.currentVersion}). Update the app to use all cloud '
+            'features.';
+      case CloudSchemaState.unknown:
+      case CloudSchemaState.upToDate:
+        return null;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: AppColors.panelHi,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: state == CloudSchemaState.outdated
+                ? AppColors.danger
+                : AppColors.textLo,
+          ),
+        ),
+        child: Text(
+          message,
+          style: TextStyle(
+            color: state == CloudSchemaState.outdated
+                ? AppColors.danger
+                : AppColors.textLo,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _loadProfiles() async {
     final profiles = await _sync.listProfiles();
     var active = await _sync.activeProfileId();
@@ -733,6 +806,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final schemaBanner = _schemaBanner();
     return Scaffold(
       appBar: AppBar(title: const Text('Cloud sync')),
       // Edge-to-edge (targetSdk 35+): keep the pairing/push controls clear of the
@@ -754,6 +828,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        ?schemaBanner,
                         if (_restartPending)
                           ..._restartPendingBody()
                         else if (_serverSetup)
@@ -795,11 +870,26 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         const Icon(Icons.dns_outlined, size: 18, color: AppColors.textLo),
         const SizedBox(width: 8),
         Expanded(
-          child: Text(
-            'Server: ${endpoint.host}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: AppColors.textLo, fontSize: 13),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Server: ${endpoint.host}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textLo, fontSize: 13),
+              ),
+              ?_schemaVersion == null
+                  ? null
+                  : Text(
+                      'Schema $_schemaVersion',
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 11,
+                      ),
+                    ),
+            ],
           ),
         ),
         TextButton(

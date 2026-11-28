@@ -1,0 +1,62 @@
+name: Apply database migrations
+
+# The app never runs DDL: the anon key ships in every APK/MSI, and a public
+# client that could ALTER/DROP would be a remote-code-execution surface. This
+# workflow is the server-side counterpart: it applies the committed migrations
+# with a privileged database connection that exists only in GitHub Secrets.
+#
+# Required secret: SUPABASE_DB_URL — the **Session pooler** URI (or a direct
+# postgres URI) from Supabase → Connect. Without it the job is a no-op with a
+# notice, so a fork stays green.
+#
+# Migrations are idempotent by contract (the repo replays them from scratch in
+# `db-tests.yml`); applying the whole directory is deliberate: it also repairs a
+# project that missed a migration out of band. Every migration ends by raising
+# `public.app_schema.version`, which the app reads through
+# `get_schema_version()`.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+      - '.github/workflows/db-migrate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-migrate
+  # Never cancel a half-applied migration transaction.
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply Supabase migrations
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Skip when SUPABASE_DB_URL is not configured
+        if: env.SUPABASE_DB_URL == ''
+        run: |
+          echo "::notice::SUPABASE_DB_URL is not set; migrations were not applied."
+          echo "Add the Supabase Session pooler URI as a repository secret to enable this job."
+
+      - name: Install psql
+        if: env.SUPABASE_DB_URL != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Apply every migration in order
+        if: env.SUPABASE_DB_URL != ''
+        run: |
+          set -euo pipefail
+          for f in $(find supabase/migrations -maxdepth 1 -name '*.sql' | sort); do
+            echo "== applying $f =="
+            psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f "$f"
+          done
+          echo "All migrations applied."

@@ -114,6 +114,56 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   bool _cloudAutoSyncStarting = false;
 
+  /// Cloud profiles whose one-time "empty device" pull has already run (or is
+  /// running) in this session. Prevents every `_loadActive` from re-fetching an
+  /// empty profile.
+  final Set<String> _cloudBootstrapAttempts = <String>{};
+
+  /// A freshly paired device has no local sources, but the profile in the
+  /// cloud may already have them (a reinstall, or a TV paired from a phone).
+  /// Pull once before the home screen decides to show "add a source".
+  ///
+  /// Deliberately only when the local store is **empty**: an existing device
+  /// with sources must never have them replaced by a background pull; that is
+  /// what the explicit Pull button on the cloud screen is for.
+  Future<void> _pullCloudIfEmpty() async {
+    if (!CloudRuntime.hasServer) return;
+    try {
+      final sync = CloudSync(db: widget.db);
+      if (!sync.hasSession) return;
+      if (!await sync.isPaired()) return;
+      if ((await widget.store.list()).isNotEmpty) return;
+
+      var profileId = await sync.activeProfileId();
+      if (profileId == null) {
+        final profiles = await sync.listProfiles();
+        if (profiles.isEmpty) return;
+        profileId = profiles.first.id;
+        try {
+          await sync.setProfile(profileId);
+        } catch (_) {
+          // The pull can still target it explicitly.
+        }
+      }
+      if (!_cloudBootstrapAttempts.add(profileId)) return;
+
+      try {
+        await sync.pullSources(widget.store, profileId);
+        await sync.pullMetadata(widget.store, profileId);
+        await sync.pullFavorites(widget.store, profileId);
+        await sync.pullWatchState(widget.store, profileId);
+      } catch (_) {
+        // Offline / server error: allow a retry on the next load.
+        _cloudBootstrapAttempts.remove(profileId);
+        return;
+      }
+      unawaited(SettingsAutoSync.reconcile());
+    } catch (_) {
+      // Best effort: an unpaired or offline device simply keeps the empty
+      // state and the manual cloud screen.
+    }
+  }
+
   Future<void> _startCloudAutoSync() async {
     if (!CloudRuntime.hasServer) return;
     // Re-entrancy guard: this is fired unawaited from `_loadActive`, and two
@@ -299,6 +349,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   Future<void> _loadActive() async {
     final gen = ++_loadActiveGeneration;
+    // A paired device with an empty local source list has nothing to show yet;
+    // pull the profile once before the screen says "add a source". Bounded so a
+    // dead network cannot hold the first frame indefinitely.
+    try {
+      await _pullCloudIfEmpty().timeout(const Duration(seconds: 20));
+    } catch (_) {
+      // The local/empty path continues; a retry happens on the next load.
+    }
     final cfg = await widget.store.activeConfig();
     if (cfg != null) await migrateSourceIdentity(widget.db, cfg);
     final metadata = await widget.store.metadataConfig();

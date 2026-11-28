@@ -75,6 +75,13 @@ For a complete walkthrough aimed at a user deploying their own instance (Supabas
 host + app connection), see [`cloud/SELF-HOSTING.md`](../cloud/SELF-HOSTING.md). The steps below are
 the backend-specific summary.
 
+> **Schema version contract.** Every forward migration ends by raising
+> `public.app_schema.version` (see `20261128010000_schema_version.sql`), and the app's
+> `CloudSchema.currentVersion` is raised in the same commit. The app reads it through the public
+> `get_schema_version()` RPC and disables features that need a newer server instead of failing on a
+> missing function. CI's `db-migrate.yml` applies any push to `supabase/migrations/**` using the
+> `SUPABASE_DB_URL` repository secret; a release tag does **not** apply migrations.
+
 1. Create a free project at <https://supabase.com>.
 2. Apply the migrations. With the Supabase **GitHub integration** connected to this
    repo, pushing `supabase/migrations/` applies new migrations automatically. Or use

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'app_settings_store.dart';
 import 'cloud_runtime.dart';
+import 'cloud_schema.dart';
 import 'cloud_sync.dart';
 import 'device_identity.dart';
 
@@ -102,6 +103,14 @@ class SettingsAutoSync {
       final sync = _sync ??= CloudSync();
       if (!sync.hasSession) return;
 
+      // Device settings need the schema that introduced them. Read the version
+      // once; an older server (or no function at all) makes this a no-op, and
+      // the Cloud sync screen says so.
+      if (!CloudSchema.supports(CloudSchema.deviceSettingsVersion)) {
+        final version = await sync.schemaVersion();
+        if (version == null || version < CloudSchema.deviceSettingsVersion) return;
+      }
+
       final deviceKey = await DeviceIdentity.cloudDeviceKey();
       final local = await _store.settingsForCloud();
       final marker = await _store.cloudSettingsSyncedAt();
@@ -154,6 +163,12 @@ class SettingsAutoSync {
       if (!CloudRuntime.hasServer) return;
       final client = sync ?? (_sync ??= CloudSync());
       if (!client.hasSession) return;
+      // Unknown/older schema: leave the local map alone rather than marking it
+      // synced against a backend that will reject the RPC.
+      if (!CloudSchema.supports(CloudSchema.deviceSettingsVersion)) {
+        final version = await client.schemaVersion();
+        if (version == null || version < CloudSchema.deviceSettingsVersion) return;
+      }
       final key = deviceKey ?? await DeviceIdentity.cloudDeviceKey();
       final map = settings ?? await _store.settingsForCloud();
       if (map.isEmpty) return;

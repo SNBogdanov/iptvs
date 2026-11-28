@@ -857,6 +857,35 @@ is paired again. This is the other half of the cloud: a per-device backup.
 Backend migration: `20261128000000_device_settings.sql`. An older backend/client simply no-ops:
 `pushDeviceSettings` returns false on a missing function and the app keeps local settings.
 
+## Schema version handshake
+
+The app and the database are versioned independently, and a newer app must not
+discover a missing function by failing in the middle of a sync.
+
+- The database stores one row in `public.app_schema` and exposes it through the
+  **public** `get_schema_version()` RPC (executable by `anon` too, so the Cloud
+  sync screen can report the version before a session exists).
+- **Every forward migration ends with `update public.app_schema set version =
+  <monotonic number>`.** The app's `CloudSchema.currentVersion`
+  (`lib/data/cloud_schema.dart`) must be raised in the same commit; a unit test
+  reads the migration and pins the two together.
+- On the Cloud sync screen the app shows the server version and a banner when
+  it differs:
+  - server is a **pre-versioning** server or **older** → "apply migrations;
+    some features are disabled" — the rest of cloud sync keeps working;
+  - server is **newer** → "update the app";
+  - equal → no banner.
+- New features are gated on the version that introduced them. Device settings
+  use `CloudSchema.deviceSettingsVersion`; an older server means the settings
+  sync is a no-op instead of a failing RPC.
+
+**Applying migrations is a server-side operation.** `.github/workflows/db-migrate.yml`
+runs on every push that touches `supabase/migrations/**` (and on manual dispatch)
+and applies them with `psql`. It needs the `SUPABASE_DB_URL` repository secret
+(Supabase → Connect → Session pooler URI); without it the job posts a notice and
+does nothing. A GitHub **Release/tag does not apply migrations** — it only builds
+and publishes artifacts.
+
 ## Web panel
 
 [`panel/`](../panel/) - a tiny Vite + `@supabase/supabase-js` SPA (no framework). **Magic-link

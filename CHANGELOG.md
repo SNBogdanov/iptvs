@@ -14,10 +14,15 @@ each release's notes also appear on GitHub Releases. New work lands under
 ### Added
 
 - **The app's preferences are backed up per physical device.** Every `app_*` setting plus the
-  profile-picker choice now syncs to `device_settings`, keyed by a SHA-256 of Android `ANDROID_ID` /
-  a Windows file id, so reinstalling the app and pairing again restores the player settings, seek
-  step, clock, auto-play, volume, proxy, window placement and the rest. The raw hardware id never
-  leaves the device; `cloud_server_*` (the connection itself) and local-profile data are excluded.
+  profile-picker choice syncs to `device_settings`, keyed by a SHA-256 of Android `ANDROID_ID` / a
+  Windows file id, so reinstalling the app and pairing again restores player settings, seek step,
+  clock, auto-play, volume, proxy, window placement and the rest. The raw hardware id never leaves
+  the device; `cloud_server_*` (the connection itself) and local-profile data are excluded.
+- **The cloud schema is versioned, and the app says when it is behind.** `app_schema.version` is
+  raised by every migration and read through the public `get_schema_version()` RPC; the app compares
+  it with `CloudSchema.currentVersion`, disables features that need a newer server (device settings
+  today), and shows the server version/mismatch on the Cloud sync screen. Migrations are applied by
+  `db-migrate.yml` with the `SUPABASE_DB_URL` secret — a release tag does not apply them.
 - **The cloud server is now a per-device setting.** A build no longer has to be compiled against
   one Supabase project: the Cloud sync screen offers a "Connect a cloud server" form (domain with
   a `.well-known/iptvs-cloud.json` lookup, or URL and publishable key by hand), and the chosen

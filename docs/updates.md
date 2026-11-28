@@ -81,6 +81,7 @@ manual dispatch from minting a release for a tag that was never pushed.
 | var | `ANDROID_RELEASE_CERT_SHA256` | expected APK signer fingerprint (see `docs/android-signing.md`) |
 | var | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | **panel deploy only** (`pages.yml`); app artifacts are built without them |
 | secret | `GEMINI_API_KEY`, `DISCORD_RELEASE_WEBHOOK` | optional changelog / announcement |
+| secret | `SUPABASE_DB_URL` | **migrations only** (`db-migrate.yml`), Session pooler URI; a release tag does not apply migrations |
 
 **App artifacts deliberately contain no cloud endpoint.** Since option D the server is a per-device
 setting (`cloud/runtime-server.md`), normally discovered from a panel's

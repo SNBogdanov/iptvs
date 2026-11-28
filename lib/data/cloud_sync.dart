@@ -9,6 +9,7 @@ import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
 import 'cloud_runtime.dart';
+import 'cloud_schema.dart';
 import 'cloud_storage_keys.dart';
 import 'cloud_crypto.dart';
 import 'local_profile_store.dart';
@@ -1188,6 +1189,24 @@ class CloudSync {
 
   /// Self-unpair: drop the cloud-managed sources locally and remove this
   /// device's pairing rows. The account can also revoke from the panel.
+  /// The schema version the server reports, or null when it cannot be read
+  /// (offline / RPC error). A missing function is an older server, reported as
+  /// 0 so the app can say "migrate the server" rather than "unknown".
+  Future<int?> schemaVersion() async {
+    try {
+      final data = await _client.rpc('get_schema_version');
+      final version = data is int ? data : int.tryParse('$data');
+      CloudSchema.knownServerVersion = version;
+      return version;
+    } catch (e) {
+      if (isMissingFunctionError(e)) {
+        CloudSchema.knownServerVersion = 0;
+        return 0;
+      }
+      return null;
+    }
+  }
+
   /// This device's saved app preferences, or null when the cloud has none (or
   /// the backend predates the device-settings migration).
   ///
