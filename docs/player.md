@@ -4260,7 +4260,12 @@ cannot be a focused node (docs/tv-navigation.md, "The in-player quick list"). A 
 panel (`PlayerDimens.QuickListWidth`) banded between the safe-drawing insets, a `LazyColumn` of
 fixed-height rows (`QuickListRowHeight`, 56 dp — the Flutter overlay's `kQuickListRowExtent`), the
 highlight at `selectedInWindow`, and a scroll that only animates when the cursor has actually left
-the visible range (scrolling on every push would fight a user paging with a held key). Rows carry
+the visible range (scrolling on every push would fight a user paging with a held key). **The first
+layout is already at the cursor**: the `LazyListState` is created with
+`initialFirstVisibleItemIndex = cursor - 2`, and the follow-up effect jumps (`scrollToItem`) rather
+than animates whenever nothing is laid out yet or the panel switched rung (channels → schedule),
+because an animation from the top made every open read as "channel 1, then a long scroll to the
+channel that is playing". Rows carry
 the payload's label and second line, the `ON NOW`/`CATCH-UP` badge chip, a play glyph on the
 playing row, a history glyph on an archive row, and a dimmed label on a past one — all printed,
 never derived; with no `emptyLabel` there is nothing this side is entitled to say. The one

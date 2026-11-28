@@ -346,19 +346,38 @@ fun QuickListPanel(
     onDismiss: (() -> Unit)? = null,
 ) {
     val list = state.quickList
-    val listState = rememberLazyListState()
     val cursor = list.selectedInWindow
+    // **Start where the viewer is.** The state used to be created at the top of
+    // the list and the effect below then animated down to the cursor, so every
+    // open looked like "channel 1, then a long scroll to the channel that is
+    // actually playing". The initial index is the same row the effect would
+    // scroll to, so the first layout is already there.
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (cursor - 2).coerceAtLeast(0),
+    )
 
     // Keep the cursor on screen. Only when it has actually left the visible
     // range: scrolling on every push would fight a user who is paging with a
     // held key, and the row height is fixed precisely so this is arithmetic
     // rather than a measurement of rows that may not be composed.
-    LaunchedEffect(cursor, list.windowStart, list.revision) {
+    //
+    // The *first* pass runs before any row is laid out (`visibleItemsInfo` is
+    // empty), which is why it jumps instead of animating: an animation from a
+    // position nothing is drawn at is a scroll through rows the user did not
+    // ask to see. The same applies when the panel switches rung (channels →
+    // schedule): those rows are a different list, so the old offset means
+    // nothing and the jump is the honest transition.
+    var shownMode by remember { mutableStateOf(list.mode) }
+    LaunchedEffect(cursor, list.windowStart, list.revision, list.mode) {
         if (cursor < 0) return@LaunchedEffect
+        val modeChanged = shownMode != list.mode
+        shownMode = list.mode
         val visible = listState.layoutInfo.visibleItemsInfo
         val first = visible.firstOrNull()?.index
         val last = visible.lastOrNull()?.index
-        if (first == null || last == null || cursor < first || cursor > last) {
+        if (modeChanged || first == null || last == null) {
+            runCatching { listState.scrollToItem((cursor - 2).coerceAtLeast(0)) }
+        } else if (cursor < first || cursor > last) {
             runCatching { listState.animateScrollToItem((cursor - 2).coerceAtLeast(0)) }
         }
     }
