@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
+import '../data/cloud_profile_refresh.dart';
 import '../data/cloud_runtime.dart';
 import '../data/cloud_sync.dart';
 import '../data/local_profile_store.dart';
@@ -497,6 +498,14 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       await _snapshotCurrent(current);
       if (entry.isCloud) {
         final sync = _sync!;
+        // **Identity first.** The keychain value is what the app reads as "the
+        // profile I am in", and writing it costs nothing; the server call and
+        // the four pulls are the slow half and now happen *after* the handover
+        // (see [requestCloudProfileRefresh]). Identity used to be the last
+        // step, so the sources were already the new profile's while the app
+        // still called itself the old one — for minutes, behind the spinner.
+        await sync.setProfileLocal(entry.id);
+        await _localStore.setActive(null);
         final snapshot = target.sourcesJson.isEmpty
             ? await _localStore.cloudSnapshot(entry.id)
             : target;
@@ -510,19 +519,16 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
           await widget.store.setAll(const []);
           await sync.setManagedSourceIds(const {});
         }
-        await sync.setProfile(entry.id);
-        await sync.pullSources(widget.store, entry.id);
-        await sync.pullMetadata(widget.store, entry.id);
-        await sync.pullFavorites(widget.store, entry.id);
-        await _localStore.setActive(null);
+        requestCloudProfileRefresh();
       } else {
+        // The same order for a local profile: the identity, then its data.
+        await _localStore.setActive(entry.id);
         final all = await _localStore.loadAll();
         final target = all.firstWhere(
           (p) => p.id == entry.id,
           orElse: () => throw StateError('profile not found'),
         );
         await _restoreSnapshot(target.snapshot);
-        await _localStore.setActive(entry.id);
       }
       await _localStore.setOwnerless(false);
       setState(() {

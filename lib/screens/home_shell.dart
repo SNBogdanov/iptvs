@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../data/app_database.dart';
 import '../data/app_settings_store.dart';
 import '../data/cloud_auto_sync.dart';
+import '../data/cloud_profile_refresh.dart';
 import '../data/cloud_runtime.dart';
 import '../data/cloud_sync.dart';
 import '../data/distribution_channel.dart';
@@ -163,6 +164,53 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       // state and the manual cloud screen.
     }
   }
+
+  /// The network half of a profile switch, run **after** the handover.
+  ///
+  /// The picker used to do this before it popped: sources were replaced first
+  /// and the identity (and the home screen) only caught up when the last pull
+  /// finished — minutes on a slow link, behind a spinner, with the app
+  /// insisting it was still in the previous profile. Now the switch is local and
+  /// this runs here: tell the server which profile the device is on, pull its
+  /// sources/metadata/favourites/watch state, then reload so the list reflects
+  /// the cloud copy.
+  ///
+  /// Fails quietly: the snapshot the picker restored is a complete profile, so
+  /// an offline switch is a working switch with slightly older data.
+  Future<void> _refreshCloudProfile() async {
+    if (!CloudRuntime.hasServer) return;
+    if (_cloudRefreshRunning) return;
+    _cloudRefreshRunning = true;
+    try {
+      final sync = CloudSync(db: widget.db);
+      // The keychain, not the server: `activeProfileId` asks the server and
+      // would answer with the profile *before* the switch until the call below
+      // lands.
+      final profileId = await sync.cachedProfileId();
+      if (profileId == null) return;
+      try {
+        await sync.setProfile(profileId);
+      } catch (_) {
+        // Offline: the pulls still target the id explicitly; the next switch or
+        // cloud-screen entry tells the server.
+      }
+      await sync.pullSources(widget.store, profileId);
+      await sync.pullMetadata(widget.store, profileId);
+      await sync.pullFavorites(widget.store, profileId);
+      await sync.pullWatchState(widget.store, profileId);
+      unawaited(SettingsAutoSync.reconcile());
+      if (!mounted) return;
+      await _loadActive();
+    } catch (_) {
+      // A dead network leaves the restored snapshot in place.
+    } finally {
+      _cloudRefreshRunning = false;
+    }
+  }
+
+  /// One refresh at a time: `_loadActive` can fire again (a source change
+  /// landing while this runs) and two pulls would race `setAll`.
+  bool _cloudRefreshRunning = false;
 
   Future<void> _startCloudAutoSync() async {
     if (!CloudRuntime.hasServer) return;
@@ -357,6 +405,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } catch (_) {
       // The local/empty path continues; a retry happens on the next load.
     }
+    // A profile switch handed over before telling the server or pulling its
+    // data; that is this flag. Runs after the UI is up and reloads when it
+    // lands (see [_refreshCloudProfile]).
+    if (takeCloudProfileRefresh()) unawaited(_refreshCloudProfile());
     final cfg = await widget.store.activeConfig();
     if (cfg != null) await migrateSourceIdentity(widget.db, cfg);
     final metadata = await widget.store.metadataConfig();

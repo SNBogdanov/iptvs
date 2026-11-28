@@ -1224,12 +1224,25 @@ Isolation model (`lib/data/local_profile_store.dart`): every profile — local *
 cloud-managed ids set from `CloudSync.managedSourceIds`). Switching away snapshots the current
 state into its owner; switching to a local profile restores its snapshot verbatim (including an
 empty list — and clears the managed-ids set so a later cloud "Pull now" can't merge cloud sources
-into a local profile); switching to a cloud profile restores its snapshot first (its device-local
-extra sources + managed ids), then does the normal `setProfile` + pull. This keeps `pullSources`'s
-"preserve non-managed sources" semantic working on the right baseline and prevents cross-profile
-source leaks. New local profiles are seeded with only the Demo source. Manage mode opens a
-per-profile menu — set/change/remove its PIN, and (local profiles only) delete it; cloud profiles
-are otherwise managed in the web panel.
+into a local profile); switching to a cloud profile writes its identity first, restores its
+snapshot (its device-local extra sources + managed ids), then refreshes from the cloud. This keeps
+`pullSources`'s "preserve non-managed sources" semantic working on the right baseline and prevents
+cross-profile source leaks. New local profiles are seeded with only the Demo source. Manage mode
+opens a per-profile menu — set/change/remove its PIN, and (local profiles only) delete it; cloud
+profiles are otherwise managed in the web panel.
+
+**The switch is local; the network half happens after it.** A cloud switch used to run
+`setProfile` (an RPC) and the four pulls *before* handing over, so the sources were already the new
+profile's while the identity — and the home screen — still belonged to the old one; on a slow link
+that gap was minutes, with the picker spinning. The picker now writes the target id with
+`CloudSync.setProfileLocal` (keychain only) and `LocalProfileStore.setActive`, restores the target's
+local snapshot, and leaves at once; it raises `requestCloudProfileRefresh()`, which
+`HomeShell._loadActive` consumes once to run `_refreshCloudProfile` — `setProfile` against the
+server, then `pullSources`/`pullMetadata`/`pullFavorites`/`pullWatchState`, then a reload so the
+list reflects the cloud copy. It fails quietly: the restored snapshot is a complete profile, so an
+offline switch is a working switch with slightly older data. `cachedProfileId()` (keychain) is used
+here rather than `activeProfileId()`, which asks the server and would answer with the *previous*
+profile until the RPC lands.
 
 ### Deleting a profile
 

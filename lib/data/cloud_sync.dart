@@ -681,6 +681,16 @@ class CloudSync {
     await _storage.write(key: _kProfileId, value: profileId);
   }
 
+  /// Writes the profile locally, **without** the `set_device_profile` round
+  /// trip.
+  ///
+  /// Split out of [setProfile] so a profile switch can hand over to the home
+  /// screen at once: the identity the app reads is the keychain value, while
+  /// telling the server (and pulling its data) is the slow half that happens
+  /// after the UI has already moved.
+  Future<void> setProfileLocal(String profileId) =>
+      _storage.write(key: _kProfileId, value: profileId);
+
   /// Pull the given profile's sources into [store]. Cloud-managed sources are
   /// replaced and ordered to match the panel; any local-only sources the user
   /// added on the device are kept (after the cloud ones). Returns the number of
