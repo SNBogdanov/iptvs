@@ -13,6 +13,14 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Added
 
+- **Live, Movies and Series can each be hidden from the channel list.** Three switches in Settings
+  ("Live section", "Movies section", "Series section") store one device-wide preference; **at least
+  one section always stays** — the last switch refuses to turn off and says so. With a single
+  section left the whole tab row is not drawn and the list opens straight into it; with Live
+  hidden the live catalogue, its EPG refreshers and the preview pane are skipped entirely, so a
+  viewer who only watches films costs nothing on the live side. The choice is read before the first
+  frame, so the tabs never flash and then collapse.
+
 - **A television pages the VOD and series lists with Down on the last row.** Pressing Down on the last
   available row asks for the next screenful, shows it, and moves the cursor one row down **without
   changing the column** — the panel no longer has a "Next page" button to walk to at the bottom-right
@@ -29,6 +37,36 @@ each release's notes also appear on GitHub Releases. New work lands under
   exactly as before.
 
 ### Fixed
+
+- **The in-player channel list opens on the channel that is playing, without scrolling to it.** The
+  list's state was created at the top and then animated down to the cursor, so every open showed
+  channel 1 first and scrolled through the range. It is now created at the cursor's row (two above
+  it, the same placement the follow-up scroll uses), and that follow-up jumps instead of animating
+  while nothing is laid out or when the panel switches rung (channels → schedule).
+
+- **Switching profiles is instant: the profile changes first, the cloud data after it.** A cloud
+  switch used to run the `set_device_profile` call and all four pulls *before* handing over, so the
+  sources were already the new profile's while the app still called itself the old one — minutes on
+  a slow link, behind a spinner. The picker now writes the new identity locally (`setProfileLocal` +
+  `setActive`), restores that profile's own snapshot and leaves immediately; `HomeShell` then runs
+  the server call and the pulls in the background and reloads when they land. The restored snapshot
+  is a complete profile, so an offline switch still works.
+
+- **The live preview draws in the channel's own aspect mode.** The preview panel ignored the framing
+  entirely — the native preview's frame always took the picture's ratio and the embedded one kept the
+  default fit — so a channel set (or pinned) to Fill played boxed in the list, unlike the same channel
+  fullscreen. `LivePreviewController.start` now carries the label into both paths, the Android shared
+  engine applies it to its `AspectRatioFrameLayout` (crop for Fill, distort for Stretch, forced ratio
+  for 16:9/4:3) and the embedded surface applies `BoxFit` plus the mpv options before the first
+  frame; a change made in the fullscreen player reaches the still-running preview immediately.
+
+- **The Android TV player remembers the button you were on — VOD no longer jumps back to pause.**
+  Hiding the chrome removes its controls (and their `FocusRequester`s) from composition, so the
+  remembered requester could not be re-attached and the bar reopened on play/pause every time.
+  `PlayerFocusMemory` is keyed now: each control registers its current requester under a stable key
+  when composed and reports the key when focused, so the reopened bar finds the live control —
+  including the VOD scrubber and the volume chip — and only falls back to play/pause when that
+  control is genuinely gone.
 
 - **"Return to release" no longer claims the release is a separate app when it is the same one.**
   The developer-build confirmation said the published APK always installs beside the running app as
