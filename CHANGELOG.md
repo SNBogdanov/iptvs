@@ -11,6 +11,8 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-28
+
 ### Added
 
 - **The app's preferences are backed up per physical device.** Every `app_*` setting plus the
@@ -480,7 +482,8 @@ each release's notes also appear on GitHub Releases. New work lands under
   maximized window and a window hidden to the tray across a display sleep/wake.
 - Windows: Back/Escape can close playback while "Reconnecting..." is shown.
 
-[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.3...main
+[Unreleased]: https://github.com/SNBogdanov/iptvs/compare/v1.0.4...main
+[1.0.4]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.4
 [1.0.3]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.3
 [1.0.2]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.2
 [1.0.1]: https://github.com/SNBogdanov/iptvs/releases/tag/v1.0.1
