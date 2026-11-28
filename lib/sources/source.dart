@@ -19,6 +19,17 @@ class Category {
 
 enum ContentKind { live, movie, series, season, episode }
 
+/// The **sections** the channel list offers, in tab order.
+///
+/// A subset of [ContentKind] on purpose: `season`/`episode` are catalogue
+/// results inside a series, never a destination of their own, so they must not
+/// appear in a list of tabs or in the "which sections are visible" preference.
+const List<ContentKind> kContentSections = [
+  ContentKind.live,
+  ContentKind.movie,
+  ContentKind.series,
+];
+
 /// The URL convention a provider uses for programmes in its archive.
 enum CatchupUrlMode { unsupported, xtreamTimeshift, stalkerQuery, m3uTemplate }
 

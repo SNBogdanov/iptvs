@@ -8,6 +8,7 @@ import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/content_tabs_visibility.dart';
 import '../data/device_class.dart';
 import '../data/diagnostics_log.dart';
 import '../data/last_channel_store.dart';
@@ -471,6 +472,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   final _searchController = TextEditingController();
 
   ContentKind _tab = ContentKind.live;
+
+  /// The sections this device shows, in tab order. Never empty (see
+  /// [visibleContentTabs]); a hidden section is skipped entirely — its tab, its
+  /// catalogue and, for Live, its preview pane and EPG refresher.
+  List<ContentKind> get _visibleTabs => visibleContentTabList();
   // Live channel/category/EPG data + load lifecycle live in a controller; the
   // screen keeps the live focus/D-pad state and preview player (see below).
   late LiveController _live;
@@ -959,6 +965,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // without this a shape change left "Next page" revealing the old number of
     // rows until some unrelated rebuild came along.
     vodCardOrientation.addListener(_onVodCardShapeChanged);
+    // The section choice is made on a Settings route pushed *over* this screen,
+    // so nothing here rebuilds when it pops. The notifier also carries a change
+    // made on another screen instance.
+    visibleContentTabs.addListener(_onVisibleTabsChanged);
+    // Open on the first **visible** section: with Live hidden there is no live
+    // catalogue to build and no preview pane to draw.
+    _tab = _visibleTabs.first;
     // The live category remembered for this source, read from the boot-time
     // cache so the first build already opens on it — a keychain `await` here
     // would paint "All" for a frame and then jump, and the sidebar cursor would
@@ -1002,13 +1015,36 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // The scheduled catalogue refresh runs *after* the cached one is in hand,
     // never instead of it: a launch must paint the cached list immediately, and
     // a background refresh must not be able to delay or blank it.
-    unawaited(
-      _loadLive().whenComplete(() {
-        if (mounted) unawaited(_maybeAutoRefresh());
-      }),
-    );
-    _live.startEpgRefresh();
-    _globalFavorites.startEpgRefresh();
+    // With Live hidden there is no live catalogue to fetch, and the EPG
+    // refreshers only feed the live sidebar and badges: open straight into the
+    // first visible section instead.
+    if (_tab == ContentKind.live) {
+      unawaited(
+        _loadLive().whenComplete(() {
+          if (mounted) unawaited(_maybeAutoRefresh());
+        }),
+      );
+      _live.startEpgRefresh();
+      _globalFavorites.startEpgRefresh();
+    } else {
+      _loadMediaTab(_tab);
+      unawaited(_maybeAutoRefresh());
+    }
+  }
+
+  /// The section choice changed: follow it.
+  ///
+  /// Stays on the current tab while it is still visible; otherwise moves to the
+  /// first one that is (and `_selectTab` does the housekeeping — stopping the
+  /// preview when leaving Live, clearing the search).
+  void _onVisibleTabsChanged() {
+    if (!mounted) return;
+    final tabs = _visibleTabs;
+    if (tabs.contains(_tab)) {
+      setState(() {});
+      return;
+    }
+    _selectTab(tabs.first);
   }
 
   void _createRepositoryControllers() {
@@ -1422,9 +1458,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // A different source has its own remembered category (ids are the
       // provider's), so the previous one must not leak into it.
       _restoreLiveCategory();
-      _loadLive();
-      _live.startEpgRefresh();
-      _globalFavorites.startEpgRefresh();
+      if (_visibleTabs.contains(ContentKind.live)) {
+        _loadLive();
+        _live.startEpgRefresh();
+        _globalFavorites.startEpgRefresh();
+      }
       if (_tab != ContentKind.live) {
         _loadMediaTab(_tab);
       }
@@ -1622,6 +1660,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   @override
   void dispose() {
     vodCardOrientation.removeListener(_onVodCardShapeChanged);
+    visibleContentTabs.removeListener(_onVisibleTabsChanged);
     alwaysOnTopEnabled.removeListener(_syncAlwaysOnTop);
     resumeRequest.removeListener(_onResumeRequested);
     silenceRequest.removeListener(_onSilenceRequested);
@@ -3865,7 +3904,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   void _selectTab(ContentKind kind) {
-    if (_tab == kind) return;
+    // A hidden section is not a destination: the tab row does not draw it and
+    // the notifier sends the list to a visible one before this can be reached.
+    if (_tab == kind || !_visibleTabs.contains(kind)) return;
     final previous = _tab;
     if (previous == ContentKind.live && kind != ContentKind.live) {
       unawaited(_preview.stop());
@@ -4143,7 +4184,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   /// The content tabs — the top of the Back ladder and the D-pad's ceiling.
-  void _focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
+  void _focusTabs() {
+    // With a single section the row is not drawn at all, so there is nothing to
+    // hand focus to and Up at the top of the list stays put.
+    if (_visibleTabs.length < 2) return;
+    _tabFocusNodes[_tab]?.requestFocus();
+  }
 
   /// Apply a live category filter: OK on a sidebar row, a tap, or the phone
   /// dropdown. The focus coordinator moves OK activation into a non-empty
@@ -4559,11 +4605,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             child: FocusTraversalGroup(
               child: Column(
                 children: [
-                  ChannelContentTabs(
-                    value: _tab,
-                    onChanged: _selectTab,
-                    focusNodes: _tabFocusNodes,
-                  ),
+                  // One section left means no choice to make: the row would be
+                  // a single chip that can only restate what is already on
+                  // screen, so it is not drawn at all.
+                  if (_visibleTabs.length > 1)
+                    ChannelContentTabs(
+                      value: _tab,
+                      onChanged: _selectTab,
+                      focusNodes: _tabFocusNodes,
+                      kinds: _visibleTabs,
+                    ),
                   // Toolbar + status line read the data controllers (loading /
                   // enrich / category state) but not the preview, so preview ticks
                   // never rebuild them.

@@ -36,6 +36,10 @@ class AppSettingsStore {
   static const _kShowPlayerClock = 'app_show_player_clock';
   static const _kShowPlaybackTimes = 'app_show_playback_times';
   static const _kShowChannelName = 'app_show_channel_name';
+  // The channel list's sections. Stored as a comma-separated list of the
+  // `ContentKind` names this device wants; absent means all three.
+  static const _kVisibleContentTabs = 'app_visible_content_tabs';
+  static const _kContentTabNames = ['live', 'movie', 'series'];
   static const _kAutoPlayNext = 'app_auto_play_next';
   static const _kNextVideoBehavior = 'app_next_video_behavior';
   static const _kSeekStepSeconds = 'app_seek_step_seconds';
@@ -386,6 +390,37 @@ class AppSettingsStore {
     }
   }
 
+  /// The channel-list sections this device shows, as `ContentKind.name`s.
+  ///
+  /// Absent means **all three** — the default, and what an untouched install
+  /// draws. Never empty: an unreadable or empty value is read back as all
+  /// three, because a preference that removed every section would leave the
+  /// app with nothing to show. A name this build does not know (a newer
+  /// version's section) is ignored rather than kept, so it cannot resurrect a
+  /// tab here.
+  Future<Set<String>> visibleContentTabs() async {
+    final raw = await _storage.read(key: _kVisibleContentTabs);
+    if (raw == null) return _kContentTabNames.toSet();
+    final names = {
+      for (final value in raw.split(','))
+        if (_kContentTabNames.contains(value.trim())) value.trim(),
+    };
+    return names.isEmpty ? _kContentTabNames.toSet() : names;
+  }
+
+  Future<void> setVisibleContentTabs(Set<String> names) async {
+    final known = {
+      for (final name in _kContentTabNames)
+        if (names.contains(name)) name,
+    };
+    // All three (or nothing) is the default, stored as absence.
+    if (known.isEmpty || known.length == _kContentTabNames.length) {
+      await _delete(key: _kVisibleContentTabs);
+    } else {
+      await _write(key: _kVisibleContentTabs, value: known.join(','));
+    }
+  }
+
   /// Whether a film or episode moves on to its sibling when it plays to the
   /// end (VOD/series only; live never completes). Defaults to false, so only an
   /// explicit `true` is written and an untouched install stops at the credits
@@ -532,8 +567,7 @@ class AppSettingsStore {
     final all = await _storage.readAll();
     return <String, String>{
       for (final entry in all.entries)
-        if (_isSyncedSetting(entry.key) &&
-            entry.key != _kCloudSettingsSyncedAt)
+        if (_isSyncedSetting(entry.key) && entry.key != _kCloudSettingsSyncedAt)
           entry.key: entry.value,
     };
   }
@@ -566,9 +600,8 @@ class AppSettingsStore {
     return raw == null ? null : DateTime.tryParse(raw)?.toUtc();
   }
 
-  Future<void> setCloudSettingsSyncedAt(DateTime value) =>
-      _storage.write(
-        key: _kCloudSettingsSyncedAt,
-        value: value.toUtc().toIso8601String(),
-      );
+  Future<void> setCloudSettingsSyncedAt(DateTime value) => _storage.write(
+    key: _kCloudSettingsSyncedAt,
+    value: value.toUtc().toIso8601String(),
+  );
 }

@@ -16,6 +16,7 @@ import 'package:media_kit/media_kit.dart';
 import 'data/app_database.dart';
 import 'data/app_settings_store.dart';
 import 'data/cloud_runtime.dart';
+import 'data/content_tabs_visibility.dart';
 import 'data/device_class.dart';
 import 'data/diagnostics_log.dart';
 import 'data/net.dart' show redactText;
@@ -125,11 +126,15 @@ Future<void> main() async {
   // is the wide two-pane UI regardless of the logical width its density
   // reports — `isWideLayout`). Awaiting it ahead of this group added its
   // latency to time-to-first-frame for nothing.
-  final (db, sources, _, _) = await (
+  final (db, sources, _, _, _) = await (
     AppDatabase.open(),
     store.list(),
     detectDeviceClass(),
     _initialiseCloud(),
+    // Which channel-list sections exist. Awaited with the rest: the tab row's
+    // very presence depends on it, so a late read would draw three tabs and
+    // then collapse them on the first frame the user sees.
+    loadVisibleContentTabs(),
   ).wait;
   final stateReadyMs = bootWatch.elapsedMilliseconds;
   // Repairs the pre-PR4 cache namespaces, but it is an optimisation of existing

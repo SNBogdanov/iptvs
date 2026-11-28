@@ -19,12 +19,30 @@ class ChannelContentTabs extends StatelessWidget {
   final ValueChanged<ContentKind> onChanged;
   final Map<ContentKind, FocusNode> focusNodes;
 
+  /// The sections to draw, in order. The screen hides the whole row when only
+  /// one is left (see `ChannelListScreen._visibleTabs`), so this normally holds
+  /// two or three.
+  final List<ContentKind> kinds;
+
   const ChannelContentTabs({
     super.key,
     required this.value,
     required this.onChanged,
     required this.focusNodes,
+    this.kinds = kContentSections,
   });
+
+  static const _icons = {
+    ContentKind.live: Icons.live_tv_rounded,
+    ContentKind.movie: Icons.movie_outlined,
+    ContentKind.series: Icons.tv_outlined,
+  };
+
+  static const _labels = {
+    ContentKind.live: 'Live',
+    ContentKind.movie: 'Movies',
+    ContentKind.series: 'Series',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -34,29 +52,16 @@ class ChannelContentTabs extends StatelessWidget {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            _TabChip(
-              icon: Icons.live_tv_rounded,
-              label: 'Live',
-              selected: value == ContentKind.live,
-              focusNode: focusNodes[ContentKind.live],
-              onTap: () => onChanged(ContentKind.live),
-            ),
-            const SizedBox(width: 8),
-            _TabChip(
-              icon: Icons.movie_outlined,
-              label: 'Movies',
-              selected: value == ContentKind.movie,
-              focusNode: focusNodes[ContentKind.movie],
-              onTap: () => onChanged(ContentKind.movie),
-            ),
-            const SizedBox(width: 8),
-            _TabChip(
-              icon: Icons.tv_outlined,
-              label: 'Series',
-              selected: value == ContentKind.series,
-              focusNode: focusNodes[ContentKind.series],
-              onTap: () => onChanged(ContentKind.series),
-            ),
+            for (final kind in kinds) ...[
+              if (kind != kinds.first) const SizedBox(width: 8),
+              _TabChip(
+                icon: _icons[kind] ?? Icons.live_tv_rounded,
+                label: _labels[kind] ?? kind.name,
+                selected: value == kind,
+                focusNode: focusNodes[kind],
+                onTap: () => onChanged(kind),
+              ),
+            ],
           ],
         ),
       ),
@@ -625,7 +630,6 @@ class ChannelCategoryMultiPicker extends StatelessWidget {
     onApply(result.$1, exclusive: result.$2);
   }
 }
-
 
 class MediaCategoryDropdown extends StatelessWidget {
   final List<MediaCategory> categories;

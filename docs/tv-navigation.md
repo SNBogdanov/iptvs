@@ -90,6 +90,19 @@ navigation code.
   `FocusTraversalGroup` so D-pad arrows stay within the body instead of jumping sideways into the
   app bar (Flutter's directional traversal is geometry-based).
 
+  **Sections can be hidden in Settings, and the row disappears when one is left.** The three
+  switches live under Settings → "Live section" / "Movies section" / "Series section" and write one
+  `app_visible_content_tabs` preference (device-wide, so it rides the per-device settings backup).
+  At least one section always stays: the settings screen refuses to turn the last one off (with a
+  snackbar), `saveVisibleContentTabs` ignores an empty set, and the store reads an empty or
+  unreadable value back as all three. `ChannelListScreen` listens to the
+  `visibleContentTabs` notifier, opens on the first visible section, and **does not draw
+  `ChannelContentTabs` at all when only one is visible** — a single chip would only restate what is
+  already on screen. With Live hidden the screen also skips the live catalogue load, the EPG
+  refreshers and the preview pane; `_focusTabs` becomes a no-op so Up at the top of the list has no
+  vanishing target. The choice is seeded before the first frame (`main.dart` awaits
+  `loadVisibleContentTabs` with the boot group), so the row never flashes and then collapses.
+
 ## The live tab selection model
 
 The live tab is a selection model (`live_focus_coordinator.dart`) — the same pattern the TV guide

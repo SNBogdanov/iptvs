@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 
 import '../data/app_settings_store.dart';
+import '../data/content_tabs_visibility.dart';
 import '../data/device_class.dart';
 import '../data/local_profile_store.dart';
 import '../data/proxy_config.dart';
@@ -16,6 +17,7 @@ import '../player/player_controls_prefs.dart';
 import '../player/seek_step.dart';
 import '../player/tray.dart';
 import '../player/window_placement.dart';
+import '../sources/source.dart' show ContentKind, kContentSections;
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 
@@ -41,6 +43,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool? _showClock;
   bool? _showPlaybackTimes;
   bool? _showChannelName;
+
+  /// Which channel-list sections are visible; null until [_load] reads the
+  /// notifier `main` seeded.
+  Set<ContentKind>? _sections;
   VodCardOrientation? _cards;
   bool? _autoPlayNext;
   bool? _movieQuickPlay;
@@ -69,6 +75,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final showClock = await widget.store.showPlayerClock();
     final showPlaybackTimes = await widget.store.showPlaybackTimes();
     final showChannelName = await widget.store.showChannelName();
+    final sections = {...visibleContentTabs.value};
     final cards = VodCardOrientation.parse(
       await widget.store.rawVodCardOrientation(),
     );
@@ -94,6 +101,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _showClock = showClock;
         _showPlaybackTimes = showPlaybackTimes;
         _showChannelName = showChannelName;
+        _sections = sections;
         _cards = cards;
         _autoPlayNext = autoPlayNext;
         _movieQuickPlay = movieQuickPlay;
@@ -206,6 +214,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
     showChannelName.value = next;
     await widget.store.setShowChannelName(next);
   }
+
+  /// Shows or hides one content section in the channel list.
+  ///
+  /// The **last** visible section cannot be turned off: the list would have no
+  /// content at all, and the tab row (which is the only way back) would be gone
+  /// with it. Refusing here rather than silently re-enabling later keeps the
+  /// switch honest — the user sees "On" and a message.
+  Future<void> _toggleSection(ContentKind kind) async {
+    final current = {...?_sections};
+    if (current.contains(kind)) {
+      if (current.length == 1) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('At least one section has to stay visible'),
+          ),
+        );
+        return;
+      }
+      current.remove(kind);
+    } else {
+      current.add(kind);
+    }
+    setState(() => _sections = current);
+    await saveVisibleContentTabs(current);
+  }
+
+  String _sectionTrailing(ContentKind kind) =>
+      (_sections ?? {...kContentSections}).contains(kind) ? 'On' : 'Off';
 
   Future<void> _toggleAutoPlayNext() async {
     final next = !(_autoPlayNext ?? false);
@@ -323,6 +359,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 trailing: (_rememberPlacement ?? true) ? 'On' : 'Off',
                 onTap: _toggleRememberPlacement,
               ),
+            _SettingTile(
+              icon: Icons.live_tv_rounded,
+              title: 'Live section',
+              subtitle:
+                  'Show Live in the channel list. Hidden, its channels, '
+                  'categories and preview pane are skipped entirely. At least '
+                  'one section has to stay visible; with only one left the tab '
+                  'row is not drawn and the list opens straight into it.',
+              trailing: _sectionTrailing(ContentKind.live),
+              onTap: () => _toggleSection(ContentKind.live),
+            ),
+            _SettingTile(
+              icon: Icons.movie_outlined,
+              title: 'Movies section',
+              subtitle:
+                  'Show Movies in the channel list. Hidden, the tab and its '
+                  'catalogue are skipped entirely.',
+              trailing: _sectionTrailing(ContentKind.movie),
+              onTap: () => _toggleSection(ContentKind.movie),
+            ),
+            _SettingTile(
+              icon: Icons.tv_outlined,
+              title: 'Series section',
+              subtitle:
+                  'Show Series in the channel list. Hidden, the tab and its '
+                  'catalogue are skipped entirely.',
+              trailing: _sectionTrailing(ContentKind.series),
+              onTap: () => _toggleSection(ContentKind.series),
+            ),
             _SettingTile(
               icon: Icons.grid_view_outlined,
               title: 'VOD and series card shape',
