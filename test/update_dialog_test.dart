@@ -159,4 +159,43 @@ void main() {
     await tester.pumpAndSettle();
     expect(result, isTrue);
   });
+
+  // The "Return to release" confirmation used to claim the release always
+  // lands as a **separate** `.direct` app. That is true for a `.dev` build and
+  // false for the `githubDirect` iteration build the button exists for, which
+  // carries the same id and is replaced in place.
+  group('developer release dialog body', () {
+    String body({String? androidPackage, bool android = true}) =>
+        developmentReleaseDialogText(
+          current: '1.5.0',
+          releaseVersion: '1.5.0',
+          android: android,
+          androidPackage: androidPackage,
+        );
+
+    test('a build carrying the release id installs over itself', () {
+      final text = body(androidPackage: kReleaseAndroidPackage);
+      expect(text, contains('This is a developer build (1.5.0).'));
+      expect(text, contains('IPTVS Player 1.5.0 is the published release.'));
+      expect(text, contains('same application id ($kReleaseAndroidPackage)'));
+      expect(text, contains('installs over this build in place'));
+      expect(text, isNot(contains('separate app')));
+    });
+
+    test('a .dev build gets the release beside it', () {
+      final text = body(androidPackage: 'io.github.snbogdanov.iptvs.dev');
+      expect(text, contains('installs as a separate app'));
+      expect(text, contains(kReleaseAndroidPackage));
+      expect(text, contains('io.github.snbogdanov.iptvs.dev'));
+      expect(text, isNot(contains('in place')));
+    });
+
+    test('an unknown package id makes no claim about the install', () {
+      expect(body(androidPackage: null), isNot(contains('On Android')));
+      expect(
+        body(android: false, androidPackage: 'anything'),
+        isNot(contains('On Android')),
+      );
+    });
+  });
 }

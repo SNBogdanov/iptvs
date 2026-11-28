@@ -11,6 +11,15 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Return to release" no longer claims the release is a separate app when it is the same one.**
+  The developer-build confirmation said the published APK always installs beside the running app as
+  a second `.direct` package. That is true only for a `.dev` build: the `githubDirect` iteration
+  build — the one the button exists for — carries the same application id and is replaced in place.
+  The dialog now reads the running build's package id and states the outcome it will actually get
+  (in place, or beside, or nothing when the id is unknown).
+
 ## [1.0.4] - 2026-11-28
 
 ### Added

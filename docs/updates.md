@@ -223,7 +223,10 @@ AppImage.
   back on the release", which must work **at the same version number** — that is exactly the
   workflow of installing an iteration APK, finding and fixing a bug, cutting the release, and then
   returning to it from the device. A `.dev` build (development channel) shows the same card, for the
-  same reason; on Android its release lands beside the `.dev` app rather than over it.
+  same reason; on Android its release lands beside the `.dev` app rather than over it. The
+  confirmation names which of the two applies from the **running build's application id**
+  (`developmentReleaseDialogText`): the release id is upgraded in place, a `.dev` build gets a second
+  app; with no package metadata the dialog claims neither.
 
   It reads `update.json` and compares **before downloading**: `releaseInstallAllowed` is
   `release >= current`, and an **older** release is refused with a snackbar rather than silently

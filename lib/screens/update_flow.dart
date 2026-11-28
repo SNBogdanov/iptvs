@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../data/update_installer.dart';
 import '../data/update_manifest.dart';
@@ -140,10 +141,28 @@ Future<void> runReleaseInstall(
     return;
   }
 
+  // Which application id the **running** build carries decides whether the
+  // release lands over it or beside it, and the confirmation must not guess:
+  // a `githubDirect` iteration build is upgraded in place, a `.dev` build gets
+  // a second app. Read from the platform, not from `DISTRIBUTION_CHANNEL` —
+  // an iteration APK built with `--flavor githubDirect` but no channel define
+  // reports `development` while still carrying the `.direct` id.
+  String? androidPackage;
+  if (Platform.isAndroid) {
+    try {
+      androidPackage = (await PackageInfo.fromPlatform()).packageName;
+    } catch (_) {
+      // No package metadata: the dialog then says nothing about the install
+      // outcome rather than claiming the wrong one.
+    }
+    if (!context.mounted) return;
+  }
+
   final confirmed = await showDevelopmentReleaseDialog(
     context,
     release,
     current,
+    androidPackage: androidPackage,
   );
   if (confirmed != true || !context.mounted) return;
 
@@ -156,14 +175,55 @@ Future<void> runReleaseInstall(
   );
 }
 
+/// The Android application id the release pipeline produces: the
+/// `githubDirect` flavor (`android/app/build.gradle.kts`), whose `.direct`
+/// suffix is what the published APK carries.
+const String kReleaseAndroidPackage = 'io.github.snbogdanov.iptvs.direct';
+
+/// The body text of the "install the published release?" confirmation.
+///
+/// Pure and public so a test can pin the wording. The Android paragraph has to
+/// follow the **running build's** package id: a `githubDirect` iteration build
+/// (the one "Return to release" exists for) carries the release id and is
+/// upgraded in place, while a `.dev` build is a different app and the release
+/// lands beside it. The dialog used to state "separate app" for both, which
+/// described the `.dev` case only.
+String developmentReleaseDialogText({
+  required String current,
+  required String releaseVersion,
+  required bool android,
+  String? androidPackage,
+}) {
+  final String note;
+  if (!android || androidPackage == null) {
+    note = '';
+  } else if (androidPackage == kReleaseAndroidPackage) {
+    note =
+        '\n\nOn Android this release carries the same application id '
+        '($androidPackage), so it installs over this build in place: one icon, '
+        'and the app keeps its data. If Android refuses it because the two '
+        'builds were signed with different keys, uninstall this build first.';
+  } else {
+    note =
+        '\n\nOn Android the release installs as a separate app '
+        '($kReleaseAndroidPackage) beside this build ($androidPackage); '
+        'uninstall this build afterwards if you no longer need it.';
+  }
+  return 'This is a developer build ($current).\n\n'
+      'IPTVS Player $releaseVersion is the published release. It is downloaded '
+      'from GitHub and checked against its published size and SHA-256 before '
+      'installation.$note';
+}
+
 /// "This is a development build — install the release?" confirmation.
 ///
 /// Public so tests can pin the wording and the autofocused primary action.
 Future<bool?> showDevelopmentReleaseDialog(
   BuildContext context,
   ReleaseInfo release,
-  String current,
-) {
+  String current, {
+  String? androidPackage,
+}) {
   final android = Platform.isAndroid;
   return showDialog<bool>(
     context: context,
@@ -171,13 +231,12 @@ Future<bool?> showDevelopmentReleaseDialog(
       backgroundColor: AppColors.panelHi,
       title: Text('Install release ${release.version}?'),
       content: Text(
-        'This is a developer build ($current).\n\n'
-        'IPTVS Player ${release.version} is the published release. It is '
-        'downloaded from GitHub and checked against its published size and '
-        'SHA-256 before installation.'
-        '${android ? '\n\nOn Android the release installs as a separate app '
-                  '(the .direct package) beside this one; uninstall this build '
-                  'afterwards if you no longer need it.' : ''}',
+        developmentReleaseDialogText(
+          current: current,
+          releaseVersion: release.version,
+          android: android,
+          androidPackage: androidPackage,
+        ),
       ),
       actions: [
         TextButton(
