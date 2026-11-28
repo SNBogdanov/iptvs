@@ -188,6 +188,16 @@ from Dart (`dwellOptions` on `setZapModes`), so the native side draws it and nev
 "10 s" means. A tap still does the old thing — open the list, toggle the mode — and the long press
 adds the second meaning rather than an extra control.
 
+**On Windows the same hold is wired into the native GDI bar.** A 500 ms press on the
+bolt opens `NativeMenuKind::kZapPace` above the button — the pointer equivalent of the touch hold —
+while a click still toggles the mode; a held OK on the focused bolt opens it on **release**, exactly
+as it does on Android. The rows and the checkmark come from the same `dwellOptions`/`dwellSeconds`
+push on `setZapModes`, so there is no second ladder. Because the panel's rows are hit-tested with
+the pointer, an open pace menu is also **steppable from the keyboard**: Up/Down move one rung and
+send `zap:dwell:<seconds>` immediately (Dart persists it and the check follows), Enter/Space close
+it, Escape peels it like any other menu. Without that the keyboard route would open a panel it
+could not operate.
+
 **A hold also works from a D-pad, and the menu opens on release.** A remote sends no long-press
 event, so the focused button counts OK's key repeats as a hold and fires on the key **up**: firing
 while it was still down moved focus into the menu, and the remaining repeats then activated the row

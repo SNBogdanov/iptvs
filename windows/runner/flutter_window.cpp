@@ -97,6 +97,12 @@ constexpr UINT kMiniDragStartMessage = WM_APP + 0x50;
 constexpr UINT_PTR kNativeControlsHideTimer = 0x5031;
 constexpr UINT_PTR kNativeVideoResyncTimer = 0x5032;
 constexpr UINT_PTR kNativeZapBannerTimer = 0x5033;
+// A press on the auto-switch (bolt) button held this long is the **pace menu**,
+// not a toggle. Android's long-press threshold is the same 500 ms, so the two
+// surfaces ask for the same gesture; short enough that a deliberate hold feels
+// immediate and long enough that a click never turns into a menu.
+constexpr UINT_PTR kNativeZapHoldTimer = 0x5034;
+constexpr UINT kNativeZapHoldMs = 500;
 // System tray icon (docs/player.md "Windows tray icon"): the shell-notification
 // callback message and the popup menu's command ids. uID and callback message
 // must match between NIM_ADD and NIM_DELETE, hence named constants rather than
@@ -312,7 +318,7 @@ struct NativeMenuOption {
 
 // Which secondary list-menu (if any) is currently open. The menus all share one
 // rendering / hit-test / scroll path; only the backing option list differs.
-enum class NativeMenuKind { kNone, kAudio, kSubtitles, kSpeed };
+enum class NativeMenuKind { kNone, kAudio, kSubtitles, kSpeed, kZapPace };
 
 struct NativeControlState {
   std::wstring title;
@@ -327,6 +333,15 @@ struct NativeControlState {
   // and the next push moves the accent.
   bool zap_random = false;
   bool zap_auto = false;
+  // The auto-switch pace (seconds) and the ladder it has to be chosen from,
+  // mirrored from the same `setZapModes` push. The ladder is Dart's
+  // (`ChannelDwell.values`), so this surface renders the numbers it is sent and
+  // never invents a rung; `selected_dwell_id` is the option id the pace menu
+  // checks, and `dwell_menu_options` is its rendered list.
+  int zap_dwell_seconds = 10;
+  std::vector<int> zap_dwell_options;
+  std::string selected_dwell_id = "10";
+  std::vector<NativeMenuOption> dwell_menu_options;
   bool reconnecting = false; // live reconnect watchdog re-establishing the stream
   // A terminal VOD error, mirrored from Dart so the overlay can draw it: the
   // Flutter PlayerErrorOverlay sits behind the native video HWND on this
@@ -415,6 +430,24 @@ struct NativeControlState {
 };
 
 NativeControlState g_native_control_state;
+
+// A press on the auto-switch (bolt) button that may turn into the pace menu.
+//
+// Mouse: the press is held here until the button goes up — the timer opens the
+// menu while the button is still down, and the release either toggles the mode
+// (a click) or does nothing (the menu is already up).
+//
+// Keyboard: a remote has no long press, so holding the focused button is read
+// from key repeats (`WM_KEYDOWN` with the repeat bit) and resolved on
+// **release**, the rule Android's `IconControlButton` follows — opening the
+// menu while the key is still down would let the remaining repeats act on it.
+struct NativeZapHoldState {
+  bool mouse_down = false;
+  bool mouse_opened = false;
+  bool key_armed = false;
+  bool key_repeated = false;
+};
+NativeZapHoldState g_native_zap_hold;
 
 // In-player live zapping (docs/player.md "Live zapping").
 //
@@ -566,6 +599,8 @@ const std::vector<NativeMenuOption> &MenuOptions(NativeMenuKind kind) {
     return g_native_control_state.subtitle_tracks;
   case NativeMenuKind::kSpeed:
     return g_native_control_state.speed_options;
+  case NativeMenuKind::kZapPace:
+    return g_native_control_state.dwell_menu_options;
   default:
     return kEmpty;
   }
@@ -580,6 +615,8 @@ const std::string &MenuSelectedId(NativeMenuKind kind) {
     return g_native_control_state.selected_subtitle_id;
   case NativeMenuKind::kSpeed:
     return g_native_control_state.selected_speed_id;
+  case NativeMenuKind::kZapPace:
+    return g_native_control_state.selected_dwell_id;
   default:
     return kNone;
   }
@@ -593,6 +630,10 @@ std::wstring MenuHeader(NativeMenuKind kind) {
     return L"Subtitles";
   case NativeMenuKind::kSpeed:
     return L"Playback speed";
+  case NativeMenuKind::kZapPace:
+    // The same wording Android's Compose menu uses, so one gesture reads the
+    // same on both surfaces.
+    return L"Auto-switch every";
   default:
     return L"";
   }
@@ -606,9 +647,55 @@ std::string MenuSelectCommandPrefix(NativeMenuKind kind) {
     return "subtitleTrack:";
   case NativeMenuKind::kSpeed:
     return "speed:";
+  case NativeMenuKind::kZapPace:
+    // The shared zap vocabulary (`parseZapCommand` → `zap:dwell:<seconds>`),
+    // so the pace the user picks is applied and persisted by the controller
+    // that already owns it.
+    return "zap:dwell:";
   default:
     return "";
   }
+}
+
+// The pace menu's rows, rebuilt from the ladder Dart pushed. The label is the
+// "10 s" the phone's Compose menu prints, and the option id is the number
+// `zap:dwell:` carries — one vocabulary, one meaning.
+void RebuildDwellMenuOptions() {
+  g_native_control_state.dwell_menu_options.clear();
+  for (const int seconds : g_native_control_state.zap_dwell_options) {
+    if (seconds <= 0) {
+      continue;
+    }
+    NativeMenuOption option;
+    option.id = std::to_string(seconds);
+    option.label = std::to_wstring(seconds) + L" s";
+    g_native_control_state.dwell_menu_options.push_back(std::move(option));
+  }
+  g_native_control_state.selected_dwell_id =
+      std::to_string(g_native_control_state.zap_dwell_seconds);
+}
+
+// The pace one rung up or down Dart's ladder, or [current] when there is no
+// neighbour. The keyboard path steps the value with it: a menu the pointer
+// cannot reach has to be driven by the arrows, and stepping the **value** (with
+// the checkmark moving) is the same result a click on a row gives.
+int NeighbourDwellSeconds(int current, int direction) {
+  const auto &ladder = g_native_control_state.zap_dwell_options;
+  if (ladder.empty()) {
+    return current;
+  }
+  int index = -1;
+  for (size_t i = 0; i < ladder.size(); i++) {
+    if (ladder[i] == current) {
+      index = static_cast<int>(i);
+      break;
+    }
+  }
+  if (index < 0) {
+    index = 0;
+  }
+  index = std::clamp(index + direction, 0, static_cast<int>(ladder.size()) - 1);
+  return ladder[static_cast<size_t>(index)];
 }
 
 std::wstring Utf8ToWide(const std::string &value) {
@@ -1904,6 +1991,10 @@ int MenuAnchorX(const BottomLayout &l) {
     return (l.subtitles.left + l.subtitles.right) / 2;
   case NativeMenuKind::kSpeed:
     return (l.speed.left + l.speed.right) / 2;
+  case NativeMenuKind::kZapPace:
+    // The bolt the hold was on, so the panel appears above the control the
+    // user is still pressing.
+    return (l.zap_auto.left + l.zap_auto.right) / 2;
   default:
     return (l.fullscreen.left + l.fullscreen.right) / 2;
   }
@@ -2063,6 +2154,8 @@ void ApplyOverlayOwnedCommand(HWND controls_hwnd,
                                     ? NativeMenuKind::kSubtitles
                                 : command == "menu:speed"
                                     ? NativeMenuKind::kSpeed
+                                : command == "menu:pace"
+                                    ? NativeMenuKind::kZapPace
                                     : NativeMenuKind::kNone;
     if (g_native_control_state.open_menu == kind) {
       g_native_control_state.open_menu = NativeMenuKind::kNone;
@@ -4324,6 +4417,34 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
     break;
   }
   case WM_LBUTTONUP:
+    if (g_native_zap_hold.mouse_down) {
+      // The bolt's press resolves here: a click toggles the mode, a hold that
+      // already opened the pace menu leaves it standing, and a release off the
+      // button does nothing — ordinary button semantics.
+      const bool opened = g_native_zap_hold.mouse_opened;
+      g_native_zap_hold.mouse_down = false;
+      g_native_zap_hold.mouse_opened = false;
+      if (HWND owner = NativeControlsOwner(hwnd)) {
+        KillTimer(owner, kNativeZapHoldTimer);
+      }
+      if (GetCapture() == hwnd) {
+        ReleaseCapture();
+      }
+      RECT client;
+      GetClientRect(hwnd, &client);
+      const BottomLayout layout = ComputeBottomLayout(client);
+      const bool on_button =
+          layout.has_zap_modes &&
+          PointInRect(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam),
+                      layout.zap_auto);
+      if (!opened && on_button) {
+        if (HWND owner = NativeControlsOwner(hwnd)) {
+          PostMessage(owner, kNativeControlCommandMessage,
+                      reinterpret_cast<WPARAM>(new std::string("zap:auto")), 0);
+        }
+      }
+      return 0;
+    }
     if (g_native_slider_drag != NativeSliderDrag::kNone) {
       EndNativeSliderDrag(hwnd, true, GET_X_LPARAM(lparam));
       return 0;
@@ -4332,6 +4453,13 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
   case WM_CAPTURECHANGED:
     // Something else took the mouse — abandon rather than commit a value the
     // user never released on.
+    if (g_native_zap_hold.mouse_down) {
+      g_native_zap_hold.mouse_down = false;
+      g_native_zap_hold.mouse_opened = false;
+      if (HWND owner = NativeControlsOwner(hwnd)) {
+        KillTimer(owner, kNativeZapHoldTimer);
+      }
+    }
     EndNativeSliderDrag(hwnd, false, 0);
     return 0;
   case WM_LBUTTONDOWN: {
@@ -4401,6 +4529,22 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     const std::string command = NativeControlCommandFromPoint(
         hwnd, control_kind, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+    // The auto-switch button is one gesture deeper than a toggle: a **hold**
+    // opens the pace menu, a click still flips the mode. The button is the
+    // only control with a second action, so this is the one place the press is
+    // resolved on release instead of here.
+    if (command == "zap:auto") {
+      g_native_zap_hold.mouse_down = true;
+      g_native_zap_hold.mouse_opened = false;
+      SetCapture(hwnd);
+      if (HWND owner = NativeControlsOwner(hwnd)) {
+        // A bar that hides while the button is held would take the button (and
+        // the release) out from under the gesture.
+        KillTimer(owner, kNativeControlsHideTimer);
+        SetTimer(owner, kNativeZapHoldTimer, kNativeZapHoldMs, nullptr);
+      }
+      return 0;
+    }
     // Both sliders become drags from here. Capture is what makes the gesture
     // survive the pointer leaving the track — without it the window stops
     // seeing moves, and never sees the button-up either.
@@ -4430,7 +4574,8 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
     }
     if (command.rfind("audioTrack:", 0) == 0 ||
         command.rfind("subtitleTrack:", 0) == 0 ||
-        command.rfind("speed:", 0) == 0) {
+        command.rfind("speed:", 0) == 0 ||
+        command.rfind("zap:dwell:", 0) == 0) {
       g_native_control_state.open_menu = NativeMenuKind::kNone;
       if (HWND parent = NativeControlsOwner(hwnd)) {
         PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
@@ -5404,6 +5549,28 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     return 0;
   }
 
+  // The release half of the bolt's "hold = pace menu" gesture. Handled here,
+  // before the Flutter handoff, for the same reason every other player key is:
+  // while the *video surface* holds focus a raw keyup must not reach the
+  // engine's keyboard intake.
+  if (message == WM_KEYUP && g_native_zap_hold.key_armed &&
+      (wparam == VK_RETURN || wparam == VK_SPACE || wparam == VK_SELECT)) {
+    const bool repeated = g_native_zap_hold.key_repeated;
+    g_native_zap_hold.key_armed = false;
+    g_native_zap_hold.key_repeated = false;
+    if (native_video_surface_ != nullptr) {
+      if (repeated && !g_native_control_state.dwell_menu_options.empty()) {
+        // Held long enough to mean the pace: the same menu a mouse hold opens.
+        ApplyOverlayOwnedCommand(native_controls_overlay_, hwnd, "menu:pace");
+        InvalidateNativeControls();
+      } else {
+        ShowNativeControls(true);
+        NotifyNativeControlCommand("zap:auto");
+      }
+      return 0;
+    }
+  }
+
   if (message == WM_KEYDOWN && native_video_surface_ != nullptr) {
     // In-player live zapping claims its keys before every other branch on
     // this surface — including the Escape/Back one below, because a
@@ -5479,6 +5646,32 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         break;
       }
       return 0;
+    }
+
+    // The pace menu with no pointer: Up/Down step the value itself, and Dart
+    // applies + persists it through the same `zap:dwell:` command a click on a
+    // row sends — the accent moves with the checkmark, so the panel stays the
+    // readout of what is in force. OK/Space closes it; Escape is handled above
+    // by the ordinary menu rung.
+    if (g_native_control_state.open_menu == NativeMenuKind::kZapPace) {
+      const int step = wparam == VK_UP ? -1 : (wparam == VK_DOWN ? 1 : 0);
+      if (step != 0) {
+        const int next = NeighbourDwellSeconds(
+            g_native_control_state.zap_dwell_seconds, step);
+        if (next != g_native_control_state.zap_dwell_seconds) {
+          ShowNativeControls(true);
+          KillTimer(hwnd, kNativeControlsHideTimer);
+          NotifyNativeControlCommand("zap:dwell:" + std::to_string(next));
+        }
+        return 0;
+      }
+      if (wparam == VK_RETURN || wparam == VK_SPACE || wparam == VK_SELECT) {
+        if (!IsKeyRepeat(lparam)) {
+          ApplyOverlayOwnedCommand(native_controls_overlay_, hwnd, "menu:pace");
+          InvalidateNativeControls();
+        }
+        return 0;
+      }
     }
 
     // A visible error panel owns OK/Enter: retry, the same command its button
@@ -5617,6 +5810,26 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
 
         const std::string command =
             CommandForFocusedItem(focusables[g_native_focus_index]);
+        // The bolt's press is resolved on **release**: a tap toggles the mode,
+        // a held key opens the pace menu. Sending on keydown would fire the
+        // toggle once per key repeat (the bug Android's `IconControlButton`
+        // had), and there would be no way to ask for a pace from a remote.
+        if (command == "zap:auto") {
+          if (IsKeyRepeat(lparam)) {
+            if (g_native_zap_hold.key_armed) {
+              g_native_zap_hold.key_repeated = true;
+              return 0;
+            }
+          } else {
+            g_native_zap_hold.key_armed = true;
+            g_native_zap_hold.key_repeated = false;
+            // A bar that hides while the button is held would take the button
+            // out from under the gesture.
+            KillTimer(hwnd, kNativeControlsHideTimer);
+            InvalidateNativeControls();
+            return 0;
+          }
+        }
         // "Go to live" removes itself once the reload reaches the live edge, and
         // the ring is rebuilt from scratch on the next paint — so the index left
         // behind silently points at whatever control slid into that slot (or is
@@ -5833,6 +6046,19 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (wparam == kNativeZapBannerTimer) {
       KillTimer(hwnd, kNativeZapBannerTimer);
       HideZapBanner();
+      return 0;
+    }
+    if (wparam == kNativeZapHoldTimer) {
+      KillTimer(hwnd, kNativeZapHoldTimer);
+      // The bolt has been held long enough to mean the pace, not the toggle.
+      // The menu opens now, while the button is still down; the release that
+      // follows is swallowed (see WM_LBUTTONUP).
+      if (g_native_zap_hold.mouse_down && !g_native_zap_hold.mouse_opened &&
+          !g_native_control_state.dwell_menu_options.empty()) {
+        g_native_zap_hold.mouse_opened = true;
+        ApplyOverlayOwnedCommand(native_controls_overlay_, hwnd, "menu:pace");
+        InvalidateNativeControls();
+      }
       return 0;
     }
     if (wparam == kNativeControlsHideTimer) {
@@ -6777,14 +7003,50 @@ void FlutterWindow::HideZapBanner() {
 void FlutterWindow::UpdateNativeZapModes(const flutter::EncodableValue *args) {
   const bool random = EncodableBoolArg(args, "random", false);
   const bool auto_switch = EncodableBoolArg(args, "autoSwitch", false);
+  const int dwell = EncodableIntArg(
+      args, "dwellSeconds", g_native_control_state.zap_dwell_seconds);
+  // The ladder, verbatim: Dart pushes `ChannelDwell.values`, and this surface
+  // must not add or drop a rung — a pace that is not in Dart's ladder is
+  // refused by the controller, so offering it would be a dead menu row.
+  std::vector<int> ladder;
+  if (args && std::holds_alternative<flutter::EncodableMap>(*args)) {
+    const auto &map = std::get<flutter::EncodableMap>(*args);
+    const auto found = map.find(flutter::EncodableValue("dwellOptions"));
+    if (found != map.end() &&
+        std::holds_alternative<flutter::EncodableList>(found->second)) {
+      for (const auto &value :
+           std::get<flutter::EncodableList>(found->second)) {
+        if (std::holds_alternative<int32_t>(value)) {
+          ladder.push_back(std::get<int32_t>(value));
+        } else if (std::holds_alternative<int64_t>(value)) {
+          ladder.push_back(static_cast<int>(std::get<int64_t>(value)));
+        }
+      }
+    }
+  }
+  const bool ladder_changed =
+      !ladder.empty() && ladder != g_native_control_state.zap_dwell_options;
+  const bool dwell_changed = dwell > 0 && dwell != g_native_control_state.zap_dwell_seconds;
   if (random == g_native_control_state.zap_random &&
-      auto_switch == g_native_control_state.zap_auto) {
+      auto_switch == g_native_control_state.zap_auto && !dwell_changed &&
+      !ladder_changed) {
     return;
   }
   g_native_control_state.zap_random = random;
   g_native_control_state.zap_auto = auto_switch;
-  // Only the two buttons' fill changed, but they live in the same composited
-  // region as the rest of the chrome — the same path `setControlState` uses.
+  if (dwell > 0) {
+    g_native_control_state.zap_dwell_seconds = dwell;
+  }
+  if (ladder_changed) {
+    g_native_control_state.zap_dwell_options = ladder;
+    RebuildDwellMenuOptions();
+  } else {
+    g_native_control_state.selected_dwell_id =
+        std::to_string(g_native_control_state.zap_dwell_seconds);
+  }
+  // Only the two buttons' fill and the pace menu's check changed, but they live
+  // in the same composited region as the rest of the chrome — the same path
+  // `setControlState` uses.
   native_controls_region_dirty_ = true;
   ApplyNativeControlsVisibility();
   InvalidateNativeControls();

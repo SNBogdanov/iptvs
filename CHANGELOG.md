@@ -11,6 +11,16 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+### Added
+
+- **Windows: the auto-switch pace can be changed while watching, from the control bar.** A 500 ms
+  press on the bolt opens the pace menu ("Auto-switch every 5 s … 60 s") above the button, with the
+  checkmark on the current period; a click still toggles the mode. A held OK on the focused bolt
+  opens the same menu on release, and Up/Down in an open pace menu step the value and apply it live
+  (`zap:dwell:<seconds>`), so a remote alone can reach the setting. The ladder is still Dart's
+  `ChannelDwell`, pushed on `setZapModes`; the chosen pace persists on the channel's own source,
+  exactly as before.
+
 ### Fixed
 
 - **"Return to release" no longer claims the release is a separate app when it is the same one.**
