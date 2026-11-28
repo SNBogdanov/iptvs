@@ -932,10 +932,6 @@ the connect form. **Read docs/cloud-sync.md before touching sync, pairing, profi
   migration and read through the public `get_schema_version()` RPC; `CloudSchema` compares it with
   the build constant, `db-migrate.yml` applies migrations with the `SUPABASE_DB_URL` secret, and the
   Cloud sync screen names the mismatch. A release tag alone does not apply migrations.
-- **The schema is versioned, and the app checks it.** `app_schema.version` is raised by every
-  migration and read through the public `get_schema_version()` RPC; `CloudSchema` compares it with
-  the build constant, `db-migrate.yml` applies migrations with the `SUPABASE_DB_URL` secret, and the
-  Cloud sync screen names the mismatch. A release tag alone does not apply migrations.
 - The **anon key ships in clients by design**; access control is *only* RLS + `SECURITY DEFINER`
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before
   changing it). The `service_role` key must never appear in any client or this repo.

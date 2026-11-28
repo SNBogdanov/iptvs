@@ -1187,8 +1187,6 @@ class CloudSync {
     return true;
   }
 
-  /// Self-unpair: drop the cloud-managed sources locally and remove this
-  /// device's pairing rows. The account can also revoke from the panel.
   /// The schema version the server reports, or null when it cannot be read
   /// (offline / RPC error). A missing function is an older server, reported as
   /// 0 so the app can say "migrate the server" rather than "unknown".
@@ -1247,6 +1245,8 @@ class CloudSync {
     }
   }
 
+  /// Self-unpair: drop the cloud-managed sources locally and remove this
+  /// device's pairing rows. The account can also revoke from the panel.
   Future<void> unpair(SourceStore store) async {
     for (final id in await _readCloudIds()) {
       await store.delete(id);
