@@ -1,13 +1,19 @@
 // The VOD display window: the catalogue is loaded whole (global release-date
-// sorting needs every page), so paging is a *display* step вЂ” "Load more"
-// reveals the next screenful of items already in memory. One screenful is what
-// actually fits the viewport, not a fixed count, so a wall of a TV and a phone
-// reveal the same amount of *screen*.
+// sorting needs every page), so paging is a *display* step — the window reveals
+// the next screenful of items already in memory. One screenful is what actually
+// fits the viewport, not a fixed count, so a wall of a TV and a phone reveal the
+// same amount of *screen*.
 //
-// The failure this guards: with no window the grid drew the entire catalogue at
-// once and the paging control never appeared (the default sort loads all pages).
+// There is **no "Next page" control**. On a television it was a trip to the
+// bottom-right corner, and the rows it revealed pushed everything above them up,
+// so the user walked back down for every page. Down on the last available row is
+// the page gesture now, and it lands the cursor one row below.
+//
+// The failure the window guards: with no window the grid drew the entire
+// catalogue at once (the default sort loads all pages).
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/app_database.dart';
@@ -32,7 +38,6 @@ Future<void> _mount(
   required int displayPages,
   Size window = const Size(1280, 900),
   double? bodyHeight,
-  bool autoLoadMore = false,
   List<ContinueWatchingEntry> continueWatching = const [],
   List<int>? reported,
 }) async {
@@ -66,7 +71,6 @@ Future<void> _mount(
     continueWatching: continueWatching,
     onResume: (_) {},
     onRemoveContinueWatching: (_) {},
-    autoLoadMore: autoLoadMore,
     onShown: reported?.add,
   );
   if (bodyHeight != null) {
@@ -82,59 +86,67 @@ Future<void> _mount(
 }
 
 void main() {
-  testWidgets('one page offers the next page, not the whole catalogue', (
+  testWidgets('one page reveals one screenful, not the whole catalogue', (
     tester,
   ) async {
-    await _mount(tester, visible: _items(300), displayPages: 1);
+    final reported = <int>[];
+    await _mount(
+      tester,
+      visible: _items(300),
+      displayPages: 1,
+      reported: reported,
+    );
 
     // The grid is virtualized, so a text finder cannot prove what is *not*
-    // built. The windowing signal is the control: 300 items against one
-    // screenful must offer page 2, which the controller never would if the
-    // window did not exist (all 300 are loaded, so there is no provider page to
-    // fetch and no `snapshot.hasMore`).
+    // built. The reported window is the signal: one screenful of 300 items,
+    // and no paging control to walk to.
     expect(find.text('Title 0'), findsOneWidget);
-    expect(find.text('Next page'), findsOneWidget);
-  });
-
-  testWidgets('enough pages reach the end, so the control disappears', (
-    tester,
-  ) async {
-    // 50 screens is comfortably more than 300 items at any window this test
-    // uses, so every item is inside the window and there is nothing to page to.
-    await _mount(tester, visible: _items(300), displayPages: 50);
-
-    expect(find.text('Title 0'), findsOneWidget);
+    expect(reported, isNotEmpty);
+    expect(reported.last, lessThan(300));
     expect(find.textContaining('Next page'), findsNothing);
   });
 
-  testWidgets('a short catalogue shows no paging control', (tester) async {
-    // Fewer items than one screenful: nothing to page to.
-    await _mount(tester, visible: _items(3), displayPages: 1);
+  testWidgets('enough pages reach the end of the catalogue', (tester) async {
+    final reported = <int>[];
+    await _mount(
+      tester,
+      visible: _items(300),
+      displayPages: 50,
+      reported: reported,
+    );
+
+    expect(find.text('Title 0'), findsOneWidget);
+    expect(reported.last, 300);
+    expect(find.textContaining('Next page'), findsNothing);
+  });
+
+  testWidgets('a short catalogue is shown whole', (tester) async {
+    final reported = <int>[];
+    await _mount(
+      tester,
+      visible: _items(3),
+      displayPages: 1,
+      reported: reported,
+    );
 
     expect(find.text('Title 0'), findsOneWidget);
     expect(find.text('Title 2'), findsOneWidget);
-    expect(find.textContaining('Next page'), findsNothing);
+    expect(reported.last, 3);
   });
 
-  testWidgets('a touch window is never shortened by the rail', (tester) async {
-    // The phone this was reported on: a 384x763 window whose VOD body is only
-    // 432 px once the app bar, tabs and toolbar are taken out, with the
-    // Continue-watching rail 270 px of it. Subtracting the rail left
-    // `firstScreen - 1 == 1` item on page 1 — the log line read
-    // `shownLimit=1 visible=6022` — and one card does not fill 432 px, so there
-    // was nothing to scroll, the scroll-driven loader never ran, and no
-    // "Next page" button exists on touch. The catalogue was unreachable.
-    //
-    // The rail subtraction exists to place the keyboard/desktop "Next page"
-    // card, so the touch branch must keep the full screen instead.
-    final touchReported = <int>[];
+  testWidgets('the Continue-watching rail shortens page 1 only', (
+    tester,
+  ) async {
+    // The rail is a sliver above the grid, so the first screen has room for
+    // fewer rows. It no longer costs a cell for a paging control: the window is
+    // exactly what fits below the rail.
+    final withRail = <int>[];
     await _mount(
       tester,
       visible: _items(300),
       displayPages: 1,
       window: const Size(384, 763),
       bodyHeight: 432,
-      autoLoadMore: true,
       continueWatching: [
         for (final item in _items(2))
           ContinueWatchingEntry(
@@ -148,42 +160,102 @@ void main() {
             ),
           ),
       ],
-      reported: touchReported,
+      reported: withRail,
     );
+    expect(withRail.last, greaterThan(1));
+    expect(withRail.last, lessThan(300));
 
-    expect(touchReported, isNotEmpty);
+    final withoutRail = <int>[];
+    await _mount(
+      tester,
+      visible: _items(300),
+      displayPages: 1,
+      window: const Size(384, 763),
+      bodyHeight: 432,
+      reported: withoutRail,
+    );
     expect(
-      touchReported.last,
-      greaterThan(1),
-      reason: 'one card cannot fill the viewport, so nothing would scroll',
+      withRail.last,
+      lessThan(withoutRail.last),
+      reason: 'the rail occupies part of the first screen',
     );
+  });
 
-    // The same geometry on a keyboard/desktop surface keeps the shortened
-    // first page — that is the whole point of the subtraction there.
-    final cardReported = <int>[];
-    await _mount(
-      tester,
-      visible: _items(300),
-      displayPages: 1,
-      window: const Size(384, 763),
-      bodyHeight: 432,
-      continueWatching: [
-        for (final item in _items(2))
-          ContinueWatchingEntry(
-            item: item,
-            position: PlaybackPosition(
-              kind: ContentKind.movie,
-              itemId: item.id,
-              position: const Duration(minutes: 40),
-              duration: const Duration(minutes: 100),
-              updatedAt: DateTime(2024, 1, 1),
+  testWidgets('Down on the last row reveals the page and keeps the column', (
+    tester,
+  ) async {
+    // List layout (a narrow window), so "the row below" is the next item and
+    // the assertion is exact. The harness is the screen's behaviour in
+    // miniature: a page request raises the display window.
+    tester.view.physicalSize = const Size(500, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var pages = 1;
+    var loads = 0;
+    final reported = <int>[];
+    final scroll = ScrollController();
+    final first = FocusNode();
+    addTearDown(scroll.dispose);
+    addTearDown(first.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: SizedBox(
+            height: 300,
+            child: StatefulBuilder(
+              builder: (context, setState) => MediaTabView(
+                kind: ContentKind.movie,
+                visible: _items(40),
+                snapshot: null,
+                loading: false,
+                loadingMore: false,
+                error: null,
+                showingSearch: false,
+                lastPlayedId: null,
+                scrollController: scroll,
+                firstFocusNode: first,
+                displayPages: pages,
+                isFavorite: (_) => false,
+                onOpenMedia: (_) {},
+                onLoadMore: () => setState(() {
+                  loads += 1;
+                  pages += 1;
+                }),
+                onRetry: () {},
+                onResume: (_) {},
+                onRemoveContinueWatching: (_) {},
+                onShown: reported.add,
+              ),
             ),
           ),
-      ],
-      reported: cardReported,
+        ),
+      ),
     );
+    await tester.pump();
 
-    expect(cardReported, isNotEmpty);
-    expect(cardReported.last, lessThan(touchReported.last));
+    final firstPage = reported.last;
+    expect(firstPage, greaterThan(1));
+    expect(firstPage, lessThan(40));
+
+    // Walk to the last shown row, then press Down once more.
+    var guard = 0;
+    while (loads == 0 && guard++ < 40) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+    }
+    await tester.pump();
+
+    expect(loads, 1, reason: 'the last row asked for the next page');
+    expect(reported.last, greaterThan(firstPage), reason: 'the page appeared');
+    // The cursor stayed in its column: in the list that is exactly the next
+    // item, the first of the row that has just been revealed.
+    expect(
+      FocusManager.instance.primaryFocus?.debugLabel,
+      'media.item.m$firstPage',
+    );
   });
 }

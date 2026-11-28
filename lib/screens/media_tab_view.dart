@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/services.dart'
+    show KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
@@ -229,12 +231,6 @@ class MediaTabView extends StatelessWidget {
   final ScrollController scrollController;
   final FocusNode? firstFocusNode;
 
-  /// Focus node for the "Next page" control, owned by the screen: after a press
-  /// the card moves to a new index, so a node that lived on the widget would not
-  /// survive the rebuild — the screen moves focus to this one, then scrolls it
-  /// into view.
-  final FocusNode? loadMoreFocusNode;
-
   /// How many *screens* of items are revealed. The catalogue is loaded whole
   /// (see `MediaTabController.load`'s `loadAll`, which global release-date
   /// sorting requires), so paging is purely a display window: this counts
@@ -255,13 +251,14 @@ class MediaTabView extends StatelessWidget {
 
   final bool Function(String id) isFavorite;
   final ValueChanged<MediaItem> onOpenMedia;
+
+  /// Reveals one more screenful of the catalogue below the last row. Called by
+  /// the D-pad when Down is pressed on the last available row and by the
+  /// scroll listener near the bottom — the tab no longer has a "Next page"
+  /// control, which on a television meant a trip to the bottom-right corner and
+  /// back for every page.
   final VoidCallback onLoadMore;
   final VoidCallback onRetry;
-
-  /// Touch phones load the next window automatically as the list scrolls, so
-  /// the "Next page" control would only flash under the finger. TV/desktop keep
-  /// it: their focus walk can stop on the last visible row without scrolling.
-  final bool autoLoadMore;
 
   /// Watched fraction per in-progress item id, published by
   /// [MediaTabController.resumeProgress]; empty means nothing is in progress.
@@ -302,7 +299,6 @@ class MediaTabView extends StatelessWidget {
     this.onJumpRevealed,
     required this.scrollController,
     required this.firstFocusNode,
-    this.loadMoreFocusNode,
     this.displayPages = 1,
     this.minShown = 0,
     this.onShown,
@@ -310,7 +306,6 @@ class MediaTabView extends StatelessWidget {
     required this.onOpenMedia,
     required this.onLoadMore,
     required this.onRetry,
-    this.autoLoadMore = false,
     this.resumeProgress = const {},
     this.continueWatching = const [],
     required this.onResume,
@@ -495,18 +490,17 @@ class MediaTabView extends StatelessWidget {
     final textBudget = mediaTileTextBudget(context);
     return LayoutBuilder(
       builder: (context, constraints) {
-        // The display window: a screenful per page, where a screenful is what
-        // actually fits — the grid's column count times the rows that fit its
+        // **One screenful per page, and no control cell.** The window is what
+        // actually fits: the grid's column count times the rows that fit its
         // height, or the list's rows that fit — and a row counts only when at
-        // least half of it is visible.
+        // least half of it is visible. Page 1 is shorter only because the
+        // Continue-watching rail occupies part of it; every further page starts
+        // below the rail in the scroll view and keeps the full height.
         //
-        // **The Continue-watching rail shortens page 1 only.** It is a sliver
-        // above the grid, so the first screen has room for fewer rows; the
-        // earlier rule deliberately ignored it and made every page the same full
-        // screen, which put page 1's "Next page" card a whole row below the
-        // fold whenever the rail was up ("первая кнопка Next уходит на строку
-        // дальше"). Pages after the first start below the rail in the scroll
-        // view, so they keep the full height.
+        // The old "Next page" card took the last cell of each page. It is gone:
+        // on a television, pressing it from the middle of a row meant walking to
+        // the bottom-right corner, being yanked back up by the two rows it
+        // revealed, and then walking down again for the next page.
         final railHeight = showRail
             ? _ContinueWatchingRail.height(context)
             : 0.0;
@@ -526,21 +520,7 @@ class MediaTabView extends StatelessWidget {
                 windowSize: windowSize,
                 textBudget: textBudget,
               );
-        // **The "Next page" card takes the last cell of the current page.** Page
-        // 1 therefore shows `firstScreen - 1` items; every further press adds a
-        // full `screen` of rows (the rail is scrolled past by then), and the card
-        // lands in the bottom-right cell of the page it belongs to.
-        //
-        // **Touch layouts keep the full first screen.** They have no card at all
-        // (`autoLoadMore` reveals the next window by scrolling), and shortening
-        // page 1 there could leave a window that *fits the viewport*: nothing to
-        // scroll, so the scroll listener never fires and the tab dead-ends. A
-        // 384x763 phone measured `body=432` with the rail at `270`, i.e.
-        // `firstScreen - 1 == 1` — a single card, and the catalogue became
-        // unreachable ("VOD перестал пролистываться").
-        final pageLimit = autoLoadMore
-            ? displayPages * screen - 1
-            : (firstScreen - 1) + (displayPages - 1) * screen;
+        final pageLimit = firstScreen + (displayPages - 1) * screen;
         final targetIndex = jumpTargetIndex ?? -1;
         final hasJumpTarget =
             targetIndex >= 0 &&
@@ -589,8 +569,41 @@ class MediaTabView extends StatelessWidget {
             shown.length < visible.length ||
             (snapshot?.hasMore == true) ||
             (snapshot?.hasMoreItems == true);
-        final showLoadMore =
-            !showingSearch && !autoLoadMore && (loadingMore || hasMoreToShow);
+        // The tail of the window is a **loading** marker only; there is no
+        // paging control to aim at any more.
+        final showLoadingTail = loadingMore && hasMoreToShow;
+        // **Down on the last row pages the tab.** One gesture reveals the next
+        // screenful and puts the cursor one row below where it was — the same
+        // column, because the directional focus policy picks the nearest card
+        // below. `onLoadMore` is a no-op while a page is already in flight, so a
+        // repeated press cannot queue two.
+        KeyEventResult Function(FocusNode, KeyEvent)? downPagerFor(
+          int index,
+          int columns,
+        ) {
+          // Search results are a flat, non-paged set: there is nothing to ask
+          // the provider for, and a Down at the last row must fall through to
+          // whatever sits below the grid.
+          if (showingSearch) return null;
+          final lastRowStart = ((shown.length - 1) ~/ columns) * columns;
+          if (index < lastRowStart) return null;
+          return (node, event) {
+            if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+              return KeyEventResult.ignored;
+            }
+            if (event.logicalKey != LogicalKeyboardKey.arrowDown) {
+              return KeyEventResult.ignored;
+            }
+            if (!hasMoreToShow) return KeyEventResult.ignored;
+            if (loadingMore) return KeyEventResult.handled;
+            onLoadMore();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              node.focusInDirection(TraversalDirection.down);
+            });
+            return KeyEventResult.handled;
+          };
+        }
+
         final hasLastVisible =
             lastPlayedId != null &&
             shown.any((media) => media.id == lastPlayedId);
@@ -646,15 +659,10 @@ class MediaTabView extends StatelessWidget {
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
                   sliver: SliverList.builder(
-                    itemCount: shown.length + (showLoadMore ? 1 : 0),
+                    itemCount: shown.length + (showLoadingTail ? 1 : 0),
                     itemBuilder: (context, i) {
                       if (i == shown.length) {
-                        return _MediaLoadMoreTile(
-                          canLoad: hasMoreToShow,
-                          loading: loadingMore,
-                          focusNode: loadMoreFocusNode,
-                          onPressed: onLoadMore,
-                        );
+                        return const _MediaLoadingTail();
                       }
                       return _MediaListTile(
                         item: shown[i],
@@ -664,6 +672,7 @@ class MediaTabView extends StatelessWidget {
                         total: visible.length,
                         autofocus: autofocusFor(i),
                         focusNode: focusNodeFor(i),
+                        onKeyEvent: downPagerFor(i, 1),
                         onTap: () => onOpenMedia(shown[i]),
                       );
                     },
@@ -739,12 +748,7 @@ class MediaTabView extends StatelessWidget {
                       ),
                       delegate: SliverChildBuilderDelegate((context, i) {
                         if (i == shown.length) {
-                          return _MediaLoadMoreCard(
-                            canLoad: hasMoreToShow,
-                            loading: loadingMore,
-                            focusNode: loadMoreFocusNode,
-                            onPressed: onLoadMore,
-                          );
+                          return const _MediaLoadingTail();
                         }
                         return _MediaGridTile(
                           item: shown[i],
@@ -755,9 +759,10 @@ class MediaTabView extends StatelessWidget {
                           autofocus: autofocusFor(i),
                           focusNode: focusNodeFor(i),
                           textBudget: textBudget,
+                          onKeyEvent: downPagerFor(i, shaped.columns),
                           onTap: () => onOpenMedia(shown[i]),
                         );
-                      }, childCount: shown.length + (showLoadMore ? 1 : 0)),
+                      }, childCount: shown.length + (showLoadingTail ? 1 : 0)),
                     );
                   },
                 ),
@@ -1445,6 +1450,11 @@ class _MediaListTile extends StatelessWidget {
   final int total;
   final bool autofocus;
   final FocusNode? focusNode;
+
+  /// Down on this row's last item pages the tab when the row is the last one
+  /// shown (see [MediaTabView]'s `downPagerFor`); null on every other row, so
+  /// the key keeps its ordinary traversal there.
+  final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
   final VoidCallback onTap;
 
   /// See [_MediaGridTile.progress]. On this layout the bar rides the bottom of
@@ -1460,6 +1470,7 @@ class _MediaListTile extends StatelessWidget {
     required this.total,
     required this.autofocus,
     this.focusNode,
+    this.onKeyEvent,
     this.progress,
     required this.onTap,
   });
@@ -1475,6 +1486,7 @@ class _MediaListTile extends StatelessWidget {
       autofocus: autofocus,
       focusNode: focusNode,
       debugLabel: 'media.item.${item.id}',
+      onKeyEvent: onKeyEvent,
       semanticsLabel: [
         item.title,
         if (date.isNotEmpty) date,
@@ -1624,6 +1636,11 @@ class _MediaGridTile extends StatelessWidget {
   final bool autofocus;
   final FocusNode? focusNode;
 
+  /// Down on this card pages the tab when it is in the last shown row (see
+  /// [MediaTabView]'s `downPagerFor`); null everywhere else, so Down keeps its
+  /// ordinary traversal.
+  final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
+
   /// How far this title has been watched, or null when nothing is in progress —
   /// which is most cards, and every card on the series tab (see
   /// [MediaTabController.resumeProgress] for why a series card has none).
@@ -1649,6 +1666,7 @@ class _MediaGridTile extends StatelessWidget {
     required this.total,
     required this.autofocus,
     this.focusNode,
+    this.onKeyEvent,
     this.progress,
     required this.textBudget,
     required this.onTap,
@@ -1675,6 +1693,7 @@ class _MediaGridTile extends StatelessWidget {
       autofocus: autofocus,
       focusNode: focusNode,
       debugLabel: 'media.item.${item.id}',
+      onKeyEvent: onKeyEvent,
       semanticsLabel: [
         item.title,
         if (date.isNotEmpty) date,
@@ -1903,114 +1922,25 @@ class _RatingBadge extends StatelessWidget {
   }
 }
 
-class _MediaLoadMoreTile extends StatefulWidget {
-  final bool canLoad;
-  final bool loading;
-  final FocusNode? focusNode;
-  final VoidCallback onPressed;
-
-  const _MediaLoadMoreTile({
-    required this.canLoad,
-    required this.loading,
-    this.focusNode,
-    required this.onPressed,
-  });
-
-  @override
-  State<_MediaLoadMoreTile> createState() => _MediaLoadMoreTileState();
-}
-
-class _MediaLoadMoreTileState extends State<_MediaLoadMoreTile> {
-  // Owned fallback for when the screen supplies no node: a plain `FilledButton`
-  // focus node carries no route key, so the root Back ladder read `''` from it
-  // and fell through to the exit prompt instead of climbing to the tabs.
-  final FocusNode _ownedNode = RoutedFocusNode('media.loadMore');
-  FocusNode get _node => widget.focusNode ?? _ownedNode;
-
-  @override
-  void dispose() {
-    _ownedNode.dispose();
-    super.dispose();
-  }
+/// The tail of the window while a page is in flight.
+///
+/// Deliberately **not focusable**: it is a progress note, not a paging control.
+/// It used to be the "Next page" card/button, which on a television cost a walk
+/// to the bottom-right corner, two rows of content that pushed everything the
+/// user had just read upwards, and another walk down for the next page. Down on
+/// the last row now reveals the page instead (see [MediaTabView]'s
+/// `downPagerFor`), so all this has to do is answer "it is coming".
+class _MediaLoadingTail extends StatelessWidget {
+  const _MediaLoadingTail();
 
   @override
   Widget build(BuildContext context) {
-    final loading = widget.loading;
-    final canLoad = widget.canLoad;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Center(
-        child: FilledButton.icon(
-          focusNode: _node,
-          onPressed: canLoad && !loading ? widget.onPressed : null,
-          icon: loading
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.expand_more_rounded),
-          label: Text(
-            loading
-                ? 'Loading'
-                : canLoad
-                ? 'Next page'
-                : 'All loaded',
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MediaLoadMoreCard extends StatelessWidget {
-  final bool canLoad;
-  final bool loading;
-  final FocusNode? focusNode;
-  final VoidCallback onPressed;
-
-  const _MediaLoadMoreCard({
-    required this.canLoad,
-    required this.loading,
-    this.focusNode,
-    required this.onPressed,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return FocusableCard(
-      autofocus: false,
-      focusNode: focusNode,
-      // Without an explicit label this minted the route key `FocusableCard`,
-      // which is non-empty and not `media.`-prefixed — so the root Back ladder
-      // matched neither its `media.` rung nor its empty-label recovery, and
-      // Back from the end of the grid dropped straight to the exit prompt.
-      debugLabel: 'media.loadMore',
-      onTap: canLoad && !loading ? onPressed : () {},
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (loading)
-              const SizedBox.square(
-                dimension: 28,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            else
-              Icon(
-                canLoad ? Icons.expand_more_rounded : Icons.check_rounded,
-                color: canLoad ? AppColors.accent : AppColors.textLo,
-                size: 32,
-              ),
-            const SizedBox(height: 8),
-            Text(
-              loading
-                  ? 'Loading'
-                  : canLoad
-                  ? 'Next page'
-                  : 'All loaded',
-              style: const TextStyle(color: AppColors.textLo),
-            ),
-          ],
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(12),
+        child: SizedBox.square(
+          dimension: 24,
+          child: CircularProgressIndicator(strokeWidth: 2),
         ),
       ),
     );

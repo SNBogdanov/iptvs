@@ -530,7 +530,7 @@ void main() {
                       visible: items,
                       snapshot: null,
                       loading: false,
-                      // Puts the "load more" cell in the grid alongside the tiles.
+                      // Puts the (non-focusable) loading tail in the grid alongside the tiles.
                       loadingMore: true,
                       error: null,
                       showingSearch: false,
@@ -688,7 +688,7 @@ void main() {
                     visible: items,
                     snapshot: null,
                     loading: false,
-                    // Puts the "load more" cell in the grid alongside the tiles.
+                    // Puts the (non-focusable) loading tail in the grid alongside the tiles.
                     loadingMore: true,
                     error: null,
                     showingSearch: false,

@@ -2332,15 +2332,29 @@ the cache with `synced_at` older than that interval, runs **one silent `forceRef
 (cached grid stays on screen; the new catalogue replaces it when it lands). One attempt per tab per
 screen, logged as `media refresh check kind=… interval=… last=… due=…`, so a failure cannot loop.
 
-### Infinite scroll in the media grid
+### Paging the media grid
 
 `ChannelListScreen._maybeAutoLoadMedia` listens to each media tab's
 `scrollController`: within 400 px of the end it reveals the next display window
 (`_mediaDisplayPages`) and, for provider-paged tabs, calls `loadMore()`. A 500 ms
 per-tab cooldown keeps one flick from revealing several windows at once, and
-`shownCountFloor`/`hasMore` stop it when nothing is left. The "Next page" card
-remains as a keyboard/D-pad fallback, but a finger no longer has to find and
-press it.
+`shownCountFloor`/`hasMore` stop it when nothing is left. This runs on every
+platform **except a television** — a TV has no scroll gesture.
+
+**A television pages with Down on the last row.** `MediaTabView.downPagerFor`
+attaches a key handler to the cards of the window's last row: ArrowDown there
+calls `onLoadMore()` (which reveals the next screenful and, for a provider-paged
+tab, fetches it) and then moves the cursor with
+`FocusNode.focusInDirection(TraversalDirection.down)` after the rebuild, so it
+lands on the nearest card below — **the same column**, one row down. Every other
+row returns `KeyEventResult.ignored`, so Down keeps its ordinary traversal.
+
+There is **no "Next page" card/button** any more. It used to take the last cell
+of each page, which on a TV meant walking to the bottom-right corner, being
+pulled back up by the rows it revealed, and walking down again for the next page.
+The tail of the window is now a non-focusable progress note while a page is in
+flight (`_MediaLoadingTail`), and `pageLimit` is simply `firstScreen +
+(displayPages - 1) * screen`.
 
 **A window shorter than the viewport needs a second trigger.** With no scrollable
 range there is no scroll event, so the loader never runs and the tab dead-ends on
@@ -2350,12 +2364,11 @@ cooldown (`fill: true`). Growth is monotonic — one page per report — and sto
 the same `extentAfter > 400` / `shownCountFloor` guards.
 
 The geometry that made this visible: a 384x763 phone whose VOD body is 432 px with
-the Continue-watching rail taking 270 of them. Page 1 subtracted the rail from the
-screenful and revealed **one** card (`shownLimit=1 visible=6022`). One card does not
-fill 432 px, nothing scrolled, and the handset has no "Next page" button, so the
-catalogue was unreachable. Touch layouts now use the full `p * screen - 1` window
-(the rail subtraction only ever existed to place that card, which touch does not
-draw), which is why `MediaTabView.pageLimit` branches on `autoLoadMore`.
+the Continue-watching rail taking 270 of them, where a shortened page 1 revealed
+**one** card (`shownLimit=1 visible=6022`). One card does not fill 432 px and
+nothing scrolled, so the catalogue was unreachable. Page 1 now uses
+`firstScreen`, i.e. what actually fits below the rail; the old subtraction only
+ever existed to leave a cell for the paging card.
 
 **A pending "jump to the first unwatched" is the only focus candidate.** `MediaTabView` hands
 `autofocus` to **at most one** card, and while a `jumpTargetId` is pending that card is the target —

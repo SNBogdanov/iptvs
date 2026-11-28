@@ -373,23 +373,25 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
    cloud surface, nothing for another device to agree about. **A sorted mode loads the whole catalogue
    (`loadAll`), because global release-date ordering needs every page** — so paging there is a pure
    *display window*: `MediaTabView.displayPages` (owned per kind by `ChannelListScreen._mediaDisplayPages`)
-   reveals page `p` at **`p * screenSize - 1` items, because the "Next page" card takes the last cell
-   of every screen** — so the card always sits bottom-right (page 1 = 23 items of a 24-cell screen,
-   page 2 = 47, not 24/48). With the Continue-watching rail up, **page one alone** is measured on the
-   body minus the rail (`firstScreen`), so its card is not pushed a row below the fold; later pages keep
-   the full screen. **A touch layout (`autoLoadMore`) is exempt**: it draws no card, so page `p` is plain
-   `p * screen - 1`, and the first window must never shrink until it fits the viewport - a phone logged
-   `body=432 rail=270 -> shownLimit=1`, and one card cannot scroll, so the scroll-driven loader never
-   ran and the catalogue became unreachable. For the same reason the window report (`onShown` ->
-   `_onMediaWindowShown`) re-runs the loader despite the 500 ms cooldown: with content shorter than the
-   viewport no scroll event will ever arrive, and the reveal must keep growing until `extentAfter > 400`
-   or the catalogue runs out. The screenful is computed from what actually fits the viewport
+   reveals page 1 at **`firstScreen`** items — what actually fits below the Continue-watching rail — and
+   every later page at `firstScreen + (p - 1) * screen`. **There is no paging card any more**: the old
+   "Next page" tile took the last cell of every screen, and on a television that meant walking to the
+   bottom-right corner, being pulled back up by the rows it revealed, and walking down again for the next
+   page. The tail of the window is now a **non-focusable** spinner (`_MediaLoadingTail`) while a page is in
+   flight. On a television the page gesture is **Down on the last shown row** (`MediaTabView.downPagerFor`,
+   attached only to that row's cards): it calls `onLoadMore()` and then `FocusNode.focusInDirection(down)`
+   after the rebuild, so the cursor lands on the nearest card below — the same column, one row down.
+   Everywhere else (`!isTelevision`) the scroll listener near the bottom reveals the window, as touch
+   always did. For content shorter than the viewport the window report (`onShown -> _onMediaWindowShown`)
+   re-runs the loader despite the 500 ms cooldown: with nothing to scroll no scroll event will ever
+   arrive, and the reveal must keep growing until `extentAfter > 400` or the catalogue runs out. The
+   screenful is computed from what actually fits the viewport
    (`MediaTabView._mediaPageSize` — grid columns × visible rows, or the list's visible rows), and a row
    counts only when **at least half of it is visible**, so a sliver of the next row is not "fitting".
-   Because the screenful is re-read every build, a resize re-lands the card on the last row with no
-   stored bookkeeping, and the card carries **no page number** (a number was wrong after a resize). A
+   Because the screenful is re-read every build, a resize re-lands the window on the last row with no
+   stored bookkeeping. A
    provider-order ("As provided") tab still fetches a page at a time (`_mediaPagesPerLoad` = 1) and its
-   "Next page" also pulls the next page when the controller has unfetched pages. The window resets to
+   page gesture also pulls the next page when the controller has unfetched pages. The window resets to
    one screen on every dataset-replacing load, category change and sort change. Note the two fetch
    paths still record the page differently, and must not be "tidied" into agreement: `loadMedia` stores
    the **requested** page (`loadedPages = page`) while `loadMoreMedia` stores the page the provider
@@ -412,9 +414,9 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
    `test/vod_card_orientation_test.dart`, the shape group in
    `test/media_grid_metrics_test.dart`, and the both-shapes sweep in `test/layout_overflow_test.dart`;
    detail: docs/player.md "VOD/series card shape". **The pages readout is only where pages are
-   asked for**: `Showing 1 234 movies · pages 1/34` names the machinery behind the "Next page" card,
-   which TV/desktop users press; a touch surface infinite-scrolls instead, so that suffix is dropped
-   there. Dates come from `MediaItem.year`, a
+   asked for with an explicit gesture**: `Showing 1 234 movies · pages 1/34` names the provider pages
+   a television walks through with Down on the last row; everywhere else the tab infinite-scrolls, so
+   that suffix is dropped. Dates come from `MediaItem.year`, a
    provider-supplied **`String?`** holding ISO `2026-09-29`, dotted/slashed `29.09.2026`, a bare
    `2026`, or something unparseable — so `releaseSortKey` normalises shape into one integer
    (`yyyyMMdd`) and **an unparseable row sorts last in both directions**, never as year 1: "unknown"

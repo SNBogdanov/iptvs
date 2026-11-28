@@ -13,6 +13,13 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Added
 
+- **A television pages the VOD and series lists with Down on the last row.** Pressing Down on the last
+  available row asks for the next screenful, shows it, and moves the cursor one row down **without
+  changing the column** — the panel no longer has a "Next page" button to walk to at the bottom-right
+  corner. Every other row keeps its ordinary Down. The list's tail is a non-focusable progress note
+  while a page is in flight; on desktop and touch the window still reveals itself on scroll, and the
+  explicit page gesture is TV-only.
+
 - **Windows: the auto-switch pace can be changed while watching, from the control bar.** A 500 ms
   press on the bolt opens the pace menu ("Auto-switch every 5 s … 60 s") above the button, with the
   checkmark on the current period; a click still toggles the mode. A held OK on the focused bolt

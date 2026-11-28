@@ -1148,9 +1148,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
     if (fresh == null) return;
     await widget.store.save(
-      fresh.copyWith(
-        settings: fresh.settingsWithAspectPin(itemKey, label),
-      ),
+      fresh.copyWith(settings: fresh.settingsWithAspectPin(itemKey, label)),
     );
   }
 
@@ -1492,16 +1490,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     });
   }
 
-  /// Auto-load is a **touch** affordance: phones/tablets infinite-scroll, while
-  /// TV and desktop keep the explicit "Next page" control as their stop.
-  ///
-  /// Desktop has to be excluded for a second, sharper reason: pressing that
-  /// control scrolls to `maxScrollExtent`, which is exactly the condition the
-  /// scroll-driven loader reacts to — so one press revealed the next window and
-  /// immediately auto-revealed another one (twice the rows of a screen, on a
-  /// platform where the button is the whole mechanism).
-  bool get _autoLoadMediaOnScroll =>
-      (Platform.isAndroid && !isTelevision) || Platform.isIOS;
+  /// Reveal-on-scroll runs everywhere **except a television**: a TV has no
+  /// scroll gesture, and its paging is the D-pad's Down on the last row
+  /// (`MediaTabView.downPagerFor`). Desktop is included now that the "Next
+  /// page" control is gone — a mouse user's only way to ask for more is to
+  /// scroll to the bottom.
+  bool get _autoLoadMediaOnScroll => !isTelevision;
 
   void _runAutoLoadMedia(ContentKind kind, {bool fill = false}) {
     if (!_autoLoadMediaOnScroll) return;
@@ -1531,37 +1525,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// revealing is usually a pure display step. But a provider-order tab still
   /// fetches a page at a time, so when the controller genuinely has unfetched
   /// pages this also pulls the next one — otherwise the revealed window would
-  /// run past what has been fetched and the button would do nothing.
+  /// run past what has been fetched and the gesture would do nothing.
   void _mediaLoadMore(ContentKind kind) {
     final controller = _media(kind);
     final snap = controller.snapshot;
     if (snap == null) return;
-    // The "Next page" press reveals one more screenful, and pulls the next page
-    // of whatever backs the tab: a cached window (a sorted tab) or a provider
-    // page (As provided). Both are "more", and the reveal must not stall at the
-    // loaded window's end.
+    // A page already in flight owns the next window: one press, one page.
+    if (controller.loadingMore) return;
+    // The gesture (Down on the last row, or the scroll listener) reveals one
+    // more screenful, and pulls the next page of whatever backs the tab: a
+    // cached window (a sorted tab) or a provider page (As provided). Both are
+    // "more", and the reveal must not stall at the loaded window's end.
     setState(() {
       _mediaDisplayPages[kind] = (_mediaDisplayPages[kind] ?? 1) + 1;
     });
     if (snap.hasMore || snap.hasMoreItems) {
       unawaited(controller.loadMore());
     }
-    // Reveal the new "Next page" control and put the D-pad on it. It moved to a
-    // new index, so without this the focus would be lost on a rebuild and the
-    // control could sit below the fold — the user pressed it, so it should stay
-    // in front of them.
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
-      final scroll = controller.scrollController;
-      if (scroll.hasClients) {
-        await scroll.animateTo(
-          scroll.position.maxScrollExtent,
-          duration: appMotion(context, const Duration(milliseconds: 220)),
-          curve: Curves.easeOut,
-        );
-      }
-      if (mounted) _mediaLoadMoreFocusFor(kind).requestFocus();
-    });
   }
 
   /// The grid's sort dropdown: re-sorts and resets the display window.
@@ -1632,9 +1612,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     _previewTimer?.cancel();
     _focus.dispose();
     for (final node in _tabFocusNodes.values) {
-      node.dispose();
-    }
-    for (final node in _mediaLoadMoreFocus.values) {
       node.dispose();
     }
     for (final node in _mediaJumpFocus.values) {
@@ -2183,15 +2160,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// layout; calling `setState` there threw "setState during build" and showed
   /// Flutter's red error box while switching from Live to Movies.
   final Set<ContentKind> _mediaAutoLoadScheduled = {};
-
-  /// Focus nodes for each VOD tab's "Next page" control — see
-  /// [MediaTabView.loadMoreFocusNode]. Owned by the screen because the control
-  /// moves to a new index on every press, so a node created inside the view
-  /// would not survive the rebuild that follows.
-  final Map<ContentKind, FocusNode> _mediaLoadMoreFocus = {};
-
-  FocusNode _mediaLoadMoreFocusFor(ContentKind kind) => _mediaLoadMoreFocus
-      .putIfAbsent(kind, () => RoutedFocusNode('media.loadMore'));
 
   final Map<ContentKind, FocusNode> _mediaJumpFocus = {};
   final Map<ContentKind, String> _mediaJumpTargets = {};
@@ -3010,11 +2978,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           channel.id,
         ),
         onAspectChanged: _persistGlobalAspect,
-        onAspectPinned: (label, _) => _persistAspectPin(
-          _configForChannel(channel),
-          channel.id,
-          label,
-        ),
+        onAspectPinned: (label, _) =>
+            _persistAspectPin(_configForChannel(channel), channel.id, label),
         epgNow: epg.now,
         epgNext: epg.next,
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
@@ -3833,13 +3798,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (category != null) b.write(' in ${category.title}');
     }
     if (_media(kind).hideWatched) b.write(' · watched hidden');
-    // Pages are only worth naming where the user has to *ask* for the next one
-    // (the "Next page" card on TV/desktop). On a touch surface the list is
-    // infinite-scroll — the next window loads itself — so a "pages 1/34" readout
-    // is noise about machinery the user never touches.
-    final infiniteScroll =
-        (Platform.isAndroid && !isTelevision) || Platform.isIOS;
-    if (!infiniteScroll && snap != null && snap.totalPages > 1) {
+    // Pages are only worth naming where the user asks for the next one with a
+    // **gesture that has a visible stop** (a television's Down on the last row).
+    // Everywhere else the list is infinite-scroll — the next window loads
+    // itself — so a "pages 1/34" readout is noise about machinery the user
+    // never touches.
+    final explicitPaging = isTelevision;
+    if (explicitPaging && snap != null && snap.totalPages > 1) {
       b.write(' · pages ${snap.loadedPages}/${snap.totalPages}');
     }
     if (snap?.syncedAt != null) {
@@ -4331,7 +4296,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         unawaited(_rememberLiveCategory(null));
         return;
       }
-      final collapsed = _liveFilterIds.length == 1 ? _liveFilterIds.single : null;
+      final collapsed = _liveFilterIds.length == 1
+          ? _liveFilterIds.single
+          : null;
       if (collapsed != null) _rememberSingleCategory(collapsed);
       setState(() => _categoryId = collapsed);
       if (collapsed != null) {
@@ -4741,7 +4708,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onJumpRevealed: (screen) => _mediaJumpRevealed(_tab, screen),
             scrollController: _media(_tab).scrollController,
             firstFocusNode: _media(_tab).firstFocusNode,
-            loadMoreFocusNode: _mediaLoadMoreFocusFor(_tab),
             displayPages: _mediaDisplayPages[_tab] ?? 1,
             minShown: _media(_tab).shownCountFloor,
             onShown: (count) => _onMediaWindowShown(_tab, count),
@@ -4749,11 +4715,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onOpenMedia: _openMedia,
             onLoadMore: () => _mediaLoadMore(_tab),
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
-            // Phones/tablets auto-load on scroll; the button only flashed
-            // under the finger. TV and desktop keep it as the only mechanism —
-            // and the scroll loader is gated on the same rule, or pressing the
-            // button (which scrolls to the bottom) would trigger it too.
-            autoLoadMore: _autoLoadMediaOnScroll,
             resumeProgress: _media(_tab).resumeProgress,
             continueWatching: _media(_tab).continueWatching,
             onResume: (item) =>
@@ -4821,72 +4782,72 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       },
       child: LiveTabView(
         loading: _live.loading,
-      error: _live.error,
-      onRetry: () => _loadLive(forceRefresh: true),
-      visible: visible,
-      searchActive: _query.trim().length >= 2,
-      // Only the cross-source view labels its rows; elsewhere every row belongs
-      // to the active source and the chip would say the same thing on all of
-      // them.
-      sourceLabelFor: _categoryId == kAllSourcesFavoritesCategoryId
-          ? (channel) => _crossSourceFavoriteFor(channel)?.sourceLabel
-          : null,
-      // Resolved inside the preview pane's own rebuild: on a TV remote the
-      // panel follows the channel cursor, and the cursor now moves without
-      // rebuilding this method.
-      resolvePreviewChannel: () => _resolvePreviewChannel(visible),
-      // These maps are the *active* source's, keyed by channel id — which a
-      // foreign row can collide with, so the cross-source view must never be
-      // handed them. Its own guide arrives through `epgFor` below, keyed by
-      // (source, channel), where there is no collision to have.
-      //
-      // Gated on the *same* predicate as the row extent, not a parallel test —
-      // `LiveTabView` asserts that its `itemExtent` matches the layout it
-      // computes from `showsEpg`, so these must be incapable of drifting apart
-      // rather than merely agreeing today.
-      now: crossSourceView || !_liveRowsShowEpg ? const {} : _live.now,
-      next: crossSourceView || !_liveRowsShowEpg ? const {} : _live.next,
-      showsEpg: _liveRowsShowEpg,
-      epgFor: crossSourceView ? _crossSourceEpgFor : null,
-      deliberate: _deliberatePreview,
-      resolving: _resolving,
-      scrollController: _scrollController,
-      categoryScrollController: _categoryScrollController,
-      focus: _focus,
-      channelRowExtent: _liveChannelRowExtent(),
-      rowLayout: _liveRowLayout,
-      categoryRowExtent: _liveCategoryRowExtent(),
-      lastPlayedChannelId: _lastPlayedLiveChannelId,
-      previewChannelId: _preview.channelId,
-      // Source-aware, for the cross-source view: two providers can both carry
-      // a channel with this id, and only one of them is previewing.
-      // A stopped preview (e.g. after leaving for the sources screen when the
-      // repository was rebuilt) keeps its `channelId` but has nothing on screen
-      // — the panel and the row must read that as "not previewing" and fall
-      // back to the channel's logo rather than a black box under a badge.
-      isPreviewingRow: (c) => _isPreviewing(c) && _preview.previewLive,
-      // In the cross-source view a row's favorite state belongs to *its* source,
-      // not the active one. Reading it from `FavoritesController` (keyed to the
-      // active source) drew every foreign row with an empty star, and toggling
-      // wrote a phantom favorite under the wrong source id — which the delta
-      // push would then have sent to the cloud.
-      isFavorite: crossSourceView
-          ? (id) => true
-          : (id) => _isFavorite(ContentKind.live, id),
-      onToggleFavorite: crossSourceView
-          ? (id) => unawaited(_unfavoriteCrossSourceRow(id))
-          : (id) => _toggleFavorite(ContentKind.live, id),
-      onPlayChannel: _play,
-      onPreviewChannel: (channel) => unawaited(_showPreviewSheet(channel)),
-      onCatchup: _showCatchupSheet,
-      categories: _liveCategoriesForUi,
-      selectedCategoryId: _categoryId,
-      selectedCategoryIds: _liveFilterIds,
-      onCategorySelected: _toggleLiveCategory,
-      onCategoryOnly: (id) => _selectCategory(id),
-      previewVideoBuilder: () => PreviewVideo(preview: _preview),
-      previewLoading: _preview.loading,
-      previewError: _preview.error,
+        error: _live.error,
+        onRetry: () => _loadLive(forceRefresh: true),
+        visible: visible,
+        searchActive: _query.trim().length >= 2,
+        // Only the cross-source view labels its rows; elsewhere every row belongs
+        // to the active source and the chip would say the same thing on all of
+        // them.
+        sourceLabelFor: _categoryId == kAllSourcesFavoritesCategoryId
+            ? (channel) => _crossSourceFavoriteFor(channel)?.sourceLabel
+            : null,
+        // Resolved inside the preview pane's own rebuild: on a TV remote the
+        // panel follows the channel cursor, and the cursor now moves without
+        // rebuilding this method.
+        resolvePreviewChannel: () => _resolvePreviewChannel(visible),
+        // These maps are the *active* source's, keyed by channel id — which a
+        // foreign row can collide with, so the cross-source view must never be
+        // handed them. Its own guide arrives through `epgFor` below, keyed by
+        // (source, channel), where there is no collision to have.
+        //
+        // Gated on the *same* predicate as the row extent, not a parallel test —
+        // `LiveTabView` asserts that its `itemExtent` matches the layout it
+        // computes from `showsEpg`, so these must be incapable of drifting apart
+        // rather than merely agreeing today.
+        now: crossSourceView || !_liveRowsShowEpg ? const {} : _live.now,
+        next: crossSourceView || !_liveRowsShowEpg ? const {} : _live.next,
+        showsEpg: _liveRowsShowEpg,
+        epgFor: crossSourceView ? _crossSourceEpgFor : null,
+        deliberate: _deliberatePreview,
+        resolving: _resolving,
+        scrollController: _scrollController,
+        categoryScrollController: _categoryScrollController,
+        focus: _focus,
+        channelRowExtent: _liveChannelRowExtent(),
+        rowLayout: _liveRowLayout,
+        categoryRowExtent: _liveCategoryRowExtent(),
+        lastPlayedChannelId: _lastPlayedLiveChannelId,
+        previewChannelId: _preview.channelId,
+        // Source-aware, for the cross-source view: two providers can both carry
+        // a channel with this id, and only one of them is previewing.
+        // A stopped preview (e.g. after leaving for the sources screen when the
+        // repository was rebuilt) keeps its `channelId` but has nothing on screen
+        // — the panel and the row must read that as "not previewing" and fall
+        // back to the channel's logo rather than a black box under a badge.
+        isPreviewingRow: (c) => _isPreviewing(c) && _preview.previewLive,
+        // In the cross-source view a row's favorite state belongs to *its* source,
+        // not the active one. Reading it from `FavoritesController` (keyed to the
+        // active source) drew every foreign row with an empty star, and toggling
+        // wrote a phantom favorite under the wrong source id — which the delta
+        // push would then have sent to the cloud.
+        isFavorite: crossSourceView
+            ? (id) => true
+            : (id) => _isFavorite(ContentKind.live, id),
+        onToggleFavorite: crossSourceView
+            ? (id) => unawaited(_unfavoriteCrossSourceRow(id))
+            : (id) => _toggleFavorite(ContentKind.live, id),
+        onPlayChannel: _play,
+        onPreviewChannel: (channel) => unawaited(_showPreviewSheet(channel)),
+        onCatchup: _showCatchupSheet,
+        categories: _liveCategoriesForUi,
+        selectedCategoryId: _categoryId,
+        selectedCategoryIds: _liveFilterIds,
+        onCategorySelected: _toggleLiveCategory,
+        onCategoryOnly: (id) => _selectCategory(id),
+        previewVideoBuilder: () => PreviewVideo(preview: _preview),
+        previewLoading: _preview.loading,
+        previewError: _preview.error,
       ),
     );
   }
