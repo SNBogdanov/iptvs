@@ -1693,10 +1693,15 @@ press that drives the list still suppresses the reveal-on-input post). The whole
 `AnimatedVisibility`, so hiding it removes its children — and the `FocusRequester` objects inside
 them — from composition. Re-showing therefore had nothing to restore and always landed on
 play/pause, which made "hide the bar, bring it back" restart the walk from the first button every
-time. Every control now attaches its own `FocusRequester` and reports it to a
-`PlayerFocusMemory` through a `CompositionLocal` when it takes focus; on re-show the bar asks that
-requester first and only falls back to play/pause when the control is no longer in the ring (Go to
-live once live, the step pair on another route, a menu that closed).
+time; in VOD it was every time, because the bar hides on its own timer. The memory is **keyed**, not
+a saved requester: every control registers its *current* requester under a stable key on composition
+(`PlayerFocusMemory.register`, a `SideEffect`) and reports the key when it takes focus
+(`noteFocus`) — the play/pause button, the transport buttons, the chips and both sliders (the
+scrubber and the volume chip have their own keys). On re-show the bar resolves the key against the
+controls composed **now**, so the requester is live; only a key with no control on screen (Go to
+live once live, the step pair on another route, a menu that closed) falls back to play/pause.
+Keeping the old requester object was not enough: its `requestFocus()` throws once the control has
+left composition, which is exactly what reset VOD to pause.
 
 **A visible bar with nothing focused is repaired too.** Losing focus without the bar leaving
 composition happens when a panel that took it goes away — the in-player quick list is the reported

@@ -67,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -152,18 +153,66 @@ private const val HIDE_DELAY_LIVE = 4500L
  * children from composition — and every `FocusRequester` inside them with it.
  * Re-showing therefore had nothing to restore and parked focus on play/pause,
  * i.e. pressing OK to bring the bar back always landed on the first button
- * instead of the one the user had been on. The requester objects themselves
- * outlive the controls (they are `remember`ed per call site and re-attached
- * when the child recomposes), so remembering the object is enough; a control
- * that is gone for good fails to take focus and the caller falls back to
- * play/pause.
+ * instead of the one the user had been on — and in VOD that was every time,
+ * because the bar hides on its own timer.
  *
  * A process-wide object rather than a `CompositionLocal`: only one player
  * route is ever composed, the chrome lives under a conditional whose scopes
  * nest deeply, and `PlayerScreen` clears this on dispose.
  */
 object PlayerFocusMemory {
-    var last: FocusRequester? = null
+    /**
+     * The control that last held the ring, by a **stable key** rather than by
+     * its `FocusRequester`.
+     *
+     * The requester cannot survive the bar: hiding the chrome takes
+     * `AnimatedVisibility`'s content out of composition, so every button's
+     * `remember`ed requester dies with it. Restoring the old requester then
+     * failed `requestFocus()` and the bar reopened on play/pause — the reported
+     * "VOD forgets which button I was on". The key outlives the composition, and
+     * the map is refreshed by whichever controls are composed *now*, so the
+     * restore always targets a live requester.
+     */
+    var lastKey: Any? = null
+        private set
+
+    private val requesters = HashMap<Any, FocusRequester>()
+
+    /**
+     * Composition hook: this control is on screen right now, under [key].
+     *
+     * Registration happens on **composition**, not on focus, because that is
+     * what makes [restore] work after the bar was rebuilt: the buttons exist
+     * again before anything has been focused, and only their fresh requesters
+     * are attached. The map is keyed by the same identity the focus hook
+     * records, so a stale entry from a previous bar is replaced the moment the
+     * control reappears.
+     */
+    fun register(key: Any, requester: FocusRequester) {
+        requesters[key] = requester
+    }
+
+    /** Focus hook: the viewer is on the control under [key]. */
+    fun noteFocus(key: Any) {
+        lastKey = key
+    }
+
+    /**
+     * Hands focus back to the remembered control, if this composition has one.
+     * Returns false when nothing was remembered or the control is gone — the
+     * caller then falls back to play/pause.
+     */
+    fun restore(): Boolean {
+        val key = lastKey ?: return false
+        val requester = requesters[key] ?: return false
+        return runCatching { requester.requestFocus() }.isSuccess
+    }
+
+    /** Forgets everything — the player session is over. */
+    fun clear() {
+        lastKey = null
+        requesters.clear()
+    }
 }
 
 /**
@@ -186,7 +235,7 @@ fun PlayerScreen(
     // The focus memory is process-wide (see [PlayerFocusMemory]); clear it when
     // this player goes away so the next session starts on play/pause.
     DisposableEffect(Unit) {
-        onDispose { PlayerFocusMemory.last = null }
+        onDispose { PlayerFocusMemory.clear() }
     }
     // Bumped on any interaction to (re)arm the auto-hide timer.
     var interaction by remember { mutableIntStateOf(0) }
@@ -660,9 +709,11 @@ private fun ControlsOverlay(
     var overlayHasFocus by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         androidx.compose.runtime.withFrameNanos { }
-        val remembered = PlayerFocusMemory.last
-        val restored =
-            remembered != null && runCatching { remembered.requestFocus() }.isSuccess
+        // Key-based (see [PlayerFocusMemory]): the previous bar's requesters are
+        // gone with it, but the key resolves against the controls composed now,
+        // so a VOD bar reopens on subtitles/aspect/whatever was last used —
+        // not on play/pause.
+        val restored = PlayerFocusMemory.restore()
         if (!restored) runCatching { playFocus.requestFocus() }
     }
     // **Focus watchdog.** A visible bar with nothing focused is a dead D-pad: the
@@ -1452,6 +1503,9 @@ fun IconControlButton(
     // the same button — see [PlayerFocusMemory].
     val ownRequester = remember { FocusRequester() }
     val requester = focusRequester ?: ownRequester
+    // On screen under this key, whatever holds the ring — so a bar rebuilt from
+    // scratch can restore the viewer's place (see [PlayerFocusMemory]).
+    SideEffect { PlayerFocusMemory.register(contentDescription, requester) }
     val base = modifier
         .size(PlayerDimens.ButtonSize)
         .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
@@ -1504,7 +1558,7 @@ fun IconControlButton(
         modifier = withFocus
             .onFocusChanged {
                 focused = it.isFocused
-                if (it.isFocused) PlayerFocusMemory.last = requester
+                if (it.isFocused) PlayerFocusMemory.noteFocus(contentDescription)
             }
             .then(keyHold)
             .then(press),
@@ -1559,6 +1613,7 @@ fun TextControlButton(
     // Own requester, remembered here like [IconControlButton]'s: the focus
     // memory must survive this control leaving composition.
     val ownRequester = remember { FocusRequester() }
+    SideEffect { PlayerFocusMemory.register(contentDescription, ownRequester) }
     // Handlers as *updated state*, so the pointer detectors can key on nothing:
     // they must survive the recomposition that a hold causes (the label changes
     // to "Catching up ×2"). Keying them on the lambdas — which are rebuilt every
@@ -1626,7 +1681,7 @@ fun TextControlButton(
             )
             .onFocusChanged {
                 focused = it.isFocused
-                if (it.isFocused) PlayerFocusMemory.last = ownRequester
+                if (it.isFocused) PlayerFocusMemory.noteFocus(contentDescription)
                 onFocusChanged?.invoke(it.isFocused)
             }
             .then(press)
@@ -1761,12 +1816,17 @@ fun SlimSlider(
     modifier: Modifier = Modifier,
     step: Float = 0.05f,
     chip: Boolean = false,
+    // Identity in the focus memory. The scrubber and the volume slider are the
+    // same composable with different postures, and both leave and re-enter
+    // composition with the chrome, so each needs its own key to be restored.
+    memoryKey: String = if (chip) "volume" else "scrubber",
 ) {
     var focused by remember { mutableStateOf(false) }
     // Only the inline (chip) slider has a mode; the scrubber's arrows always act.
     var editing by remember { mutableStateOf(false) }
     val adjusting = !chip || editing
     val ownRequester = remember { FocusRequester() }
+    SideEffect { PlayerFocusMemory.register(memoryKey, ownRequester) }
     var widthPx by remember { mutableFloatStateOf(0f) }
     val f = value.coerceIn(0f, 1f)
     // A focused chip is filled with `ButtonBgFocused`, which *is* `Accent` — the
@@ -1813,7 +1873,7 @@ fun SlimSlider(
             )
             .onFocusChanged {
                 focused = it.isFocused
-                if (it.isFocused) PlayerFocusMemory.last = ownRequester
+                if (it.isFocused) PlayerFocusMemory.noteFocus(memoryKey)
                 // Leaving the chip drops adjust mode, so coming back to it never
                 // starts with the arrows captured again.
                 if (!it.isFocused) editing = false
