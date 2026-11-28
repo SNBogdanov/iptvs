@@ -1,12 +1,11 @@
 // Asserts a *configured* build actually ships the Supabase client.
 //
-// `supabase.js` throws at module top-level when VITE_SUPABASE_URL /
-// VITE_SUPABASE_ANON_KEY are absent, before `createClient(url, key)` is ever
-// reached. A good bundler proves the call unreachable from that and drops
-// `@supabase/supabase-js` entirely — correctly, because a build with no
-// Supabase config is already a build that only renders "set these variables".
-// Vite 8.2 does exactly this; 8.1 did not. So bundle size alone means nothing
-// unless the config is present, and this script refuses to judge without it.
+// `supabase.js` throws at module top-level when neither the `VITE_*` variables
+// nor a runtime `window.__IPTVS_CLOUD__` config is present, before
+// `createClient(url, key)` is reached. Since runtime configuration exists, a
+// build with no `VITE_*` values may still keep `@supabase/supabase-js` (it
+// cannot know what `config.js` will set), so this script skips when the env is
+// absent rather than guessing from a bundle it cannot judge.
 //
 // What it does catch, on a build that IS configured: the client silently
 // vanishing from the output. `npm test` cannot see that — the panel's suite
@@ -74,6 +73,31 @@ if (entry.bytes < MIN_ENTRY_BYTES) {
     `${entry.f} is ${entry.bytes} bytes, below the ${MIN_ENTRY_BYTES} floor for ` +
       'a configured build. A dependency was almost certainly tree-shaken out.',
   );
+}
+
+// The panel is also the cloud's discovery document: the app's domain-only setup
+// reads `/.well-known/iptvs-cloud.json` from whichever host serves this bundle.
+// Cloudflare Pages gets it through the `_redirects` rewrite, other hosts read
+// the dot path directly; both must carry exactly the configured endpoint.
+const expectedUrl = (process.env.VITE_SUPABASE_URL ?? '').replace(/\/+$/, '');
+const expectedKey = process.env.VITE_SUPABASE_ANON_KEY ?? '';
+try {
+  const wellKnown = JSON.parse(
+    readFileSync(join(dist, '.well-known', 'iptvs-cloud.json'), 'utf8'),
+  );
+  if (wellKnown.version !== 1 || wellKnown.url !== expectedUrl || wellKnown.anonKey !== expectedKey) {
+    fail('dist/.well-known/iptvs-cloud.json does not match the configured endpoint.');
+  }
+  const copy = JSON.parse(readFileSync(join(dist, 'cloud-config.json'), 'utf8'));
+  if (copy.url !== expectedUrl || copy.anonKey !== expectedKey) {
+    fail('dist/cloud-config.json does not match the configured endpoint.');
+  }
+  const redirects = readFileSync(join(dist, '_redirects'), 'utf8');
+  if (!redirects.includes('/.well-known/iptvs-cloud.json  /cloud-config.json  200')) {
+    fail('dist/_redirects is missing the well-known rewrite.');
+  }
+} catch (error) {
+  fail(`the well-known configuration is missing or invalid: ${error.message}`);
 }
 
 console.log(`check-bundle: ok — ${entry.f}, ${entry.bytes} bytes, Supabase client present`);

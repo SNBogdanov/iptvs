@@ -104,3 +104,26 @@ object SwipeAxisRule {
         return SwipeAxis.Undecided
     }
 }
+
+/**
+ * Whether a finished horizontal swipe on the picture means "previous channel".
+ *
+ * A swipe **right to left** is the back-like gesture every touch screen shares,
+ * and in the player it returns to the channel that was playing before the
+ * current one — the touch equivalent of a remote's Last channel key, and the
+ * only way back on a phone whose control row has no such button (it carries
+ * previous/next *in order*, which is a different move).
+ *
+ * Only that direction is claimed. A left-to-right swipe is left alone on
+ * purpose: Android's own edge-Back starts there, and two meanings on one
+ * direction would make a single swipe do two things.
+ *
+ * [minTravel] is in pixels and comes from the overlay's [PlayerDimens.SwipeMinTravel];
+ * a drag shorter than that is a flick the user did not mean as a command.
+ * Pure, so the direction and the threshold are pinned by a JUnit test rather
+ * than by trying a phone.
+ */
+object SwipeZapRule {
+    fun isPreviousChannel(dx: Float, minTravel: Float): Boolean =
+        minTravel > 0f && dx <= -minTravel
+}

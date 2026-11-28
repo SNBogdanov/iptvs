@@ -573,6 +573,9 @@ class ChannelCategoryMultiPicker extends StatelessWidget {
           }
 
           final previous = previousSingleCategoryId;
+          final onlyButton = previous == null || previous.isEmpty
+              ? null
+              : previous;
           return AlertDialog(
             backgroundColor: AppColors.panelHi,
             title: const Text('Categories'),
@@ -595,13 +598,12 @@ class ChannelCategoryMultiPicker extends StatelessWidget {
             actions: [
               // One press back to a single category — the D-pad path to what a
               // long press does on touch. Hidden when it would change nothing.
-              if (previous != null &&
-                  previous != selectedCategoryId)
+              if (onlyButton != null && onlyButton != selectedCategoryId)
                 TextButton(
                   onPressed: () =>
-                      Navigator.pop(context, (<String>{previous}, null)),
+                      Navigator.pop(context, (<String>{onlyButton}, null)),
                   child: Text(
-                    'Only ${_titleFor(previous)}',
+                    'Only ${_titleFor(onlyButton)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),

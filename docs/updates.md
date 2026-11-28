@@ -79,14 +79,16 @@ manual dispatch from minting a release for a tag that was never pushed.
 | secret | `ANDROID_RELEASE_KEYSTORE_BASE64` | `secrets/iptvs-release.jks`, base64-encoded |
 | secret | `ANDROID_RELEASE_KEYSTORE_PASSWORD`, `ANDROID_RELEASE_KEY_ALIAS`, `ANDROID_RELEASE_KEY_PASSWORD` | keystore credentials |
 | var | `ANDROID_RELEASE_CERT_SHA256` | expected APK signer fingerprint (see `docs/android-signing.md`) |
-| var | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | cloud sync (empty in a plain fork → the feature stays off) |
+| var | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | **panel deploy only** (`pages.yml`); app artifacts are built without them |
 | secret | `GEMINI_API_KEY`, `DISCORD_RELEASE_WEBHOOK` | optional changelog / announcement |
 
-The two Supabase values are **repository variables**, and the release workflow now refuses to start
-without them: they are compiled in with `--dart-define`, so a missing one produces a build whose
-cloud feature is silently off — exactly what 1.0.1 shipped (the artifacts were healthy, the app just
-had no cloud). The `version` job fails with `::error::SUPABASE_URL is not configured…` before any
-build runs.
+**App artifacts deliberately contain no cloud endpoint.** Since option D the server is a per-device
+setting (`cloud/runtime-server.md`), normally discovered from a panel's
+`/.well-known/iptvs-cloud.json`, so the release builds pass no `SUPABASE_*` defines: a downloaded
+APK/MSI has nowhere to go until the user connects a server, and the project URL/key are not in the
+artifact. The repository Variables are still required by the **panel** deploy, which bakes them
+into the panel bundle and emits the discovery file. (The old gate that failed a release without
+them existed because a silently cloud-less build was a bug; unconfigured is now the intended state.)
 
 The Android job fails when its keystore secrets are missing rather than publishing an unsigned APK.
 Windows needs **no secrets**: the MSI is not signed, it installs per-machine without certificate
@@ -226,6 +228,20 @@ AppImage.
   `release >= current`, and an **older** release is refused with a snackbar rather than silently
   downgrading. The confirmed install reuses the same verified download path.
 
+### A manual MSI install closes the running player
+
+The in-app path exits the player itself before `msiexec`, but a manual MSI install has no such
+helper. The package therefore carries `util:CloseApplication` from the WiX Util extension: before
+files are copied it sends the player a `WM_CLOSE`, waits three seconds and then terminates anything
+left. The termination is what makes it work — the app defaults to **Close to tray**, so a polite
+close only hides the window. `RebootPrompt` is off (the extension rejects it together with
+termination) and nothing is relaunched afterwards; the in-app updater still relaunches the app, and
+a manual install leaves the user to open it from the shortcut. The wizard's `FilesInUse` and
+`MsiRMFilesInUse` dialogs are deliberately **not authored**: they run at the UI's `InstallValidate`,
+*before* the execute sequence and therefore before the close action, so they would ask the user to
+close the app by hand — the question the MSI now answers itself. A first-time install and the silent
+updater path find no process and pay nothing (the close action is a no-op).
+
 ## D-pad behaviour
 
 Each dialog's **primary action autofocuses** (so a TV remote's OK acts immediately — the modal's
@@ -257,8 +273,10 @@ parallel install with the old one left behind — the MSI equivalent of the MSIX
 install directory `C:\Program Files\IPTVS` is equally permanent: the updater relaunches from the
 `HKLM\SOFTWARE\SNBogdanov\IPTVS\InstallDir` value the package writes.
 
-`tool/package_windows_msi.ps1` builds the package with WiX v4 (pinned 4.0.6, with its
-`WixToolset.UI.wixext` UI extension)
+`tool/package_windows_msi.ps1` builds the package with WiX v4 (pinned 4.0.6, with the
+`WixToolset.UI.wixext` UI extension and `WixToolset.Util.wixext`, whose `CloseApplication` action
+closes a running player before its files are replaced — see "A manual MSI install closes the
+running player" above)
 from the Flutter Release payload, adding one component per file. The wizard is WixUI with our own
 fonts and artwork, a folder/shortcut page for the first install, an "Upgrade" notice when
 `FindRelatedProducts` found an older version, and a Repair/Remove page (no Change — the feature set

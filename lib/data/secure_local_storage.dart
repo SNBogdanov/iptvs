@@ -27,4 +27,9 @@ class SecureLocalStorage extends LocalStorage {
 
   @override
   Future<void> removePersistedSession() => _storage.delete(key: _key);
+
+  /// Drops the stored session without asking the server (the server may be
+  /// unreachable or about to be replaced). Used when the device forgets a cloud
+  /// server, where a network sign-out is not guaranteed to complete.
+  Future<void> clear() => _storage.delete(key: _key);
 }

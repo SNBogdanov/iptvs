@@ -3,7 +3,6 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart' show KeyRepeatEvent;
 
 import '../data/app_database.dart';
-import '../data/cloud_config.dart';
 import '../data/diagnostics_log.dart';
 import '../data/expiry_cache.dart';
 import '../data/metadata_config.dart';
@@ -229,21 +228,20 @@ class _SourcesScreenState extends State<SourcesScreen> {
               await _reload();
             },
           ),
-          if (CloudConfig.isConfigured)
-            AppBarAction(
-              label: 'Cloud sync',
-              icon: Icons.cloud_sync_outlined,
-              onPressed: () async {
-                await Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) =>
-                        CloudSyncScreen(store: widget.store, db: widget.db),
-                  ),
-                );
-                // A pull may have changed the source list; refresh on return.
-                await _reload();
-              },
-            ),
+          AppBarAction(
+            label: 'Cloud sync',
+            icon: Icons.cloud_sync_outlined,
+            onPressed: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) =>
+                      CloudSyncScreen(store: widget.store, db: widget.db),
+                ),
+              );
+              // A pull may have changed the source list; refresh on return.
+              await _reload();
+            },
+          ),
           AppBarAction(
             label: 'Metadata',
             tooltip: 'Posters, ratings and descriptions',

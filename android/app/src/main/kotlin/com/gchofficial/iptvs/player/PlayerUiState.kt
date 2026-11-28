@@ -415,6 +415,16 @@ class PlayerUiState(
     var dwellMenuOpen by mutableStateOf(false)
 
     /**
+     * When the pace menu opened ([android.os.SystemClock.elapsedRealtime]).
+     *
+     * A hold that opens a panel can also deliver a click at the release point —
+     * on a television the pointer often lands where the menu just appeared — and
+     * that click selected a row and closed the menu in the same instant. Selections
+     * this soon after opening are ignored.
+     */
+    var dwellMenuOpenedAtMs by mutableStateOf(0L)
+
+    /**
      * "Landscape locked" when true: the Activity asks for
      * `SCREEN_ORIENTATION_SENSOR_LANDSCAPE`, i.e. landscape only, with the
      * **sensor** choosing which of the two sides is up. False follows the

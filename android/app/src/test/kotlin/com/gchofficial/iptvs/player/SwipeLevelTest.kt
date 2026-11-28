@@ -119,4 +119,19 @@ class SwipeLevelTest {
             SwipeAxisRule.decide(dx = 10f, dy = 12f, touchSlop = 8f),
         )
     }
+
+    @Test
+    fun `only a long right-to-left swipe changes the channel`() {
+        val minTravel = 150f
+        // Right to left, past the threshold: the previous channel.
+        org.junit.Assert.assertTrue(SwipeZapRule.isPreviousChannel(-400f, minTravel))
+        org.junit.Assert.assertTrue(SwipeZapRule.isPreviousChannel(-150f, minTravel))
+        // A short flick is not a command.
+        org.junit.Assert.assertFalse(SwipeZapRule.isPreviousChannel(-149f, minTravel))
+        // The other direction is deliberately nobody's gesture: Android's own
+        // edge-Back starts there.
+        org.junit.Assert.assertFalse(SwipeZapRule.isPreviousChannel(400f, minTravel))
+        // An unmeasured threshold must not turn every drag into a zap.
+        org.junit.Assert.assertFalse(SwipeZapRule.isPreviousChannel(-400f, 0f))
+    }
 }

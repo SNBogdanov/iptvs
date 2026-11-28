@@ -1,12 +1,17 @@
 import 'dart:async';
+import 'dart:io' show Platform, Process, exit;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/app_database.dart';
+import '../data/app_settings_store.dart';
 import '../data/cloud_config.dart';
+import '../data/cloud_endpoint.dart';
+import '../data/cloud_runtime.dart';
 import '../data/cloud_sync.dart';
 import '../data/device_label.dart';
 import '../data/source_store.dart';
@@ -37,7 +42,10 @@ class CloudSyncScreen extends StatefulWidget {
 }
 
 class _CloudSyncScreenState extends State<CloudSyncScreen> {
-  late final CloudSync _sync = widget.sync ?? CloudSync(db: widget.db);
+  /// Rebuilt after a first-time server save: until then nothing cloud-facing
+  /// exists to talk to. `late` (not `late final`) so the screen can create it
+  /// once the server has been chosen without leaving the route.
+  late CloudSync _sync = widget.sync ?? CloudSync(db: widget.db);
 
   bool _loading = true;
   bool _paired = false;
@@ -50,6 +58,26 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   String? _activeProfileId;
   DateTime? _knownRemoteRevision;
   CloudCryptoStatus _crypto = CloudCryptoStatus.off;
+
+  /// The "connect a server" form is shown when this device has no endpoint
+  /// (or the user chose Change). Option D: the server is a per-device setting,
+  /// so an unconfigured build is expected, not broken.
+  bool _serverSetup = false;
+  bool _checkingServer = false;
+  bool _serverBusy = false;
+  String? _serverError;
+  bool _manualServer = false;
+
+  /// A server change was saved while a Supabase client already exists in this
+  /// process. Nothing else may talk to either server until the app restarts.
+  bool _restartPending = false;
+
+  /// The well-known answer for the URL in [_serverUrl], ready to save.
+  CloudEndpoint? _checkedEndpoint;
+
+  final _serverUrl = TextEditingController();
+  final _serverKey = TextEditingController();
+  final _serverPanel = TextEditingController();
 
   /// The server reports this profile as unencrypted (or at an older key) after
   /// this device has already seen it encrypted. Always accompanies
@@ -64,6 +92,14 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   @override
   void initState() {
     super.initState();
+    _serverSetup = !CloudRuntime.hasServer;
+    _loading = !_serverSetup;
+    _clientStarted = CloudRuntime.hasServer;
+    final endpoint = CloudRuntime.endpoint;
+    if (endpoint != null) {
+      _serverUrl.text = endpoint.url;
+      _serverPanel.text = endpoint.panelUrl;
+    }
     _init();
     detectSuggestedDeviceLabel().then((label) {
       if (mounted) setState(() => _suggestedLabel = label);
@@ -73,10 +109,22 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   @override
   void dispose() {
     _poll?.cancel();
+    _serverUrl.dispose();
+    _serverKey.dispose();
+    _serverPanel.dispose();
     super.dispose();
   }
 
   Future<void> _init() async {
+    if (!CloudRuntime.hasServer) {
+      if (mounted && _loading) {
+        setState(() {
+          _loading = false;
+          _serverSetup = true;
+        });
+      }
+      return;
+    }
     try {
       await _sync.ensureAnonSession();
       if (await _sync.isPaired()) {
@@ -284,7 +332,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   Future<void> _openPanel() async {
-    final uri = Uri.tryParse(CloudConfig.panelUrl);
+    final uri = Uri.tryParse(CloudRuntime.panelUrl);
     var ok = false;
     if (uri != null) {
       try {
@@ -427,6 +475,234 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Cloud server (option D). The endpoint is per-device state; the screen is
+  // the only place that writes it. See cloud/runtime-server.md.
+  // ---------------------------------------------------------------------------
+
+  bool _clientStarted = false;
+
+  void _openServerSetup() {
+    final endpoint = CloudRuntime.endpoint;
+    if (endpoint != null) {
+      _serverUrl.text = endpoint.url;
+      _serverPanel.text = endpoint.panelUrl;
+    }
+    setState(() {
+      _serverSetup = true;
+      _serverError = null;
+      _checkedEndpoint = null;
+      _manualServer = false;
+      _serverKey.clear();
+    });
+  }
+
+  /// Fetches `/.well-known/iptvs-cloud.json` from the entered domain.
+  ///
+  /// Redirects are refused on purpose: the user typed one host, and a server
+  /// that forwards the config to a different one is not what they asked for.
+  Future<void> _checkServer() async {
+    final base = normalizeCloudDiscoveryUrl(_serverUrl.text);
+    if (base == null) {
+      setState(() => _serverError = 'Enter an https:// address.');
+      return;
+    }
+    setState(() {
+      _checkingServer = true;
+      _serverError = null;
+      _checkedEndpoint = null;
+    });
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse('$base$kCloudWellKnownPath'))
+        ..followRedirects = false
+        ..headers['accept'] = 'application/json';
+      final streamed = await client
+          .send(request)
+          .timeout(const Duration(seconds: 6));
+      if (streamed.statusCode != 200) {
+        throw FormatException('HTTP ${streamed.statusCode}');
+      }
+      final length = streamed.contentLength;
+      if (length != null && length > 64 * 1024) {
+        throw const FormatException('configuration too large');
+      }
+      final body = await streamed.stream
+          .bytesToString()
+          .timeout(const Duration(seconds: 6));
+      final endpoint = parseCloudWellKnown(body, baseUrl: base);
+      if (endpoint == null) throw const FormatException('bad configuration');
+      if (mounted) setState(() => _checkedEndpoint = endpoint);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _serverError =
+              'No IPTVS cloud configuration at that address. '
+              'You can enter the URL and key manually.',
+        );
+      }
+    } finally {
+      client.close();
+      if (mounted) setState(() => _checkingServer = false);
+    }
+  }
+
+  Future<void> _saveServer() async {
+    final endpoint = _manualServer
+        ? CloudEndpoint.parse(
+            url: _serverUrl.text,
+            anonKey: _serverKey.text,
+            panelUrl: _serverPanel.text,
+          )
+        : _checkedEndpoint;
+    if (endpoint == null) {
+      setState(
+        () => _serverError = _manualServer
+            ? 'Check the address and the publishable key.'
+            : 'Read the server configuration first, or enter it manually.',
+      );
+      return;
+    }
+    final previous = CloudRuntime.endpoint;
+    final switching = previous != null && !previous.sameServerAs(endpoint);
+    setState(() {
+      _serverBusy = true;
+      _serverError = null;
+    });
+    try {
+      if (switching) {
+        // Different server: the old session and cloud caches mean nothing on
+        // the new one and would only confuse the next boot.
+        await CloudRuntime.forget();
+      }
+      await const AppSettingsStore().setCloudEndpoint(endpoint);
+      if (!_clientStarted) {
+        // Nothing was initialized at boot, so this process can start the client
+        // now and the pairing UI appears without leaving the screen.
+        await CloudRuntime.initialize(endpoint);
+        _clientStarted = true;
+        _sync = widget.sync ?? CloudSync(db: widget.db);
+        if (!mounted) return;
+        setState(() {
+          _serverSetup = false;
+          _serverBusy = false;
+          _loading = true;
+        });
+        await _init();
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _serverSetup = false;
+        _serverBusy = false;
+        _restartPending = true;
+      });
+      // The process already owns a Supabase client (and possibly a session for
+      // the previous server): only a restart can apply the saved endpoint.
+      await _promptRestart();
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () => _serverError = 'Could not save the server: ${friendlyCloudError(e)}',
+        );
+      }
+    } finally {
+      if (mounted && _serverBusy) setState(() => _serverBusy = false);
+    }
+  }
+
+  Future<void> _forgetServer() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Forget this server?'),
+        content: const Text(
+          'This device will be unpaired and its cloud caches removed. '
+          'Sources, favorites and progress stored on this device stay.',
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Forget'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _serverBusy = true);
+    try {
+      await CloudRuntime.forget();
+      if (!mounted) return;
+      _poll?.cancel();
+      setState(() {
+        _serverBusy = false;
+        _serverSetup = true;
+        _checkedEndpoint = null;
+        _manualServer = false;
+        _serverError = null;
+        _status = null;
+        _error = null;
+        _paired = false;
+        _code = null;
+        _profiles = const [];
+        _activeProfileId = null;
+      });
+      _serverUrl.clear();
+      _serverKey.clear();
+      _serverPanel.clear();
+      if (_clientStarted) {
+        setState(() => _restartPending = true);
+        await _promptRestart();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _serverError = friendlyCloudError(e));
+      }
+    } finally {
+      if (mounted && _serverBusy) setState(() => _serverBusy = false);
+    }
+  }
+
+  Future<void> _promptRestart() async {
+    final restart = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Restart required'),
+        content: const Text(
+          'The cloud server was saved. Close IPTVS and open it again to use it.',
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Later'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(Platform.isWindows ? 'Restart now' : 'Close app'),
+          ),
+        ],
+      ),
+    );
+    if (restart == true) await _restartNow();
+  }
+
+  Future<void> _restartNow() async {
+    if (Platform.isWindows) {
+      try {
+        await Process.start(Platform.resolvedExecutable, const []);
+      } catch (_) {
+        // Fall through to exit: the user can start it from the shortcut.
+      }
+    }
+    exit(0);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -450,7 +726,15 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (_paired) ..._pairedBody() else ..._pairingBody(),
+                        if (_restartPending)
+                          ..._restartPendingBody()
+                        else if (_serverSetup)
+                          ..._serverSetupBody()
+                        else ...[
+                          _serverRow(),
+                          const Divider(height: 32),
+                          if (_paired) ..._pairedBody() else ..._pairingBody(),
+                        ],
                         if (_status != null) ...[
                           const SizedBox(height: 20),
                           Text(
@@ -472,6 +756,183 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
               ),
       ),
     );
+  }
+
+  /// The configured server, with the two actions that can change it.
+  Widget _serverRow() {
+    final endpoint = CloudRuntime.endpoint;
+    if (endpoint == null) return const SizedBox.shrink();
+    return Row(
+      children: [
+        const Icon(Icons.dns_outlined, size: 18, color: AppColors.textLo),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            'Server: ${endpoint.host}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: AppColors.textLo, fontSize: 13),
+          ),
+        ),
+        TextButton(
+          onPressed: _serverBusy ? null : _openServerSetup,
+          child: const Text('Change'),
+        ),
+        TextButton(
+          onPressed: _serverBusy ? null : _forgetServer,
+          child: const Text('Forget'),
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _restartPendingBody() => [
+    const Text(
+      'Restart to apply the server',
+      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+    ),
+    const SizedBox(height: 8),
+    const Text(
+      'The server setting was saved. Close IPTVS and open it again; until '
+      'then the cloud screen stays off rather than talking to the previous '
+      'server with the new setting.',
+      style: TextStyle(color: AppColors.textLo),
+    ),
+    const SizedBox(height: 20),
+    FilledButton.icon(
+      onPressed: _restartNow,
+      icon: const Icon(Icons.restart_alt),
+      label: Text(Platform.isWindows ? 'Restart now' : 'Close app'),
+    ),
+  ];
+
+  List<Widget> _serverSetupBody() {
+    final current = CloudRuntime.endpoint;
+    return [
+      const Text(
+        'Connect a cloud server',
+        style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 8),
+      const Text(
+        'Cloud sync needs a server: your own IPTVS cloud or a shared one. '
+        'Enter its address; if it publishes its configuration, the key is '
+        'read automatically.',
+        style: TextStyle(color: AppColors.textLo),
+      ),
+      const SizedBox(height: 20),
+      TextField(
+        controller: _serverUrl,
+        autocorrect: false,
+        keyboardType: TextInputType.url,
+        textInputAction: TextInputAction.next,
+        decoration: const InputDecoration(
+          labelText: 'Server address',
+          hintText: 'https://cloud.example.com',
+        ),
+        onChanged: (_) {
+          if (_checkedEndpoint != null) {
+            setState(() => _checkedEndpoint = null);
+          }
+        },
+      ),
+      const SizedBox(height: 12),
+      Row(
+        children: [
+          FilledButton(
+            onPressed: _checkingServer ? null : _checkServer,
+            child: _checkingServer
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('Check server'),
+          ),
+          if (_checkedEndpoint case final endpoint?) ...[
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Found: ${endpoint.host}',
+                style: const TextStyle(color: AppColors.accent, fontSize: 13),
+              ),
+            ),
+          ],
+        ],
+      ),
+      const SizedBox(height: 12),
+      TextButton(
+        onPressed: () => setState(() {
+          _manualServer = !_manualServer;
+          if (_manualServer && _serverPanel.text.trim().isEmpty) {
+            // The panel is where the pairing code is entered; the build's
+            // fallback is a better guess than the API host.
+            _serverPanel.text = CloudRuntime.panelUrl;
+          }
+        }),
+        child: Text(
+          _manualServer
+              ? 'Hide manual entry'
+              : 'Enter the URL and key manually',
+        ),
+      ),
+      if (_manualServer) ...[
+        const SizedBox(height: 4),
+        TextField(
+          controller: _serverKey,
+          autocorrect: false,
+          enableSuggestions: false,
+          decoration: const InputDecoration(
+            labelText: 'Publishable (anon) key',
+            helperText: 'Public by design. Never the service_role key.',
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _serverPanel,
+          autocorrect: false,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            labelText: 'Panel address (optional)',
+            hintText: 'Defaults to the server address',
+          ),
+        ),
+      ],
+      if (current != null) ...[
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: _serverBusy
+                ? null
+                : () => setState(() {
+                    _serverSetup = false;
+                    _serverError = null;
+                  }),
+            child: const Text('Cancel'),
+          ),
+        ),
+      ],
+      if (_serverError != null) ...[
+        const SizedBox(height: 8),
+        Text(
+          _serverError!,
+          style: const TextStyle(color: AppColors.danger),
+        ),
+      ],
+      const SizedBox(height: 16),
+      FilledButton.icon(
+        onPressed: _serverBusy ? null : _saveServer,
+        icon: _serverBusy
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.cloud_outlined),
+        label: const Text('Save server'),
+      ),
+    ];
   }
 
   List<Widget> _pairingBody() => [
@@ -540,7 +1001,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       const SizedBox(height: 20),
       Center(
         child: PairingQrView(
-          link: pairingPanelLink(CloudConfig.panelUrl, code.code),
+          link: pairingPanelLink(CloudRuntime.panelUrl, code.code),
         ),
       ),
     ],
@@ -571,7 +1032,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
               const Icon(Icons.open_in_new, size: 16, color: AppColors.accent),
               const SizedBox(width: 6),
               Text(
-                CloudConfig.panelUrl,
+                CloudRuntime.panelUrl,
                 style: const TextStyle(
                   color: AppColors.accent,
                   decoration: TextDecoration.underline,

@@ -81,6 +81,28 @@ export default defineConfig(({ mode }) => {
     '',
   ].join('\n');
 
+  // **The panel is also the cloud's discovery document.** The app's "connect a
+  // server" form accepts a bare domain and reads
+  // `/.well-known/iptvs-cloud.json` from it; Supabase itself cannot serve that
+  // path, but the host that does serve the panel can. Emitting it here keeps the
+  // values in one place (the same repo Variables the bundle uses) and means the
+  // owner's panel domain works as a one-field setup target.
+  //
+  // `url` may point at a different origin (the Supabase project); the client
+  // validates it and defaults `panelUrl` to the address the user typed, so the
+  // file does not need to know its own origin. Nothing secret is written here:
+  // the publishable key already ships in the panel bundle.
+  const anonKey = env.VITE_SUPABASE_ANON_KEY || '';
+  const wellKnown = supabaseUrl && anonKey
+    ? JSON.stringify({ version: 1, url: supabaseUrl, anonKey }, null, 2) + '\n'
+    : '';
+  // Cloudflare Pages is not relied on to serve a dot directory: the rewrite
+  // serves the same bytes from a plain path, while Apache/GitHub Pages/self-
+  // hosted hosts read `.well-known` directly. `_redirects` is inert elsewhere.
+  const redirectsFile = wellKnown
+    ? '/.well-known/iptvs-cloud.json  /cloud-config.json  200\n'
+    : '';
+
   return {
     base: process.env.PANEL_BASE ?? '/iptvs/',
     plugins: [
@@ -95,6 +117,15 @@ export default defineConfig(({ mode }) => {
         },
         generateBundle() {
           this.emitFile({ type: 'asset', fileName: '_headers', source: headersFile });
+          if (wellKnown) {
+            this.emitFile({
+              type: 'asset',
+              fileName: '.well-known/iptvs-cloud.json',
+              source: wellKnown,
+            });
+            this.emitFile({ type: 'asset', fileName: 'cloud-config.json', source: wellKnown });
+            this.emitFile({ type: 'asset', fileName: '_redirects', source: redirectsFile });
+          }
         },
       },
     ],

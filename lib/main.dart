@@ -12,15 +12,13 @@ import 'package:flutter/services.dart'
         LogicalKeyboardKey,
         MethodChannel;
 import 'package:media_kit/media_kit.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/app_database.dart';
 import 'data/app_settings_store.dart';
-import 'data/cloud_config.dart';
+import 'data/cloud_runtime.dart';
 import 'data/device_class.dart';
 import 'data/diagnostics_log.dart';
 import 'data/net.dart' show redactText;
-import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/proxy_config.dart';
 import 'data/source_store.dart';
@@ -226,16 +224,11 @@ Future<void> main() async {
   runApp(IptvApp(db: db, store: store));
 }
 
-/// Optional cloud source panel: only initialised when build-time Supabase
-/// config is present, otherwise the app runs fully offline as before.
-Future<void> _initialiseCloud() async {
-  if (!CloudConfig.isConfigured) return;
-  await Supabase.initialize(
-    url: CloudConfig.url,
-    publishableKey: CloudConfig.anonKey,
-    authOptions: FlutterAuthClientOptions(localStorage: SecureLocalStorage()),
-  );
-}
+/// Optional cloud backend: reads the server this device was configured with
+/// (or the build's default, migrated into the keychain) and initializes
+/// Supabase only when one exists. With no server the app runs fully offline as
+/// before. Nothing here touches the network — see `cloud/runtime-server.md`.
+Future<void> _initialiseCloud() => CloudRuntime.load();
 
 class IptvApp extends StatefulWidget {
   final AppDatabase db;

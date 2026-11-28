@@ -2,6 +2,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../player/next_video_policy.dart';
 import '../player/seek_step.dart';
+import 'cloud_endpoint.dart';
 import 'stream_kind.dart';
 
 /// Global (profile-independent) app preferences, persisted in the OS keychain.
@@ -445,5 +446,47 @@ class AppSettingsStore {
     } else {
       await _storage.write(key: _kSeekStepSeconds, value: '$step');
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cloud server (option D: the server is a per-device setting, not a build
+  // constant). See `cloud/runtime-server.md`.
+  //
+  // Three keys rather than one JSON blob: they are written once at setup and
+  // read once at boot, and a partially written blob would read as "no server"
+  // (silently losing the pairing) where separate keys fail the same way but
+  // stay debuggable in the keychain.
+  // ---------------------------------------------------------------------------
+
+  static const _kCloudServerUrl = 'cloud_server_url';
+  static const _kCloudServerKey = 'cloud_server_key';
+  static const _kCloudServerPanel = 'cloud_server_panel';
+
+  /// The server this device is configured to use, or null when none is set.
+  ///
+  /// Values are normalized by [CloudEndpoint.parse]; a stored value that no
+  /// longer parses (hand-edited, older shape) reads as "not configured" rather
+  /// than putting an unusable client on the boot path.
+  Future<CloudEndpoint?> cloudEndpoint() async {
+    final url = await _storage.read(key: _kCloudServerUrl);
+    final key = await _storage.read(key: _kCloudServerKey);
+    if (url == null || key == null) return null;
+    final panel = await _storage.read(key: _kCloudServerPanel);
+    // A hand-edited or older panel value must not throw away the server: fall
+    // back to the server address, which is where a self-hosted stack serves it.
+    return CloudEndpoint.parse(url: url, anonKey: key, panelUrl: panel) ??
+        CloudEndpoint.parse(url: url, anonKey: key);
+  }
+
+  Future<void> setCloudEndpoint(CloudEndpoint endpoint) async {
+    await _storage.write(key: _kCloudServerUrl, value: endpoint.url);
+    await _storage.write(key: _kCloudServerKey, value: endpoint.anonKey);
+    await _storage.write(key: _kCloudServerPanel, value: endpoint.panelUrl);
+  }
+
+  Future<void> clearCloudEndpoint() async {
+    await _storage.delete(key: _kCloudServerUrl);
+    await _storage.delete(key: _kCloudServerKey);
+    await _storage.delete(key: _kCloudServerPanel);
   }
 }

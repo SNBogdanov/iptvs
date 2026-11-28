@@ -58,6 +58,11 @@ class ZapKeyPolicyTest {
         assertEquals(KeyEvent.KEYCODE_NUMPAD_ENTER, ZapKeyPolicy.KEYCODE_NUMPAD_ENTER)
         assertEquals(KeyEvent.KEYCODE_CHANNEL_UP, ZapKeyPolicy.KEYCODE_CHANNEL_UP)
         assertEquals(KeyEvent.KEYCODE_CHANNEL_DOWN, ZapKeyPolicy.KEYCODE_CHANNEL_DOWN)
+        assertEquals(KeyEvent.KEYCODE_MEDIA_NEXT, ZapKeyPolicy.KEYCODE_MEDIA_NEXT)
+        assertEquals(
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+            ZapKeyPolicy.KEYCODE_MEDIA_PREVIOUS,
+        )
         assertEquals(KeyEvent.KEYCODE_GUIDE, ZapKeyPolicy.KEYCODE_GUIDE)
         assertEquals(KeyEvent.KEYCODE_LAST_CHANNEL, ZapKeyPolicy.KEYCODE_LAST_CHANNEL)
     }
@@ -98,6 +103,17 @@ class ZapKeyPolicyTest {
             assertEquals(
                 ZapKeyAction.PreviousChannel,
                 decide(ZapKeyPolicy.KEYCODE_LAST_CHANNEL, controlsVisible = visible).action,
+            )
+            // A remote whose channel rocker reports MEDIA_NEXT/PREVIOUS
+            // (common on Android TV boxes) is the same gesture, not a second
+            // feature: those keys have no other job on a live stream.
+            assertEquals(
+                ZapKeyAction.ChannelUp,
+                decide(ZapKeyPolicy.KEYCODE_MEDIA_NEXT, controlsVisible = visible).action,
+            )
+            assertEquals(
+                ZapKeyAction.ChannelDown,
+                decide(ZapKeyPolicy.KEYCODE_MEDIA_PREVIOUS, controlsVisible = visible).action,
             )
         }
     }
@@ -394,6 +410,16 @@ class ZapKeyPolicyTest {
             ZapKeyAction.PreviousChannel,
             decide(ZapKeyPolicy.KEYCODE_LAST_CHANNEL, quickListOpen = true).action,
         )
+        // The media rocker keeps zapping over an open list, like the channel
+        // keys beside it.
+        assertEquals(
+            ZapKeyAction.ChannelUp,
+            decide(ZapKeyPolicy.KEYCODE_MEDIA_NEXT, quickListOpen = true).action,
+        )
+        assertEquals(
+            ZapKeyAction.ChannelDown,
+            decide(ZapKeyPolicy.KEYCODE_MEDIA_PREVIOUS, quickListOpen = true).action,
+        )
         val digit = decide(KEYCODE_5, quickListOpen = true)
         assertEquals(ZapKeyAction.Digit, digit.action)
         assertEquals(5, digit.digit)
@@ -441,8 +467,11 @@ class ZapKeyPolicyTest {
     @Test
     fun `an unrelated key is never claimed`() {
         // Media keys keep reaching onKeyDown, volume keys keep reaching the
-        // system, and letters keep reaching Compose.
-        for (code in listOf(24, 25, 85, 86, 87, 88, 89, 90, 126, 127, 29, 111)) {
+        // system, and letters keep reaching Compose. `87`/`88` are **not** in
+        // this list: they are MEDIA_NEXT/PREVIOUS, which some remotes send for
+        // their channel rocker, and the policy claims them as channel steps
+        // (see `dedicated remote keys act whether the chrome is up or not`).
+        for (code in listOf(24, 25, 85, 86, 89, 90, 126, 127, 29, 111)) {
             assertEquals(
                 ZapKeyAction.None,
                 decide(code, digitsPending = true).action,

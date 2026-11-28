@@ -11,6 +11,55 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ## [Unreleased]
 
+### Added
+
+- **The cloud server is now a per-device setting.** A build no longer has to be compiled against
+  one Supabase project: the Cloud sync screen offers a "Connect a cloud server" form (domain with
+  a `.well-known/iptvs-cloud.json` lookup, or URL and publishable key by hand), and the chosen
+  server is stored in the OS keychain, so installing the next GitHub release over the app keeps it.
+  With no server configured the app starts no Supabase client and creates no anonymous user; a
+  build that still carries `SUPABASE_*` defines seeds the keychain with them once. Changing or
+  forgetting the server clears only the cloud session and its caches — local sources, favorites and
+  watch progress stay. The panel build now also publishes `/.well-known/iptvs-cloud.json` from the
+  same values, so entering just the panel's domain discovers the server and its key. Release and CI
+  artifacts are built **without** the endpoint: a downloaded build shows the connect form, and the
+  repository variables are used only by the panel deploy.
+- **A right-to-left swipe on the picture goes back to the previous channel** (Android, live).
+  The phone's control row has no previous-channel button — its previous/next pair steps through
+  the list, which is a different move — so the gesture every touch screen teaches for "back" now
+  returns to the channel that was playing before the current one, the touch equivalent of a
+  remote's Last channel key. It fires **on release** and only after 56 dp of travel, so a shaky
+  swipe or a short flick changes nothing; a gesture that is clearly vertical still changes the
+  volume or brightness instead, and the opposite direction is deliberately left to Android's own
+  edge-Back gesture.
+
+### Fixed
+
+- **"Only All categories" no longer appears in the category picker, and the live list no longer
+  goes blank.** An empty category id had been saved as "All channels" and then filtered the list
+  down to nothing on every launch. An empty id is now read as All when restoring, is never
+  remembered as a single category, and is dropped when a selection is applied, so the list starts
+  with channels visible again.
+- **Holding OK on the auto-switch (bolt) button opens the pace menu from a remote.** The menu was
+  touch-only, and on a television a hold just re-fired the button on every key repeat. It now opens
+  on the key's **release**, and a selection within 400 ms of opening is ignored, so the release
+  that opened the menu cannot also choose a row and close it.
+- **A tap outside an open list menu now closes it.** The pace menu (the auto-switch times) and the
+  track/speed/aspect menus close when the picture outside the panel is tapped; the pace menu keeps
+  the same 400 ms guard, so the hold that opened it cannot immediately dismiss it.
+- **The control bar's focus comes back after an in-player panel closes.** Opening and closing the
+  quick list could leave the chrome visible with no control focused, sending the next OK to the
+  first button; a visible bar with nothing focused now restores play/pause after one frame.
+
+### Changed
+
+- **The MSI closes a running player before it replaces the files.** Before copying, the installer
+  sends `iptvs.exe` a `WM_CLOSE`, waits three seconds and then terminates what is left — the
+  force-kill is what makes it work, because the app defaults to closing into the tray. The wizard's
+  "files in use" prompt is gone (it ran before the close action and asked the user to do this by
+  hand), and nothing is relaunched afterwards. The in-app updater is unchanged: it exits the app
+  itself and launches the new version when it is done.
+
 ## [1.0.3] - 2026-11-27
 
 ### Fixed

@@ -126,7 +126,7 @@ $wxs = Join-Path $outputDirectory 'Product.wxs'
 [System.IO.File]::WriteAllText($wxs, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 
 if (Test-Path $OutputPath) { Remove-Item $OutputPath -Force }
-& $wix build $wxs -arch x64 -ext WixToolset.UI.wixext -o $OutputPath
+& $wix build $wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -o $OutputPath
 if ($LASTEXITCODE -ne 0) { throw "wix build failed: exit $LASTEXITCODE" }
 if (-not (Test-Path $OutputPath -PathType Leaf)) { throw "wix build reported success but produced no package" }
 

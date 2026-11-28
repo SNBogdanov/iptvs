@@ -12,6 +12,11 @@
   </head>
   <body>
     <div id="app"></div>
+    <!-- Optional runtime cloud config. The public deploy ships an empty
+         `config.js`; a self-hosted stack replaces it with
+         `window.__IPTVS_CLOUD__ = { url, anonKey, panelUrl }`. Loaded before the
+         bundle so `supabase.js` sees it. -->
+    <script src="/config.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

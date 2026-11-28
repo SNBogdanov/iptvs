@@ -345,17 +345,40 @@ fun PlayerScreen(
                     // be trapped by its own floor. Brightness floors at five
                     // percent for the other reason: a black screen cannot be
                     // swiped back by someone who cannot see the picture.
-                    .pointerInput(state.mutedByButton, state.volumeSwipeOnLeft) {
+                    .pointerInput(
+                        state.mutedByButton,
+                        state.volumeSwipeOnLeft,
+                        state.isLive,
+                        state.stepEnabled,
+                    ) {
                         var target = SwipeTarget.Volume
                         var level = 0f
+                        val swipeMinTravel = PlayerDimens.SwipeMinTravel.toPx()
+                        // Live zapping is the only route where "previous channel"
+                        // exists; a title's step pair is a seek and has no such
+                        // place to go back to.
+                        val previousChannelSwipe = state.isLive && state.stepEnabled
                         // **A custom drag, not `detectVerticalDragGestures`.** That
                         // detector claims a gesture as soon as the vertical
                         // movement passes the slop, so a horizontal swipe with a
                         // few pixels of drift was read as "raise the volume" —
                         // and consumed, so nothing else could have it. Here the
                         // axis is decided once, from the ratio of both movements
-                        // (`SwipeAxisRule`), and a mostly-horizontal drag is left
-                        // untouched from the moment it passes the slop.
+                        // (`SwipeAxisRule`), and a horizontal drag is read only
+                        // for the one thing it means in live playback (below).
+                        //
+                        // **A right-to-left swipe changes the channel.** On a
+                        // phone the control row has no "previous channel" button —
+                        // its pair steps in list order, a different move — and
+                        // this is the gesture every touch screen already teaches
+                        // for "back". It is claimed by the same axis decision as
+                        // the levels, so one drag never does two things, and it is
+                        // acted on **on release** and only past
+                        // `PlayerDimens.SwipeMinTravel`, so a shaky swipe or a
+                        // short flick cannot zap by accident. The opposite
+                        // direction is left alone: Android's edge-Back starts
+                        // there, and a second meaning would make one swipe do two
+                        // things.
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             // A pull from the status-bar strip is the system's
@@ -373,6 +396,7 @@ fun PlayerScreen(
                             var dx = 0f
                             var dy = 0f
                             var claimed = false
+                            var horizontalSwipe = false
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id }
@@ -388,7 +412,14 @@ fun PlayerScreen(
                                             viewConfiguration.touchSlop,
                                         )
                                     ) {
-                                        SwipeAxis.Horizontal -> break
+                                        SwipeAxis.Horizontal -> {
+                                            // Not a level change. Without a live
+                                            // route to go back on, the drag stays
+                                            // unconsumed, exactly as before.
+                                            if (!previousChannelSwipe) break
+                                            claimed = true
+                                            horizontalSwipe = true
+                                        }
                                         SwipeAxis.Undecided -> continue
                                         SwipeAxis.Vertical -> {
                                             if (target == SwipeTarget.Volume &&
@@ -405,6 +436,10 @@ fun PlayerScreen(
                                     }
                                 }
                                 change.consume()
+                                // A horizontal gesture has nothing to apply while
+                                // it travels: the channel changes once, when the
+                                // finger leaves the picture.
+                                if (horizontalSwipe) continue
                                 val kind = when (target) {
                                     SwipeTarget.Volume -> LevelPanelKind.Volume
                                     SwipeTarget.Brightness -> LevelPanelKind.Brightness
@@ -432,6 +467,15 @@ fun PlayerScreen(
                                 // The accumulated delta has been applied; the
                                 // next frame's movement is what comes next.
                                 dy = 0f
+                            }
+                            // The gesture is over. A horizontal drag that went
+                            // right to left and travelled far enough is the
+                            // channel change; anything shorter was a flick, and
+                            // the other direction means nothing here.
+                            if (horizontalSwipe &&
+                                SwipeZapRule.isPreviousChannel(dx, swipeMinTravel)
+                            ) {
+                                callbacks.onZapCommand("zap:prev")
                             }
                         }
                     }
@@ -613,12 +657,33 @@ private fun ControlsOverlay(
     // `PlayerScreen`'s effect instead ran on the same frame the `AnimatedVisibility`
     // entered, when nothing was placed yet: the bar came up with no focused
     // control, and the next OK landed on the first one.
+    var overlayHasFocus by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         androidx.compose.runtime.withFrameNanos { }
         val remembered = PlayerFocusMemory.last
         val restored =
             remembered != null && runCatching { remembered.requestFocus() }.isSuccess
         if (!restored) runCatching { playFocus.requestFocus() }
+    }
+    // **Focus watchdog.** A visible bar with nothing focused is a dead D-pad: the
+    // next OK re-treads the whole row. Losing focus without the bar leaving
+    // composition happens when a panel that took it goes away — the in-player
+    // quick list is the reported case: open the list, close it, and the chrome was
+    // still up but owned no focus. Whenever the chrome is visible, no menu/info
+    // panel owns it and nothing in the bar has focus, play/pause is the default
+    // (a control the viewer usually wants, and the one a fresh open lands on).
+    LaunchedEffect(
+        state.controlsVisible,
+        state.pinned,
+        state.quickList.open,
+        overlayHasFocus,
+    ) {
+        if (state.controlsVisible && !state.pinned && !state.quickList.open &&
+            !overlayHasFocus
+        ) {
+            androidx.compose.runtime.withFrameNanos { }
+            if (!overlayHasFocus) runCatching { playFocus.requestFocus() }
+        }
     }
     // The scrim stays full-bleed (it has to reach the screen edge to be readable
     // over the video), while the controls themselves are inset: the display
@@ -627,6 +692,7 @@ private fun ControlsOverlay(
     Box(
         Modifier
             .fillMaxSize()
+            .onFocusChanged { overlayHasFocus = it.hasFocus }
             .background(
                 Brush.verticalGradient(
                     0f to PlayerColors.ScrimTop,
@@ -1311,6 +1377,7 @@ private fun RightCluster(
             // number lives one gesture deeper rather than in an extra control.
             onLongClick = {
                 onInteract()
+                state.dwellMenuOpenedAtMs = android.os.SystemClock.elapsedRealtime()
                 state.dwellMenuOpen = true
             },
         ) { onInteract(); callbacks.onZapCommand("zap:auto") }
@@ -1369,10 +1436,12 @@ fun IconControlButton(
     // Toggle state: an accent-tinted glyph (white while focused, so it stays
     // legible on the accent-filled focus background).
     active: Boolean = false,
-    // A second, deeper action on a touch press. Deliberately *not* a second
-    // control: the cluster is full, and these two buttons have a natural pair
-    // of meanings (open the list / open its categories, toggle the mode /
-    // choose its pace). A D-pad has no long press, so nothing is lost there.
+    // A second, deeper action, on a hold. Two input paths reach it: a touch or
+    // air-mouse press-and-hold (`combinedClickable`), and — because a remote has
+    // no long press — holding OK on the focused control, handled below. Without
+    // that key path the pace menu was unreachable on a television, and holding
+    // OK only re-fired the click on every key repeat, toggling the mode several
+    // times a second.
     onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
@@ -1393,6 +1462,43 @@ fun IconControlButton(
     } else {
         Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
     }
+    // The key half of the hold. `repeatCount > 0` means the button is being
+    // held; the repeats are swallowed and the menu is opened on **release**, not
+    // on the first repeat. Opening it while the key is still down moved focus
+    // into the menu, and the remaining repeats then activated the row under the
+    // cursor — which closed the menu the user had just opened. Releasing first
+    // also means `clickable` never fires its own click for that press.
+    var longPressFired by remember { mutableStateOf(false) }
+    val keyHold = if (onLongClick == null) {
+        Modifier
+    } else {
+        Modifier.onPreviewKeyEvent { event ->
+            val native = event.nativeKeyEvent
+            val activate = native.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                native.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                native.keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+            if (!activate) {
+                false
+            } else if (native.action == android.view.KeyEvent.ACTION_DOWN) {
+                if (native.repeatCount == 0) {
+                    longPressFired = false
+                    false
+                } else {
+                    longPressFired = true
+                    true
+                }
+            } else {
+                val fired = longPressFired
+                longPressFired = false
+                if (fired) {
+                    onLongClick.invoke()
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
     Box(
         contentAlignment = Alignment.Center,
         modifier = withFocus
@@ -1400,6 +1506,7 @@ fun IconControlButton(
                 focused = it.isFocused
                 if (it.isFocused) PlayerFocusMemory.last = requester
             }
+            .then(keyHold)
             .then(press),
     ) {
         Icon(

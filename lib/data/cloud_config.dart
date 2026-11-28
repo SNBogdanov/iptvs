@@ -1,36 +1,51 @@
-/// Configuration for the optional Supabase-backed cloud source panel.
+import 'cloud_endpoint.dart';
+
+/// Build-time defaults for the optional cloud backend.
 ///
-/// The URL and anon (publishable) key are safe to ship in this open-source app:
-/// access is gated entirely by row-level security in `supabase/migrations`. The
-/// `service_role` key must never appear here. Values come from `--dart-define`
-/// at build time (see `supabase/README.md`); when unset, cloud sync is simply
-/// hidden and the app behaves exactly as before.
+/// These are **defaults, not the product**: since option D the server is a
+/// per-device setting (`cloud_runtime.dart` + `AppSettingsStore`), and a public
+/// build may ship with no values at all. When a build does carry them (personal
+/// builds, and every install that predates runtime selection), the boot path
+/// copies them into the keychain once, so an ordinary update keeps the server.
+///
+/// The URL and publishable key are safe to ship: access is gated entirely by
+/// row-level security in `supabase/migrations`. The `service_role` key must
+/// never appear here.
 class CloudConfig {
   CloudConfig._();
 
-  static const String url =
-      String.fromEnvironment('SUPABASE_URL', defaultValue: '');
+  static const String url = String.fromEnvironment(
+    'SUPABASE_URL',
+    defaultValue: '',
+  );
 
-  static const String anonKey =
-      String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
+  static const String anonKey = String.fromEnvironment(
+    'SUPABASE_ANON_KEY',
+    defaultValue: '',
+  );
 
   /// Where users go to manage their sources and claim a device's pairing code.
   ///
-  /// This is a **compile-time constant**, so every install carries whatever URL
-  /// it was built with — and it is what the pairing screen prints and what
-  /// [pairingPanelLink] encodes into the QR. Installs are arbitrarily old, so
-  /// the previous value (`gchofficial.github.io/iptvs/`, from when the panel was
-  /// a GitHub Pages project page) can never simply stop answering: it now serves
-  /// a redirect that forwards the `?code=` query here. See `redirect/index.html`
-  /// and docs/cloud-sync.md before changing this again.
+  /// Still a compile-time constant because installs that predate runtime
+  /// selection have nothing else to fall back to; [CloudRuntime.panelUrl]
+  /// prefers the configured server's panel. See `redirect/index.html` and
+  /// docs/cloud-sync.md before changing it.
   static const String panelUrl = String.fromEnvironment(
     'PANEL_URL',
     defaultValue: 'https://panel.iptvs.click/',
   );
 
-  /// Cloud sync is only available when both Supabase values are provided.
-  static bool get isConfigured => url.isNotEmpty && anonKey.isNotEmpty;
+  /// The build's default endpoint, or null when the build ships unconfigured
+  /// (the published build's normal state since option D).
+  static CloudEndpoint? get defaultEndpoint {
+    if (url.isEmpty || anonKey.isEmpty) return null;
+    return CloudEndpoint.parse(url: url, anonKey: anonKey, panelUrl: panelUrl);
+  }
+
+  /// Whether this build carries a default server at all.
+  static bool get hasDefaults => defaultEndpoint != null;
 }
+
 
 /// The panel link the pairing screen turns into a QR code: [panelUrl] carrying
 /// the device's [code] as a `code=` query parameter, which the panel reads to

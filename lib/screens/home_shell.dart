@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import '../data/app_database.dart';
 import '../data/app_settings_store.dart';
 import '../data/cloud_auto_sync.dart';
-import '../data/cloud_config.dart';
+import '../data/cloud_runtime.dart';
 import '../data/cloud_sync.dart';
 import '../data/distribution_channel.dart';
 import '../data/library_repository.dart';
@@ -114,7 +114,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool _cloudAutoSyncStarting = false;
 
   Future<void> _startCloudAutoSync() async {
-    if (!CloudConfig.isConfigured) return;
+    if (!CloudRuntime.hasServer) return;
     // Re-entrancy guard: this is fired unawaited from `_loadActive`, and two
     // overlapping loads (a source change landing during a profile switch)
     // would otherwise both get past the profile check and build two services
@@ -462,7 +462,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// cost of skipping is a source that stays a flat M3U until the user saves
   /// it; the cost of guessing wrong is a source that flips kind on every pull.
   Future<bool> _isCloudManagedSource(String id) async {
-    if (!CloudConfig.isConfigured) return false;
+    if (!CloudRuntime.hasServer) return false;
     try {
       final managed = await CloudSync(db: widget.db).managedSourceIds();
       return managed.contains(id);
@@ -489,7 +489,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         }
       }
       // Fall back to cloud profile.
-      if (CloudConfig.isConfigured) {
+      if (CloudRuntime.hasServer) {
         final sync = CloudSync(db: widget.db);
         final profiles = await sync.listProfiles();
         final activeId = await sync.activeProfileId();
@@ -660,9 +660,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       profileName: _profileName,
       profileColorIndex: _profileColorIndex,
       onChangeProfile: _changeProfile,
-      // Profile settings = the cloud-sync screen; only meaningful when the
-      // build has cloud config. Global settings are always available.
-      onProfileSettings: CloudConfig.isConfigured ? _profileSettings : null,
+      // Profile settings = the cloud-sync screen. Always wired since option D:
+      // an unconfigured build has to be able to reach the "connect a server"
+      // form, and the screen itself decides between that and pairing.
+      onProfileSettings: _profileSettings,
       onSettings: _openSettings,
     );
   }

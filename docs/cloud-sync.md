@@ -2,9 +2,10 @@
 
 A **web panel** lets users manage their source list with a real keyboard instead of a TV remote;
 devices **pull** it down with no on-device login, and can optionally **push** their local list
-back up (two-way). It's entirely optional — when the Supabase build config is absent the feature
-hides itself and the app is unchanged. The compact rules live in CLAUDE.md; read this before
-changing sync, pairing, profiles, or anything under `supabase/`.
+back up (two-way). It's entirely optional: the app always carries the feature, but with no server
+configured the Cloud sync screen only offers "connect a server" and nothing touches the network.
+The compact rules live in CLAUDE.md; read this before changing sync, pairing, profiles, or anything
+under `supabase/`.
 
 ## Backend
 
@@ -619,7 +620,9 @@ zero-width Unicode is not caught by the control-character check.
 
 ## Flutter side
 
-[`cloud_config.dart`](../lib/data/cloud_config.dart) (build-time `--dart-define`
+[`cloud_config.dart`](../lib/data/cloud_config.dart) carries the build-time **defaults**
+(`--dart-define`); since option D the endpoint is resolved per device at boot by
+`cloud_runtime.dart` — see "Choosing the server" below. The runtime pieces:
 ## Favorites sync is a delta, and it runs on its own
 
 Favorites are the one collection that syncs **automatically** (`cloud_auto_sync.dart`,
@@ -744,7 +747,6 @@ tab is the reader: Continue watching with a progress bar, then Watched, newest f
 a **landscape (16:9) thumbnail** that prefers the backdrop (119 of the 121 titles in the reference
 library have one) and falls back to the poster cropped to the same box.
 
-`SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
 [`cloud_sync.dart`](../lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, profile
 selection (`listProfiles`/`activeProfileId`/`setProfile`), and profile-scoped
 `pullSources`/`pullMetadata`/`pullFavorites`/`pullWatchState` +
@@ -756,7 +758,8 @@ the managed set in panel order but leaves local-only sources alone). Source ids 
 (`newSourceId`/`isUuid` in [`source_config.dart`](../lib/sources/source_config.dart)) so they
 round-trip through the `uuid`-typed cloud column; push rewrites any legacy non-UUID id first.
 [`secure_local_storage.dart`](../lib/data/secure_local_storage.dart) persists the Supabase session
-in the keychain, not plaintext prefs. Init is in `main.dart`, behind `isConfigured`.
+in the keychain, not plaintext prefs. Init is `CloudRuntime.load()` in `main.dart`; with no server
+configured it does not initialize Supabase at all.
 [`secret_keys.dart`](../lib/data/secret_keys.dart) is the broad/secret split;
 [`cloud_crypto.dart`](../lib/data/cloud_crypto.dart) is the pure crypto surface (envelopes, AAD,
 the pure-Dart P-256). The device P-256 key pair persists in the keychain
@@ -773,14 +776,65 @@ The pure mappers/helpers (`cloudRowToConfig`, the id helpers, `splitFields`/`mer
 `MetadataConfig.fromCloudParts`, `sourceCredentialsMissing`, `suggestedDeviceLabelFor`) are
 unit-tested in `test/cloud_sync_test.dart`; the crypto vectors + fail-closed cases in `test/cloud_crypto_test.dart`.
 
+## Choosing the server (option D)
+
+The endpoint is a **per-device setting**, not a build constant: the keychain holds
+`cloud_server_url`, `cloud_server_key` and `cloud_server_panel`
+([`cloud_endpoint.dart`](../lib/data/cloud_endpoint.dart), `AppSettingsStore.cloudEndpoint`).
+`CloudRuntime.load()` at boot reads it, falls back to `CloudConfig.defaultEndpoint` once and copies
+that default into the keychain (so an install that predates option D keeps its server across
+updates), and only then calls `Supabase.initialize`. No server means no client, no anonymous user
+and no traffic; every cloud call site gates on `CloudRuntime.hasServer`.
+
+- **Validation** is pure and unit-tested (`test/cloud_endpoint_test.dart`): the **API** URL is
+  `https` only (plain `http` for loopback during development), while the **panel** and the
+  **discovery** address may be plain `http` on any host (a LAN panel such as
+  `http://transmission/iptvs` is normal; the API URL the well-known file returns must still be
+  https). A bare host is accepted and assumed `https`, trailing slash/query/fragment are normalized
+  away, and a JWT-shaped key whose `role` is not `anon` — notably `service_role` — is refused on
+  manual entry **and** in the well-known file.
+- **Well-known setup.** A server may publish
+  `/.well-known/iptvs-cloud.json` with `{version, url, anonKey, panelUrl}`. The screen fetches it
+  after the user types a domain (6 s timeout, 64 KiB cap, redirects refused, same validation), so
+  a TV remote only ever enters a hostname. Manual URL + key remains the fallback. The panel build
+  emits this file from the same `VITE_*` values, so `panel.iptvs.click` (and any self-hosted panel
+  origin) works as a one-field target; Cloudflare Pages gets it through a `_redirects` rewrite,
+  other hosts read the dot path. A missing `panelUrl` defaults to the address that served the file,
+  not to the API URL, so a panel on one origin can point at a Supabase project on another.
+- **Changing/forgetting a server** clears only the Supabase session and the cloud keys listed in
+  [`cloud_storage_keys.dart`](../lib/data/cloud_storage_keys.dart) (active profile, managed source
+  ids, E2EE device key pair and marks). Local sources, favorites, watch state and settings are
+  untouched. Saving the same URL again does not sign the device out. A restart is required
+  whenever a client already exists in this process (`Supabase.initialize` is process-global);
+  a **first-time** save initializes in place and opens the pairing UI immediately.
+- **Entry point.** The avatar's "Profile settings" is always wired (it opens this screen), and the
+  sources screen still carries the same action; both show the connect form when no server is set.
+- `PANEL_URL` remains only as the fallback panel for installs whose keychain predates the runtime
+  (or a build default); everything else uses the configured server's panel, including the pairing
+  QR.
+
+**Release artifacts are unconfigured.** `release.yml` and the CI builds pass **no** `SUPABASE_*`
+defines, so a downloaded APK/MSI contains neither the project URL nor the key; the first launch
+shows the connect form, normally solved by entering the panel's domain (the panel build publishes
+the well-known file). The repository Variables are still used by the **panel** deploy
+(`pages.yml`), which bakes them into the panel bundle and emits that file. Devices that ran an
+earlier build with compiled defaults keep their server only if that build wrote the keychain — with
+option D's migration, one such boot is enough; otherwise they connect once. See
+[`cloud/runtime-server.md`](../cloud/runtime-server.md) for the contract.
+
 ## Web panel
 
-[`panel/`](../panel/) — a tiny Vite + `@supabase/supabase-js` SPA (no framework). **Magic-link
+[`panel/`](../panel/) - a tiny Vite + `@supabase/supabase-js` SPA (no framework). **Magic-link
 sign-in only** (no OAuth). Field shapes mirror `SourceConfig` per kind. Sources carry an integer
 `position` and the list has **↑/↓ reorder** controls (positions self-heal to a clean `0..n-1` on
 reorder; new sources append); devices show sources in that order. Branded with the app icon
 (`panel/public/icon.png`, copied from `assets/icon/`). Note: the Flutter web target lives in
 `web/`; the panel deliberately lives in `panel/`.
+
+The bundle reads its endpoint from `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` **or**, when
+those are absent, from `window.__IPTVS_CLOUD__` set by a `config.js` the host serves before the
+bundle. The runtime value wins, so a self-hosted stack can build the panel once and point it at
+its own Supabase without rebuilding.
 
 #### Hosting: three origins, and why
 
@@ -802,9 +856,11 @@ per-build script hashes plus an `'unsafe-inline'` exemption scoped to `style-src
 origin means one policy, and it would have been the looser one.
 
 **The github.io URL can never simply stop answering.** `CloudConfig.panelUrl`
-(`lib/data/cloud_config.dart`) is a compile-time constant, so every install carries the URL it was
-built with, and that is what the pairing screen prints and what `pairingPanelLink` encodes into the
-QR. Installs are arbitrarily old. `redirect/` therefore serves that path forever, forwarding to
+(`lib/data/cloud_config.dart`) is a compile-time default, so installs built before runtime server
+selection carry the URL they were built with, and that is what the pairing screen prints and what
+`pairingPanelLink` encodes into the QR. Installs are arbitrarily old. (Since option D a configured
+server's panel overrides it, but an old install has no setting.) `redirect/` therefore serves that
+path forever, forwarding to
 `panel.iptvs.click` **with the query string intact** — the QR carries `?code=ABCD2345` and the panel
 reads it to prefill the Pair form, so a bare `<meta refresh>` (which drops the query) would turn a
 working shortcut into a blank form. It deploys from its own workflow because it is the only thing
@@ -856,11 +912,13 @@ project's Supabase origin.
 
 Both URLs are in the Supabase redirect allow-list (with the `.local` name and the retired
 `localhost:5173` dev entries, so an older link keeps working), and `site_url` points at the http
-one. The app's `PANEL_URL` is a **build-time constant**, so the local define files carry it:
-`dart_define.json` (Windows) and `dart_define.android.json` (phone) — both `http://transmission/iptvs/`.
-The hostname resolves on the LAN (the router's DNS suffix answers for both Windows and Android)
-and is what the pairing QR encodes. **Cloud sync never touches this server** — it talks to Supabase
-directly, so a stopped panel breaks links, not progress.
+one. The local define files still carry `PANEL_URL` (`dart_define.json` for Windows and
+`dart_define.android.json` for the phone, both `http://transmission/iptvs/`) as the build default;
+once a server is configured, its panel from the well-known wins. The hostname resolves on the LAN
+(the router's DNS suffix answers for both Windows and Android) and is what the pairing QR encodes.
+The panel also serves `/.well-known/iptvs-cloud.json`, so the app can discover the endpoint from
+just this hostname. Apart from that one discovery request, sync never touches this server: it talks
+to Supabase directly, so a stopped panel breaks links, not progress.
 
 `npm run dev` (default `localhost:5173`, `base /iptvs/`, no CSP, HMR) remains the development
 loop; it is not the serving path any more.

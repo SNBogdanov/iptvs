@@ -43,7 +43,8 @@
     set so the uninstall entry lives on that page as well, next to Repair,
     where the wizard can explain that settings are kept.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
     Name="IPTVS Player"
     Manufacturer="SNBogdanov"
@@ -75,6 +76,25 @@
       DowngradeErrorMessage="A newer version of IPTVS Player is already installed. Setup will now exit." />
 
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- **A running player is closed, not left holding the old build.** The MSI
+         replaces files under Program Files, which a live `iptvs.exe` keeps open;
+         Windows Installer would otherwise answer with its "files in use" prompt,
+         or leave the old build running until a reboot. The app defaults to
+         Close to tray, so a polite `WM_CLOSE` only hides the window: the install
+         waits (`Timeout`, in seconds) and then terminates whatever is left,
+         with `TerminateProcess` as the exit code that termination reports.
+         `RebootPrompt` must stay off — CloseApplication rejects the two
+         together. The in-app updater never hits this: it exits the process
+         itself before starting `msiexec`. -->
+    <util:CloseApplication
+      Id="CloseIptvs"
+      Target="iptvs.exe"
+      CloseMessage="yes"
+      RebootPrompt="no"
+      PromptToContinue="no"
+      TerminateProcess="0"
+      Timeout="3" />
 
     <Icon Id="AppIcon" SourceFile="@ICON_PATH@" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
@@ -202,8 +222,13 @@
       <DialogRef Id="WaitForCostingDlg" />
       <DialogRef Id="ErrorDlg" />
       <DialogRef Id="FatalError" />
-      <DialogRef Id="FilesInUse" />
-      <DialogRef Id="MsiRMFilesInUse" />
+      <!-- **No FilesInUse / MsiRMFilesInUse.** Those dialogs run at the UI's
+           InstallValidate — before the execute sequence and therefore before
+           `CloseApplication` gets to act — and would put the same "close the
+           app and retry" question in front of the user that the MSI now answers
+           itself. Without them the installer goes straight on and the close
+           action runs before files are copied; if it ever fails, the file is
+           replaced on reboot as an MSI without a handler would. -->
       <DialogRef Id="OutOfDiskDlg" />
       <DialogRef Id="OutOfRbDiskDlg" />
       <DialogRef Id="PrepareDlg" />

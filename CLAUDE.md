@@ -29,7 +29,8 @@ channel/VOD/EPG data locally, enriches movie/series metadata from public APIs, a
 with libmpv (via `media_kit`) so it handles HEVC / AC-3 / MPEG-TS that an HTML video element
 can't. There is no backend for playback — the app talks directly to user-supplied provider panels
 and public metadata APIs. The one *optional* backend is a Supabase-backed cloud source panel
-(docs/cloud-sync.md); it's off unless built with Supabase config and never touches playback.
+(docs/cloud-sync.md); it never touches playback, and since option D the server is a **per-device
+setting** — a public build ships with no server until the user connects one.
 
 ## Commands
 
@@ -42,14 +43,14 @@ flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=d
 flutter build apk --debug --flavor development --dart-define-from-file=dart_define.android.json --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
-**A local build for the user's own machine must pass the Supabase defines** (`dart_define.json` on
-Windows, `dart_define.android.json` on Android; CI uses repo Variables). Without them
-`CloudConfig.isConfigured` is false, so the startup profile picker shows only local profiles and
-favorites/watch-state sync is absent — the build still succeeds, which is exactly how this gets
-missed. Keep the flavor on the installed package: `development` (`.dev`, debug keystore) for a
-phone that already runs it; `googlePlay`/`microsoftStore` no longer exist in this fork, so the only
-distributable Android artifact is `githubDirect` (`.direct`), which cannot update a `development`
-install in place.
+**The cloud server is a per-device setting** (`cloud/runtime-server.md`). Shipped and CI builds
+carry **no** `SUPABASE_*` defines: the first launch shows the connect form, and a server is normally
+discovered from a panel's `/.well-known/iptvs-cloud.json` (enter the panel's domain). Local
+`dart_define*.json` files may still pass the values as **defaults** for a debug build, but they are
+migrated into the keychain on first boot and can be replaced in the app. Keep the flavor on the
+installed package: `development` (`.dev`, debug keystore) for a phone that already runs it;
+`googlePlay`/`microsoftStore` no longer exist in this fork, so the only distributable Android
+artifact is `githubDirect` (`.direct`), which cannot update a `development` install in place.
 
 **`flutter test` is a release gate, not an iteration step.** The full suite takes about 30
 minutes here and runs in its own process, so any build lock has to wrap the whole command
@@ -914,9 +915,11 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
 ## Cloud sync + profiles (essentials)
 
 Optional Supabase-backed web panel for managing sources; device pairs by code, pulls the profile's
-sources/metadata/favorites/watch progress, and can push back. Hidden entirely unless built with
-`SUPABASE_URL`/`SUPABASE_ANON_KEY` (`cloud_config.dart` `isConfigured`). **Read
-docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** Non-negotiables:
+sources/metadata/favorites/watch progress, and can push back. The server is **chosen per device**
+(`cloud_runtime.dart`, keychain; build-time `SUPABASE_URL`/`SUPABASE_ANON_KEY` are only the
+default seed) — with none configured the app does not initialize Supabase and the screen offers
+the connect form. **Read docs/cloud-sync.md before touching sync, pairing, profiles, or
+`supabase/`.** Non-negotiables:
 
 - The **anon key ships in clients by design**; access control is *only* RLS + `SECURITY DEFINER`
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before

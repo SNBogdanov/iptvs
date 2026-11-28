@@ -53,24 +53,14 @@ jobs:
             echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
             echo "track=stable" >> "$GITHUB_OUTPUT"
           fi
-      # Never publish a build that quietly lacks the cloud configuration. 1.0.1
-      # did exactly that: the build steps below read `vars.SUPABASE_*`, the
-      # variables did not exist, `--dart-define=SUPABASE_URL=` compiled an empty
-      # string, and `CloudConfig.isConfigured` turned the whole cloud feature off
-      # with no error anywhere — the artifacts looked perfectly healthy.
-      - name: Require the cloud configuration
-        env:
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
-        run: |
-          missing=0
-          for name in SUPABASE_URL SUPABASE_ANON_KEY; do
-            if [ -z "${!name}" ]; then
-              echo "::error::$name is not configured as a repository variable; a release built without it ships as a local-only app."
-              missing=1
-            fi
-          done
-          exit "$missing"
+      # **No cloud endpoint ships in the artifact.** Since option D the server is
+      # a per-device setting read from the keychain (or discovered from a
+      # panel's `.well-known/iptvs-cloud.json`), so the release is built without
+      # `SUPABASE_*` and contains no project URL or key. The panel deploy
+      # (`pages.yml`) still uses the repository Variables for its own bundle.
+      # The old gate that failed a release without them existed because a
+      # silent cloud-less build was a bug; unconfigured is now the intended
+      # state, and the connect form is the way in.
 
   build-android:
     name: Build Android (phone + TV)
@@ -120,13 +110,13 @@ jobs:
           fi
           printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/iptvs-release.jks"
       - name: Build release APK
-        # Cloud-sync config (repo Variables; empty in forks → feature stays off).
+        # No `SUPABASE_*` defines: the endpoint is configured on the device.
         env:
           IPTVS_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/iptvs-release.jks
           IPTVS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
           IPTVS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
           IPTVS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
-        run: flutter build apk --release --flavor githubDirect --build-name ${{ needs.version.outputs.version }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build apk --release --flavor githubDirect --build-name ${{ needs.version.outputs.version }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect
       - name: Verify Android signing certificate
         env:
           EXPECTED_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
@@ -167,7 +157,7 @@ jobs:
         # resolves the latest libmpv build (avoids the anonymous rate limit).
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect
       # A per-machine MSI: installs into C:\Program Files\IPTVS, registers in
       # "Apps & features", and upgrades itself through `msiexec` — no certificate
       # trust and no package identity, which is why this fork left MSIX behind.
@@ -176,8 +166,11 @@ jobs:
         run: |
           dotnet tool install --global wix --version 4.0.6
           # WixUI_InstallDir (wizard chrome) lives in the UI extension; the
-          # Options page with the shortcut checkboxes is wired into it.
+          # Options page with the shortcut checkboxes is wired into it. The Util
+          # extension supplies `CloseApplication`, which closes a running player
+          # before its files are replaced.
           & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add -g WixToolset.UI.wixext/4.0.6
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add -g WixToolset.Util.wixext/4.0.6
       - name: Package MSI
         shell: pwsh
         env:

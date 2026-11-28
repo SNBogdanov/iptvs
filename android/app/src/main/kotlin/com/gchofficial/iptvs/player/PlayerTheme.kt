@@ -77,6 +77,16 @@ object PlayerDimens {
     val QuickListRowHeight = 56.dp
 
     /**
+     * How far a finger must travel on the picture before a horizontal swipe
+     * counts as a command (the right-to-left "previous channel" gesture).
+     *
+     * A distance rather than a fraction of the width: the gesture is a wrist
+     * movement, and "a third of a tablet" is not the same intent as "a third
+     * of a phone".
+     */
+    val SwipeMinTravel = 56.dp
+
+    /**
      * Horizontal inset from the window edge for overlay chrome, on a phone or
      * tablet. Also the anchor inset for the list-menu and the info panel, which
      * hang off the same edge.

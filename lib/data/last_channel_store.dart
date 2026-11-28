@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-import 'cloud_config.dart';
+import 'cloud_runtime.dart';
 import 'cloud_sync.dart';
 import 'local_profile_store.dart';
 
@@ -129,7 +129,7 @@ class LastChannelStore {
     } catch (_) {
       // Fall through to the cloud profile, then to the ownerless bucket.
     }
-    if (CloudConfig.isConfigured) {
+    if (CloudRuntime.hasServer) {
       try {
         final cloud = await CloudSync().activeProfileId();
         if (cloud != null && cloud.isNotEmpty) return cloud;

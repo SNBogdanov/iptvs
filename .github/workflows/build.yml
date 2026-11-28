@@ -162,8 +162,8 @@ jobs:
             gradle-${{ runner.os }}-
       - run: flutter pub get
       - name: Build non-distributable development APK
-        # Cloud-sync config (repo Variables; empty in forks → feature stays off).
-        run: flutter build apk --debug --flavor development --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        # No cloud endpoint: the server is configured on the device (option D).
+        run: flutter build apk --debug --flavor development --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development
       - name: Verify development manifest excludes self-update capability
         run: ./tool/verify_android_distribution_manifest.sh build/app/outputs/flutter-apk/app-development-debug.apk development
       - name: Build non-distributable GitHub-direct APK
@@ -228,7 +228,7 @@ jobs:
         # unauthenticated rate limit on shared runners.
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: flutter build windows --release --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build windows --release --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-windows-x64.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -264,7 +264,7 @@ jobs:
       - run: flutter config --enable-linux-desktop
       - run: flutter pub get
       - name: Build release (Linux x86-64)
-        run: flutter build linux --release --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build linux --release --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development
       - name: Fetch pinned linuxdeploy
         run: |
           curl -fL --retry 3 -o "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage

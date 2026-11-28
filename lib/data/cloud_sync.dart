@@ -8,6 +8,8 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
+import 'cloud_runtime.dart';
+import 'cloud_storage_keys.dart';
 import 'cloud_crypto.dart';
 import 'local_profile_store.dart';
 import 'device_label.dart';
@@ -449,30 +451,30 @@ class CloudSync {
 
   /// Ids of sources that came from the cloud last pull. Tracked so a later pull
   /// can remove ones deleted in the panel without touching local-only sources.
-  static const _kCloudIds = 'cloud_source_ids';
+  static const _kCloudIds = CloudStorageKeys.sourceIds;
 
   /// The profile this device last synced, cached so the picker can preselect it
   /// offline; the `devices.active_profile_id` row is the source of truth.
-  static const _kProfileId = 'cloud_profile_id';
+  static const _kProfileId = CloudStorageKeys.profileId;
 
   /// This device's long-lived P-256 key pair for E2EE content-key unwrapping,
   /// persisted in the keychain (base64). The private scalar is a device secret
   /// on par with the provider credentials already stored here.
-  static const _kDevicePriv = 'cloud_device_priv_key';
-  static const _kDevicePub = 'cloud_device_pub_key';
+  static const _kDevicePriv = CloudStorageKeys.devicePrivateKey;
+  static const _kDevicePub = CloudStorageKeys.devicePublicKey;
 
   /// Sticky per-profile E2EE marks (see [E2eeMark]), as a JSON object
   /// `{"<profile_id>": {"seen": true, "ckv": 3}}`. Deliberately in the keychain
   /// next to the device key pair rather than in prefs: it is a security
   /// decision input, and prefs are trivially editable on a rooted device.
   /// Cleared wholesale by [unpair].
-  static const _kE2eeMarks = 'cloud_e2ee_marks';
+  static const _kE2eeMarks = CloudStorageKeys.e2eeMarks;
 
   CloudSync({
     SupabaseClient? client,
     FlutterSecureStorage? storage,
     AppDatabase? db,
-  }) : _client = client ?? Supabase.instance.client,
+  }) : _client = client ?? CloudRuntime.client,
        _storage = storage ?? const FlutterSecureStorage(),
        // ignore: prefer_initializing_formals -- mirrors _client/_storage style
        _db = db;

@@ -178,15 +178,34 @@ had to open a menu to reach either, and the state only showed as a checkmark
 inside it. Both remain Dart-owned toggles acknowledged by the zap banner, so the
 buttons carry no state copy that could disagree with the session.
 
-**Two of those buttons also answer a long press** (touch only — a D-pad has no such gesture):
-the **channel list** opens the quick list one rung higher, on its *categories* mode with the current
-category selected (`zap:categories`), and the **bolt** opens the auto-switch **pace** menu
-(`zap:dwell:<seconds>`). Both exist because a phone has no Left key and no overflow menu: without
-them the categories were one invisible Back-rung away and the pace lived only in Settings. The pace
-menu is the same `ListMenu` primitive as the track menus, with the checkmark on the current value;
-the ladder comes from Dart (`dwellOptions` on `setZapModes`), so the native side draws it and never
-decides what "10 s" means. A tap still does the old thing — open the list, toggle the mode — and
-the long press adds the second meaning rather than an extra control.
+**Two of those buttons also answer a long press**, on touch and on a remote: the **channel list**
+opens the quick list one rung higher, on its *categories* mode with the current category selected
+(`zap:categories`), and the **bolt** opens the auto-switch **pace** menu (`zap:dwell:<seconds>`).
+Both exist because a phone has no Left key and no overflow menu: without them the categories were
+one invisible Back-rung away and the pace lived only in Settings. The pace menu is the same
+`ListMenu` primitive as the track menus, with the checkmark on the current value; the ladder comes
+from Dart (`dwellOptions` on `setZapModes`), so the native side draws it and never decides what
+"10 s" means. A tap still does the old thing — open the list, toggle the mode — and the long press
+adds the second meaning rather than an extra control.
+
+**A hold also works from a D-pad, and the menu opens on release.** A remote sends no long-press
+event, so the focused button counts OK's key repeats as a hold and fires on the key **up**: firing
+while it was still down moved focus into the menu, and the remaining repeats then activated the row
+under the cursor and closed it again — a held OK used to toggle the mode several times a second
+instead. Touch holds have the mirror problem, because a hold can deliver its click at the release
+point, which is exactly where the panel has just appeared; the pace menu therefore ignores a row
+selection for 400 ms after it opens (`PlayerUiState.dwellMenuOpenedAtMs`), so the gesture that
+opened it cannot also choose a period.
+
+**A tap outside an open list menu dismisses it**, the same rule the quick list follows and the first
+gesture a touch user tries on a panel with no Back key under their thumb. A full-size backdrop is
+drawn *before* the panel — a row still gets its own tap — and *above* the control bar, so the tap
+that dismisses the menu never also presses a button hidden underneath: one gesture, one action. The
+backdrop also guards the panel's **own opening gesture**, since a hold fires while the finger is
+still down (the pace menu on its release, the aspect menu on its long-press start) and its tail
+would otherwise read as "a tap outside": a tap is ignored for 400 ms after the panel appears,
+counted from the panel's own composition and restarted when another menu replaces it. Back still
+peels the menu on a remote.
 
 The PiP and channel-list controls use their Material pictures everywhere:`picture_in_picture_alt` (the frame with the inset screen; Android, the shared
 Flutter overlay and a hand-drawn glyph in the Windows GDI bar, since Segoe MDL2
@@ -1669,6 +1688,13 @@ time. Every control now attaches its own `FocusRequester` and reports it to a
 requester first and only falls back to play/pause when the control is no longer in the ring (Go to
 live once live, the step pair on another route, a menu that closed).
 
+**A visible bar with nothing focused is repaired too.** Losing focus without the bar leaving
+composition happens when a panel that took it goes away — the in-player quick list is the reported
+case: open the list, close it, and the chrome was still up but owned no focus, so the next OK
+re-tread the row from the first button. A watchdog requests play/pause after one frame whenever the
+bar is visible, no menu or info panel owns it, and nothing inside the bar has focus; `onFocusChanged`
+on the overlay is what tells it apart from a bar that merely finished animating.
+
 **Implemented.** Escape used to call `ShowNativeControls(true)` and send `back` unconditionally,
 so it tore the player down from under an open menu, an open info panel or a control row the user
 had only just revealed. It now peels **menu → info → hide controls → exit**, one rung per press,
@@ -1874,9 +1900,21 @@ travels to: raising the volume cannot silently turn into raising the brightness 
 crosses the middle. **And the drag has to be clearly vertical** (`SwipeAxisRule`): a swipe counts
 only when its vertical travel exceeds the touch slop *and* is at least 1.5× its horizontal travel —
 the plain vertical-drag detector claimed the gesture (and consumed it) on any vertical drift, so a
-horizontal swipe with a few pixels of wobble raised the volume. A mostly-horizontal drag is left
-unconsumed from the moment it passes the slop, so the system's own edge gestures and the tap layer
-still see it.
+horizontal swipe with a few pixels of wobble raised the volume. A drag that fails that rule is
+never a level change: in live playback it goes to the previous-channel gesture below, and on a
+route with no such gesture it stays unconsumed for the system's own edge gestures and the tap layer.
+
+**A right-to-left swipe on the picture is the previous channel** (Android, live only). The phone's
+control row has no "previous channel" control — its previous/next pair steps through the list, a
+different move — so the gesture every touch screen teaches for "back" is the way back to the
+channel that was playing before this one, the touch equivalent of a remote's Last channel key
+(`SwipeZapRule`, `zap:prev`). It is claimed by the **same** axis decision as the levels, so one
+drag never does two things, and it is acted on **on release** and only after
+`PlayerDimens.SwipeMinTravel` (56 dp): a shaky swipe or a short flick changes nothing. The
+opposite direction is deliberately nobody's gesture — Android's own edge-Back starts there, and a
+second meaning would make one swipe do two actions. Like the level swipes it is independent of
+`controlsVisible` (the chrome is usually down while zapping) and stands down for PiP, the quick list
+and a pinned panel, which own the picture's gestures while they are up.
 
 **A gesture that starts in the top 40 dp belongs to the system.** That strip is the notification
 shade's pull area even while the status bar is hidden (immersive), and the window still delivers the

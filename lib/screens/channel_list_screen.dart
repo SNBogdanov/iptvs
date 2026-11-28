@@ -442,9 +442,9 @@ class ChannelListScreen extends StatefulWidget {
   final String? profileName;
   final int profileColorIndex;
 
-  /// Avatar dropdown callbacks. "Profile settings" (cloud sync) is only wired
-  /// when the build has cloud config; "Change profile" and "Settings" (global)
-  /// are always available.
+  /// Avatar dropdown callbacks. "Profile settings" (cloud sync) is always
+  /// wired: an unconfigured device reaches the "connect a server" form through
+  /// it. "Change profile" and "Settings" (global) are available everywhere.
   final VoidCallback? onChangeProfile;
   final VoidCallback? onProfileSettings;
   final VoidCallback? onSettings;
@@ -4187,15 +4187,22 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// Applies a category **set**: empty is All, one id is the ordinary single
   /// filter, two or more is the union ([_liveFilterIds]) with no single id.
   void _applyLiveSelection(Set<String> ids, {bool scrollToTop = true}) {
+    // An empty id is not a category. It used to arrive from a remembered
+    // record written by the multi-select's "Only …" button when that button had
+    // been offered for "All channels" (its label fell back to that name): the
+    // filter then matched nothing, so the list went blank and stayed blank when
+    // the empty value was remembered again. Normalised here, at the one place
+    // every selection passes through.
+    final clean = ids.where((id) => id.isNotEmpty).toSet();
     _liveFilterIds
       ..clear()
-      ..addAll(ids);
+      ..addAll(clean);
     // `Only <previous single>` offers the last *one-category* choice, so a
     // union must not overwrite it — otherwise the escape hatch points at
     // something the user just widened away from.
-    if (ids.length == 1) _rememberSingleCategory(ids.single);
+    if (clean.length == 1) _rememberSingleCategory(clean.single);
     _applyLiveFilter(
-      categoryId: ids.length == 1 ? ids.single : null,
+      categoryId: clean.length == 1 ? clean.single : null,
       scrollToTop: scrollToTop,
     );
   }
@@ -4204,6 +4211,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// "only this" escape from a multi-select.
   void _rememberSingleCategory(String? categoryId) {
     if (categoryId == null ||
+        categoryId.isEmpty ||
         categoryId == kFavoritesCategoryId ||
         categoryId == kAllSourcesFavoritesCategoryId) {
       return;
@@ -4255,7 +4263,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// source switch, which is why it only *caches* what it read — the ids are
   /// re-checked against the catalogue by [_dropUnavailableLiveCategory].
   void _restoreLiveCategory() {
-    final cached = cachedLiveCategory(widget.repo.source.id);
+    final raw = cachedLiveCategory(widget.repo.source.id);
+    // '' is "All" written by an older build (see `_applyLiveSelection`), never
+    // a real category id: leaving it as a value filtered the list down to
+    // nothing and made the multi-select offer "Only All categories".
+    final cached = (raw == null || raw.isEmpty) ? null : raw;
     _liveFilterIds.clear();
     _liveSingleCategoryId = null;
     if (cached != null && cached.startsWith(_kMultiLiveCategoryPrefix)) {

@@ -49,6 +49,21 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+/**
+ * How long a freshly opened **list menu** ignores input, in milliseconds.
+ *
+ * A hold that opens a panel can deliver its click at the release point, which
+ * is exactly where the panel just appeared: without this window the row under
+ * the cursor (or the panel's dismiss backdrop) would act on the gesture that
+ * opened it. Long enough to cover a release frame, short enough that a
+ * deliberate tap is never swallowed.
+ */
+internal const val MENU_OPEN_GUARD_MS = 400L
+
+/** Whether an opened menu is still guarding the gesture that opened it. */
+internal fun menuOpeningGuard(openedAtMs: Long, nowMs: Long): Boolean =
+    nowMs - openedAtMs < MENU_OPEN_GUARD_MS
+
 /** Renders whichever list-menu is open, anchored above the bottom bar's right cluster. */
 @Composable
 fun BoxScope.PlayerMenusLayer(
@@ -56,6 +71,43 @@ fun BoxScope.PlayerMenusLayer(
     callbacks: PlayerCallbacks,
     onInteract: () -> Unit,
 ) {
+    // **A tap outside an open list dismisses it** — the same rule the quick list
+    // follows, and the gesture a touch user tries first for a panel with no Back
+    // key under their thumb (the key still works; this is the other way out).
+    // Drawn *before* the panel, so a row keeps its own tap, and above the
+    // control bar, so the tap that dismisses the menu never also presses a
+    // button hidden underneath: one gesture, one action. List menus only — the
+    // info panel is a readout with its own dismissal rules.
+    if (state.dwellMenuOpen || state.openMenu != PlayerMenu.None) {
+        // When this backdrop appeared. A hold that opens a panel fires while
+        // the finger is still down (the pace menu on its release, the aspect
+        // menu on its long-press start), so that gesture's tail must not be
+        // read as "a tap outside": the guard ignores it. Keyed on which menu is
+        // open, because switching to another panel is a new opening gesture and
+        // gets a fresh window.
+        val armedAtMs = remember(state.dwellMenuOpen, state.openMenu) {
+            android.os.SystemClock.elapsedRealtime()
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(armedAtMs) {
+                    detectTapGestures(
+                        onTap = {
+                            val now = android.os.SystemClock.elapsedRealtime()
+                            if (!menuOpeningGuard(armedAtMs, now)) {
+                                if (state.dwellMenuOpen) {
+                                    state.dwellMenuOpen = false
+                                } else {
+                                    state.openMenu = PlayerMenu.None
+                                }
+                            }
+                        },
+                    )
+                },
+        )
+    }
+
     // The auto-switch **pace** menu (a long press on the bolt). Drawn with the
     // same primitive as the track menus on purpose: same width, row rhythm and
     // checkmark, so "the check is on the current value" reads the same here as
@@ -73,8 +125,15 @@ fun BoxScope.PlayerMenusLayer(
                 ),
             onSelect = { id ->
                 onInteract()
-                state.dwellMenuOpen = false
-                id.toIntOrNull()?.let { callbacks.onZapCommand("zap:dwell:$it") }
+                // **Ignored for a moment after it opens.** A hold that opened
+                // this panel can deliver its click at the release point, which
+                // is where the menu has just appeared; the row under it then
+                // took the click and closed the menu the same frame it opened.
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (!menuOpeningGuard(state.dwellMenuOpenedAtMs, now)) {
+                    state.dwellMenuOpen = false
+                    id.toIntOrNull()?.let { callbacks.onZapCommand("zap:dwell:$it") }
+                }
             },
         )
         return

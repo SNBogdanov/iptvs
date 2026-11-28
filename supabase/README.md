@@ -106,12 +106,19 @@ app, the web panel, or this repo.
 Prefer the modern **publishable key** (`sb_publishable_…`) over the legacy anon JWT.
 
 - **Web panel** (`panel/`): set `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (GitHub
-  Actions reads these from repo **Variables** — they're public by design, not secrets).
-- **Flutter app** (`lib/data/cloud_config.dart`): read at build time from `--dart-define`s.
-  - **CI**: the build/release workflows pass them from the repo Variables automatically.
-  - **Local dev**: copy `dart_define.example.json` → `dart_define.json` (gitignored) and run
-    `flutter run -d <platform> --dart-define-from-file=dart_define.json`. Same flag works for
-    `flutter build`. Without it, `CloudConfig.isConfigured` is false and the cloud UI stays hidden.
+  Actions reads these from repo **Variables** — they're public by design, not secrets). A
+  self-hosted server may instead serve a `config.js` that sets `window.__IPTVS_CLOUD__` before the
+  panel bundle; the runtime value wins over `VITE_*`. Every configured build also emits
+  `/.well-known/iptvs-cloud.json` (with a `_redirects` rewrite for Cloudflare Pages), which is what
+  the app's domain-only setup reads.
+- **Flutter app** (`lib/data/cloud_config.dart`): the `--dart-define`s are **defaults only** since
+  option D. The server is normally chosen on the Cloud sync screen and stored per device.
+  - **CI**: the build/release workflows pass the repo Variables as defaults; remove them to ship
+    an unconfigured build (see `cloud/runtime-server.md`).
+  - **Local dev**: configure the server in the app, or copy `dart_define.example.json` →
+    `dart_define.json` (gitignored) and run
+    `flutter run -d <platform> --dart-define-from-file=dart_define.json`; the value is migrated
+    into the keychain on first boot.
 
 ## Security checklist (do this before trusting it)
 

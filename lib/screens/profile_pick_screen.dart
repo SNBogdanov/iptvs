@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
-import '../data/cloud_config.dart';
+import '../data/cloud_runtime.dart';
 import '../data/cloud_sync.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
@@ -72,7 +72,7 @@ class ProfilePickScreen extends StatefulWidget {
   final bool bootMode;
 
   /// Injectable for tests; defaults to the live Supabase-backed [CloudSync]
-  /// (only constructed when [CloudConfig.isConfigured]).
+  /// (only constructed when [CloudRuntime.hasServer]).
   final CloudSync? sync;
 
   /// Called instead of navigating to [HomeShell] when provided. Use this when
@@ -99,7 +99,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   /// Null when the build has no cloud config — every cloud call is skipped.
   CloudSync? get _sync {
     if (widget.sync != null) return widget.sync;
-    if (!CloudConfig.isConfigured) return null;
+    if (!CloudRuntime.hasServer) return null;
     return _syncCached ??= CloudSync(db: widget.db);
   }
 
@@ -940,7 +940,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                     SizedBox(height: compact ? 4 : 12),
                     // Link-to-cloud banner (configured builds that aren't
                     // paired)
-                    if (!_isPaired && CloudConfig.isConfigured && !_manageMode)
+                    if (!_isPaired && CloudRuntime.hasServer && !_manageMode)
                       TextButton.icon(
                         onPressed: _busy ? null : _goToCloudSync,
                         icon: const Icon(Icons.cloud_outlined, size: 16),
