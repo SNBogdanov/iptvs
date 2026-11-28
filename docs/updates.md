@@ -277,7 +277,13 @@ install directory `C:\Program Files\IPTVS` is equally permanent: the updater rel
 `WixToolset.UI.wixext` UI extension and `WixToolset.Util.wixext`, whose `CloseApplication` action
 closes a running player before its files are replaced — see "A manual MSI install closes the
 running player" above)
-from the Flutter Release payload, adding one component per file. The wizard is WixUI with our own
+from the Flutter Release payload, adding one component per file. **Each file's component GUID is
+derived from its install-relative path**, not generated per build: `MajorUpgrade` removes the old
+product *after* installing the new one, so a random `Guid="*"` would let that removal delete the
+files the new product had just written (the failure where a shortcut survived but
+`C:\Program Files\IPTVS` was left without `iptvs.exe`). A build produced before this rule still has
+random component GUIDs; uninstall it rather than upgrading over it once.
+The wizard is WixUI with our own
 fonts and artwork, a folder/shortcut page for the first install, an "Upgrade" notice when
 `FindRelatedProducts` found an older version, and a Repair/Remove page (no Change — the feature set
 is fixed) reachable from "Изменить" in Programs and features. `ARPNOREMOVE` is set so removing the

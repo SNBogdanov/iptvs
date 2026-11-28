@@ -24,15 +24,14 @@ class CloudConfig {
     defaultValue: '',
   );
 
-  /// Where users go to manage their sources and claim a device's pairing code.
-  ///
-  /// Still a compile-time constant because installs that predate runtime
-  /// selection have nothing else to fall back to; [CloudRuntime.panelUrl]
-  /// prefers the configured server's panel. See `redirect/index.html` and
-  /// docs/cloud-sync.md before changing it.
+  /// Last-resort panel URL for installs that carry a build-time default
+  /// endpoint. **Empty by default**: the panel is part of the server the user
+  /// connects (well-known or manual entry), and a shipped build must not
+  /// advertise the author's (or anyone else's) panel. See
+  /// [CloudRuntime.panelUrl] and `cloud/runtime-server.md`.
   static const String panelUrl = String.fromEnvironment(
     'PANEL_URL',
-    defaultValue: 'https://panel.iptvs.click/',
+    defaultValue: '',
   );
 
   /// The build's default endpoint, or null when the build ships unconfigured

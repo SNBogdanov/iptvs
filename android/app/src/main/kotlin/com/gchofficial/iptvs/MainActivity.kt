@@ -559,6 +559,15 @@ class MainActivity : FlutterActivity() {
         deviceChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision())
+                // A stable id for the per-device settings backup. Android ID is
+                // stable per app-signing key and user, so it survives a
+                // reinstall; Dart hashes it before it ever leaves the device.
+                "stableDeviceId" -> result.success(
+                    Settings.Secure.getString(
+                        contentResolver,
+                        Settings.Secure.ANDROID_ID,
+                    ),
+                )
                 // Dart's `HttpClient` does not read Android's system proxy on
                 // its own, so image/API requests bypassed a user-configured
                 // proxy while native players honoured it. Dart installs an

@@ -33,9 +33,10 @@ that rode in one falls back to `auto`: that is how every History progress bar ca
 out full while the numbers were right. Dynamic geometry uses a native
 `<progress value=… max=…>` (or a class), never an inline style.
 
-GitHub Actions deploys `dist/` to GitHub Pages on push to `main`
+GitHub Actions deploys `dist/` to Cloudflare Pages on push to `main`
 (`.github/workflows/pages.yml`). Supabase values come from repo
-**Variables** `SUPABASE_URL` / `SUPABASE_ANON_KEY` (anon/publishable only).
+**Variables** `SUPABASE_URL` / `SUPABASE_ANON_KEY` (anon/publishable only). For a full
+“host your own cloud” walkthrough, see [`../cloud/SELF-HOSTING.md`](../cloud/SELF-HOSTING.md).
 
 ### Private LAN deployment
 

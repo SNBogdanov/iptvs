@@ -63,8 +63,17 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   http(s)-only and bounded like every other client-writable column.
   `anon`/`authenticated` hold SELECT only (RLS: the owner or a paired device);
   deleting a source cascades its progress away.
+- **Device settings** (`..._device_settings.sql`) - the app's keychain preferences backed up per
+  **physical device**, keyed by a SHA-256 of Android `ANDROID_ID` / a Windows file id, so a reinstall
+  can restore them after pairing. RPC-only (`get_device_settings`/`push_device_settings`), RLS on
+  with no policies and no table grants; a 64 KiB JSON object cap. See `docs/cloud-sync.md`
+  "Per-device settings backup".
 
 ## One-time setup
+
+For a complete walkthrough aimed at a user deploying their own instance (Supabase project + panel
+host + app connection), see [`cloud/SELF-HOSTING.md`](../cloud/SELF-HOSTING.md). The steps below are
+the backend-specific summary.
 
 1. Create a free project at <https://supabase.com>.
 2. Apply the migrations. With the Supabase **GitHub integration** connected to this

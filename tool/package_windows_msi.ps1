@@ -53,8 +53,12 @@ function ConvertTo-XmlText([string] $value) {
 $files = @(Get-ChildItem -LiteralPath $root -Recurse -File | Sort-Object FullName)
 
 # ---- Directories ----------------------------------------------------------
-# One id per relative directory, parents first, so the tree can be emitted by
-# walking depth: "<Directory Id="D_data" Name="data">" nests the next level.
+# One id per relative directory. The tree is emitted by walking the directory
+# paths in **lexicographic order** and keeping a stack of open `<Directory>`
+# elements: a path's parent is its own prefix, so the stack pops until the
+# current top *is* that parent. Sorting by depth (the previous scheme) put a
+# depth-4 directory under whatever depth-3 directory happened to be last
+# alphabetically — `data\flutter_assets\packages\app` landed under `shaders`.
 $dirIds = @{ '' = 'INSTALLFOLDER' }
 $dirs = New-Object System.Collections.Generic.List[string]
 $counter = 0
@@ -73,9 +77,10 @@ foreach ($file in $files) {
 
 $directoryXml = New-Object System.Text.StringBuilder
 $open = New-Object System.Collections.Generic.List[string]
-foreach ($path in ($dirs | Sort-Object @{ Expression = { $_.Split('\').Count } }, @{ Expression = { $_ } })) {
+foreach ($path in ($dirs | Sort-Object)) {
   $depth = $path.Split('\').Count
-  while ($open.Count -ge $depth) {
+  $parent = if ($depth -gt 1) { $path.Substring(0, $path.LastIndexOf('\')) } else { '' }
+  while ($open.Count -gt 0 -and $open[$open.Count - 1] -ne $parent) {
     $open.RemoveAt($open.Count - 1)
     [void]$directoryXml.AppendLine(('        ' + ('  ' * $open.Count) + '</Directory>'))
   }
@@ -88,6 +93,30 @@ while ($open.Count -gt 0) {
   [void]$directoryXml.AppendLine(('        ' + ('  ' * $open.Count) + '</Directory>'))
 }
 
+# ---- Stable component GUIDs ------------------------------------------------
+# `Guid="*"` would generate a new GUID for every build. With
+# `MajorUpgrade Schedule="afterInstallExecute"` the old product is removed
+# *after* the new one is installed, so its components would key the same file
+# paths under different GUIDs and could delete the files the new product just
+# wrote (the Samsung install with shortcuts but no program files). A GUID
+# derived from the install-relative path keeps one component identity across
+# versions, which is what MSI's upgrade rules expect.
+function New-StableComponentGuid {
+  param([Parameter(Mandatory = $true)][string] $Key)
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(('iptvs-msi:' + $Key.ToLowerInvariant())))
+  } finally {
+    $sha.Dispose()
+  }
+  $bytes = New-Object byte[] 16
+  [Array]::Copy($hash, $bytes, 16)
+  # RFC 4122 version 5 / variant bits, so the value is a well-formed UUID.
+  $bytes[7] = [byte](($bytes[7] -band 0x0F) -bor 0x50)
+  $bytes[8] = [byte](($bytes[8] -band 0x3F) -bor 0x80)
+  return ([guid]::new($bytes)).ToString().ToUpperInvariant()
+}
+
 # ---- Components -----------------------------------------------------------
 $componentXml = New-Object System.Text.StringBuilder
 $index = 0
@@ -95,7 +124,10 @@ foreach ($file in $files) {
   $index++
   $relative = $file.DirectoryName.Substring($root.Length).TrimStart('\')
   if ($relative -eq '') { $directoryId = 'INSTALLFOLDER' } else { $directoryId = $dirIds[$relative] }
-  [void]$componentXml.AppendLine('      <Component Id="C_' + $index.ToString('D4') + '" Directory="' + $directoryId + '" Guid="*">')
+  # Key the GUID on the install-relative path, not the enumeration order or the
+  # source path, so it survives a moved build directory and a changed file order.
+  $componentKey = (($relative + '\' + $file.Name).TrimStart('\'))
+  [void]$componentXml.AppendLine('      <Component Id="C_' + $index.ToString('D4') + '" Directory="' + $directoryId + '" Guid="' + (New-StableComponentGuid $componentKey) + '">')
   [void]$componentXml.AppendLine('        <File Id="F_' + $index.ToString('D4') + '" Source="' + (ConvertTo-XmlText $file.FullName) + '" KeyPath="yes" />')
   [void]$componentXml.AppendLine('      </Component>')
 }

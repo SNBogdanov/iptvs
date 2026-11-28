@@ -70,7 +70,10 @@
          user lost its place. Installing first and removing afterwards leaves
          them alone: the shortcut components below carry **permanent GUIDs**, so
          the old product's uninstall finds the same component still registered by
-         the new one and leaves its files and registry values in place. -->
+         the new one and leaves its files and registry values in place. The file
+         components get **path-derived GUIDs** from `package_windows_msi.ps1`
+         for the same reason: a random `Guid="*"` per build would let the old
+         product's removal delete the files the new product had just installed. -->
     <MajorUpgrade
       Schedule="afterInstallExecute"
       DowngradeErrorMessage="A newer version of IPTVS Player is already installed. Setup will now exit." />

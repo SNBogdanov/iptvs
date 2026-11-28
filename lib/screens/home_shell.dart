@@ -15,6 +15,7 @@ import '../data/mdblist_client.dart';
 import '../data/metadata_config.dart';
 import '../data/metadata_provider.dart';
 import '../data/source_store.dart';
+import '../data/settings_auto_sync.dart';
 import '../data/source_identity_migration.dart';
 import '../data/tmdb_client.dart';
 import '../data/tvdb_client.dart';
@@ -197,6 +198,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       // the next launch — on Android a backgrounded app may never get another
       // turn.
       unawaited(_watchAutoSync?.flush() ?? Future<void>.value());
+      // Preferences sitting in their two-second debounce would otherwise wait
+      // for the next launch.
+      unawaited(SettingsAutoSync.pushNow());
       // The one moment a checkpoint is guaranteed to be able to run: the
       // screen is off, nothing is reading pages, and `journal_size_limit`
       // then truncates the WAL instead of leaving a 278 MB scan for the next
@@ -209,6 +213,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     // away.
     unawaited(_cloudAutoSync?.pullNow() ?? Future<void>.value());
     unawaited(_watchAutoSync?.pullNow() ?? Future<void>.value());
+    unawaited(SettingsAutoSync.reconcile());
     WidgetsBinding.instance.addPostFrameCallback((_) => _resumePendingUpdate());
   }
 
@@ -660,9 +665,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       profileName: _profileName,
       profileColorIndex: _profileColorIndex,
       onChangeProfile: _changeProfile,
-      // Profile settings = the cloud-sync screen. Always wired since option D:
-      // an unconfigured build has to be able to reach the "connect a server"
-      // form, and the screen itself decides between that and pairing.
+      // Cloud sync, always wired since option D: an unconfigured build has to
+      // be able to reach the "connect a server" form. The screen decides
+      // between that form and pairing.
       onProfileSettings: _profileSettings,
       onSettings: _openSettings,
     );

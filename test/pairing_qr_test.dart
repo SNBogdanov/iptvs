@@ -47,7 +47,7 @@ Future<void> _loadInterFont() async {
 void main() {
   setUpAll(_loadInterFont);
 
-  final link = pairingPanelLink(CloudConfig.panelUrl, 'ECA6EVMU');
+  final link = pairingPanelLink('https://panel.example.com/', 'ECA6EVMU');
 
   /// Mirrors the pairing card: a scrolling column with 20 px of horizontal
   /// padding, which is what [PairingQrView] budgets for.

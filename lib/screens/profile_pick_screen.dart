@@ -938,16 +938,21 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                         ),
                       ),
                     SizedBox(height: compact ? 4 : 12),
-                    // Link-to-cloud banner (configured builds that aren't
-                    // paired)
-                    if (!_isPaired && CloudRuntime.hasServer && !_manageMode)
+                    // Cloud entry point, shown even before a server is chosen:
+                    // an unconfigured build has no other cloud UI on the boot
+                    // path, and the picker is the first screen most users see.
+                    if (!_isPaired && !_manageMode)
                       TextButton.icon(
                         onPressed: _busy ? null : _goToCloudSync,
                         icon: const Icon(Icons.cloud_outlined, size: 16),
-                        label: const Text('Link to cloud account'),
+                        label: Text(
+                          CloudRuntime.hasServer
+                              ? 'Link to cloud account'
+                              : 'Connect cloud sync',
+                          style: const TextStyle(fontSize: 13),
+                        ),
                         style: TextButton.styleFrom(
                           foregroundColor: AppColors.textLo,
-                          textStyle: const TextStyle(fontSize: 13),
                         ),
                       ),
                     // Manage / Done toggle

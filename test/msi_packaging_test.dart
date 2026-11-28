@@ -90,6 +90,14 @@ void main() {
     expect(script, contains('wix'));
     expect(script, contains('-arch x64'));
     expect(script, contains('B2F1C0DE-3E4A-4C55-9B7E-1D5C2A8F6E31'));
+    // File components must keep one identity across builds: with
+    // `MajorUpgrade afterInstallExecute` the old product is removed after the
+    // new one is installed, and a random `Guid="*"` lets that removal delete
+    // the files the new product just wrote. (The comment above may mention the
+    // old spelling; the emitted component line must not use it.)
+    expect(script, isNot(contains('Guid="*">')));
+    expect(script, contains('New-StableComponentGuid'));
+    expect(script, contains('SHA256'));
   });
 
   test('the release workflow ships an MSI, not an MSIX', () {

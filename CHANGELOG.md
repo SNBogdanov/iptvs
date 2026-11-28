@@ -13,6 +13,11 @@ each release's notes also appear on GitHub Releases. New work lands under
 
 ### Added
 
+- **The app's preferences are backed up per physical device.** Every `app_*` setting plus the
+  profile-picker choice now syncs to `device_settings`, keyed by a SHA-256 of Android `ANDROID_ID` /
+  a Windows file id, so reinstalling the app and pairing again restores the player settings, seek
+  step, clock, auto-play, volume, proxy, window placement and the rest. The raw hardware id never
+  leaves the device; `cloud_server_*` (the connection itself) and local-profile data are excluded.
 - **The cloud server is now a per-device setting.** A build no longer has to be compiled against
   one Supabase project: the Cloud sync screen offers a "Connect a cloud server" form (domain with
   a `.well-known/iptvs-cloud.json` lookup, or URL and publishable key by hand), and the chosen
@@ -22,8 +27,9 @@ each release's notes also appear on GitHub Releases. New work lands under
   forgetting the server clears only the cloud session and its caches — local sources, favorites and
   watch progress stay. The panel build now also publishes `/.well-known/iptvs-cloud.json` from the
   same values, so entering just the panel's domain discovers the server and its key. Release and CI
-  artifacts are built **without** the endpoint: a downloaded build shows the connect form, and the
-  repository variables are used only by the panel deploy.
+  artifacts are built **without** the endpoint or a panel default: a downloaded build shows the
+  connect form, the pairing QR is generated only from the server you connected, and the repository
+  variables are used only by the panel deploy.
 - **A right-to-left swipe on the picture goes back to the previous channel** (Android, live).
   The phone's control row has no previous-channel button — its previous/next pair steps through
   the list, which is a different move — so the gesture every touch screen teaches for "back" now
@@ -50,6 +56,17 @@ each release's notes also appear on GitHub Releases. New work lands under
 - **The control bar's focus comes back after an in-player panel closes.** Opening and closing the
   quick list could leave the chrome visible with no control focused, sending the next OK to the
   first button; a visible bar with nothing focused now restores play/pause after one frame.
+- **MSI upgrades no longer risk deleting the files they just installed.** Each file's component
+  GUID is derived from its install path instead of being generated per build: with the old
+  "remove the previous product after installing the new one" order, a random GUID let that removal
+  delete the new executables — the failure where the Start Menu shortcut survived but
+  `C:\Program Files\IPTVS` had no `iptvs.exe`. A build produced before this change should be
+  uninstalled rather than upgraded over once.
+- **The MSI now creates the Flutter asset directory tree correctly.** The directory emitter sorted
+  by depth instead of by path, so a deep directory was nested under whatever directory of the
+  previous level came last alphabetically (for example
+  `data\flutter_assets\packages\app` landed under `shaders`), and several assets were installed to
+  the wrong folders. The tree is now emitted in path order with a parent-aware stack.
 
 ### Changed
 

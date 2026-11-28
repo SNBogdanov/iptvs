@@ -778,6 +778,9 @@ unit-tested in `test/cloud_sync_test.dart`; the crypto vectors + fail-closed cas
 
 ## Choosing the server (option D)
 
+For a complete, user-facing setup (your own Supabase project + your own panel host, no author
+servers involved), follow [`cloud/SELF-HOSTING.md`](../cloud/SELF-HOSTING.md).
+
 The endpoint is a **per-device setting**, not a build constant: the keychain holds
 `cloud_server_url`, `cloud_server_key` and `cloud_server_panel`
 ([`cloud_endpoint.dart`](../lib/data/cloud_endpoint.dart), `AppSettingsStore.cloudEndpoint`).
@@ -809,9 +812,9 @@ and no traffic; every cloud call site gates on `CloudRuntime.hasServer`.
   a **first-time** save initializes in place and opens the pairing UI immediately.
 - **Entry point.** The avatar's "Profile settings" is always wired (it opens this screen), and the
   sources screen still carries the same action; both show the connect form when no server is set.
-- `PANEL_URL` remains only as the fallback panel for installs whose keychain predates the runtime
-  (or a build default); everything else uses the configured server's panel, including the pairing
-  QR.
+- `PANEL_URL` is empty by default in the app and absent from shipped builds; a configured
+  server's panel (well-known or the manual "Panel address" field) is what the QR encodes. The
+  compile-time value remains only for a deliberately preconfigured build.
 
 **Release artifacts are unconfigured.** `release.yml` and the CI builds pass **no** `SUPABASE_*`
 defines, so a downloaded APK/MSI contains neither the project URL nor the key; the first launch
@@ -821,6 +824,38 @@ the well-known file). The repository Variables are still used by the **panel** d
 earlier build with compiled defaults keep their server only if that build wrote the keychain — with
 option D's migration, one such boot is enough; otherwise they connect once. See
 [`cloud/runtime-server.md`](../cloud/runtime-server.md) for the contract.
+
+## Per-device settings backup
+
+The profile sync above covers sources, metadata, favorites and watch state. **App preferences**
+(player controls, seek step, clock, auto-play, volume, proxy, window placement, the profile-picker
+choice, ...) live only in the device keychain, so a reinstall would lose them even after the device
+is paired again. This is the other half of the cloud: a per-device backup.
+
+- **Stable identity.** `DeviceIdentity` derives
+  `sha256('iptvs-device-v1|' + platform + ':' + raw)` and sends only the 64-hex digest:
+  - Android: `ANDROID_ID` over the existing `iptvs/device` channel (stable per app-signing key and
+    user; resets on a factory reset);
+  - Windows/Linux/macOS (and an Android fallback): a random id in the app support directory, which
+    an MSI uninstall leaves in place.
+- **Storage.** `device_settings(owner, device_key, settings jsonb, updated_at)`; RLS is enabled with
+  no policies and no table grants. The only path is
+  `get_device_settings(p_device_key)` / `push_device_settings(p_device_key, p_settings)`, both
+  `SECURITY DEFINER` and scoped by `current_device_owner()`, so a device can only read and write its
+  own account's rows. The key must be 64 lowercase hex, the map a JSON object, at most 64 KiB.
+- **What travels.** Every `app_*` preference plus `profile_picker_startup`; values are the raw
+  keychain strings. Excluded: `cloud_server_*` (the connection itself cannot be fetched before it
+  is configured), the local-profile keys, and the sync marker.
+- **Restore rule.** A keychain with no sync marker is a fresh install, so the cloud copy is applied.
+  Otherwise the device is authoritative and its local map is pushed; a cloud copy wins only when its
+  server `updated_at` is newer than the marker. Pushes are debounced two seconds after a preference
+  write, flushed on app pause, every five minutes, and on a manual Push; pairing and Pull reconcile
+  immediately.
+- **Privacy.** The raw hardware id never leaves the device. Settings are not E2EE (unlike source
+  secrets), but they hold no provider credentials — the proxy setting is a host/port only.
+
+Backend migration: `20261128000000_device_settings.sql`. An older backend/client simply no-ops:
+`pushDeviceSettings` returns false on a missing function and the app keeps local settings.
 
 ## Web panel
 
@@ -912,13 +947,10 @@ project's Supabase origin.
 
 Both URLs are in the Supabase redirect allow-list (with the `.local` name and the retired
 `localhost:5173` dev entries, so an older link keeps working), and `site_url` points at the http
-one. The local define files still carry `PANEL_URL` (`dart_define.json` for Windows and
-`dart_define.android.json` for the phone, both `http://transmission/iptvs/`) as the build default;
-once a server is configured, its panel from the well-known wins. The hostname resolves on the LAN
-(the router's DNS suffix answers for both Windows and Android) and is what the pairing QR encodes.
-The panel also serves `/.well-known/iptvs-cloud.json`, so the app can discover the endpoint from
-just this hostname. Apart from that one discovery request, sync never touches this server: it talks
-to Supabase directly, so a stopped panel breaks links, not progress.
+one. The panel serves `/.well-known/iptvs-cloud.json`, so the app can discover the endpoint from
+just this hostname; the panel address for the QR comes from that document (or from the manual
+field), not from a compiled default. Apart from that one discovery request, sync never touches this
+server: it talks to Supabase directly, so a stopped panel breaks links, not progress.
 
 `npm run dev` (default `localhost:5173`, `base /iptvs/`, no CSP, HMR) remains the development
 loop; it is not the serving path any more.

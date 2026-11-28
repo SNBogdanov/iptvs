@@ -134,17 +134,23 @@ optionally **push** its own set back up (newest change wins).
   never embedded anywhere. Devices authenticate anonymously and hold **no direct write
   access**; the optional push goes through an owner-scoped `SECURITY DEFINER` function that
   rejects any caller that isn't a paired device writing its own account's data.
-- **Fully optional** — builds without cloud config behave exactly as before; the cloud UI
-  stays hidden (`CloudConfig.isConfigured`).
+- **Fully optional** — the endpoint is a **per-device setting**, not a build constant. Published
+  builds from 1.0.4 onward contain no server at all; the Cloud sync screen offers a “connect a
+  server” form (or a domain discovered from a panel’s `/.well-known/iptvs-cloud.json`) and the app
+  works locally until one is connected.
 
 Setup lives in [`supabase/README.md`](supabase/README.md) (database, RLS, auth) and
-[`panel/README.md`](panel/README.md) (the web app). Both the panel and the site are
-published to Cloudflare Pages by [`pages.yml`](.github/workflows/pages.yml), on
-**separate origins** — the panel holds an authenticated session and provider credentials,
-so it does not share an origin with a docs site and its dependency tree. To enable cloud
-sync in the app, build with the Supabase values — locally via
-`flutter run --dart-define-from-file=dart_define.json` (copy
-[`dart_define.example.json`](dart_define.example.json)); in CI they come from repo Variables.
+[`panel/README.md`](panel/README.md) (the web app). **To run your own cloud without using the
+author's servers, follow the step-by-step
+[`cloud/SELF-HOSTING.md`](cloud/SELF-HOSTING.md)** — it covers creating your own Supabase project,
+applying the migrations, configuring Auth, building/hosting the panel, and connecting the app by its
+domain. The panel and the docs site are published to Cloudflare Pages by
+[`pages.yml`](.github/workflows/pages.yml) on **separate origins** — the panel holds an
+authenticated session and provider credentials, so it does not share an origin with a docs site and
+its dependency tree. A build may still carry the Supabase values as **defaults** (locally via
+`flutter run --dart-define-from-file=dart_define.json`, copy
+[`dart_define.example.json`](dart_define.example.json); in CI from repo Variables, though the
+release workflow no longer does), but the endpoint is meant to be chosen on the device.
 
 ## Website and knowledge base
 

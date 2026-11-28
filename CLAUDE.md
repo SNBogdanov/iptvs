@@ -44,13 +44,14 @@ flutter build apk --debug --flavor development --dart-define-from-file=dart_defi
 ```
 
 **The cloud server is a per-device setting** (`cloud/runtime-server.md`). Shipped and CI builds
-carry **no** `SUPABASE_*` defines: the first launch shows the connect form, and a server is normally
-discovered from a panel's `/.well-known/iptvs-cloud.json` (enter the panel's domain). Local
-`dart_define*.json` files may still pass the values as **defaults** for a debug build, but they are
-migrated into the keychain on first boot and can be replaced in the app. Keep the flavor on the
-installed package: `development` (`.dev`, debug keystore) for a phone that already runs it;
-`googlePlay`/`microsoftStore` no longer exist in this fork, so the only distributable Android
-artifact is `githubDirect` (`.direct`), which cannot update a `development` install in place.
+carry **no** `SUPABASE_*` or `PANEL_URL` defines: the first launch shows the connect form, and a
+server is normally discovered from a panel's `/.well-known/iptvs-cloud.json` (enter the panel's
+domain). A local `dart_define*.json` may deliberately pass defaults for a preconfigured debug build
+(including `PANEL_URL`, which is only the QR fallback), but this checkout ships them empty and the
+setting can always be replaced in the app. Keep the flavor on the installed package: `development`
+(`.dev`, debug keystore) for a phone that already runs it; `googlePlay`/`microsoftStore` no longer
+exist in this fork, so the only distributable Android artifact is `githubDirect` (`.direct`), which
+cannot update a `development` install in place.
 
 **`flutter test` is a release gate, not an iteration step.** The full suite takes about 30
 minutes here and runs in its own process, so any build lock has to wrap the whole command
@@ -921,6 +922,12 @@ default seed) — with none configured the app does not initialize Supabase and 
 the connect form. **Read docs/cloud-sync.md before touching sync, pairing, profiles, or
 `supabase/`.** Non-negotiables:
 
+- **Settings follow the physical device.** App preferences (`app_*` in
+  `AppSettingsStore` plus the profile-picker choice) are backed up in `device_settings`, keyed by
+  `DeviceIdentity`'s hashed Android `ANDROID_ID` / Windows file id, so a reinstall pulls them after
+  pairing. `SettingsAutoSync` pushes debounced, on pause and on manual Push; a keychain without the
+  sync marker is a fresh install and takes the cloud copy. The raw hardware id never leaves the
+  phone. See docs/cloud-sync.md "Per-device settings backup".
 - The **anon key ships in clients by design**; access control is *only* RLS + `SECURITY DEFINER`
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before
   changing it). The `service_role` key must never appear in any client or this repo.

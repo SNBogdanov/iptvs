@@ -442,9 +442,9 @@ class ChannelListScreen extends StatefulWidget {
   final String? profileName;
   final int profileColorIndex;
 
-  /// Avatar dropdown callbacks. "Profile settings" (cloud sync) is always
-  /// wired: an unconfigured device reaches the "connect a server" form through
-  /// it. "Change profile" and "Settings" (global) are available everywhere.
+  /// Avatar dropdown callbacks. "Cloud sync" is always wired: an unconfigured
+  /// device reaches the "connect a server" form through it. "Change profile"
+  /// and "Settings" (global) are available everywhere.
   final VoidCallback? onChangeProfile;
   final VoidCallback? onProfileSettings;
   final VoidCallback? onSettings;

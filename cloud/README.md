@@ -1,10 +1,10 @@
 # Self-hosted cloud server — design and deployment notes
 
-> **Status: two halves.** The **deployment stack** in this folder is still a proposal — there is no
-> `docker-compose.yml`, no scripts, no image. The **runtime server selection** (option D) is
-> implemented in the app: `lib/data/cloud_endpoint.dart`, `cloud_runtime.dart`, the settings store
-> and the Cloud sync screen, with the contract in [`runtime-server.md`](runtime-server.md). This
-> document records the analysis and the recommended way to stand up a private instance.
+> **Want a working personal cloud today?** Follow [`SELF-HOSTING.md`](SELF-HOSTING.md): your own
+> managed Supabase project plus a static panel you host yourself. It uses neither the author's
+> Supabase nor the author's panel/LAN host. The stack described below is the **fully self-hosted
+> backend** (no Supabase Cloud), which is still a proposal; runtime server selection in the app is
+> implemented (`runtime-server.md`).
 
 ## What the cloud backend is
 

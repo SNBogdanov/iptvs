@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../player/next_video_policy.dart';
@@ -59,9 +60,9 @@ class AppSettingsStore {
 
   Future<void> setCloseToTray(bool value) async {
     if (value) {
-      await _storage.delete(key: _kCloseToTray);
+      await _delete(key: _kCloseToTray);
     } else {
-      await _storage.write(key: _kCloseToTray, value: 'false');
+      await _write(key: _kCloseToTray, value: 'false');
     }
   }
 
@@ -73,9 +74,9 @@ class AppSettingsStore {
 
   Future<void> setRandomZapping(bool value) async {
     if (value) {
-      await _storage.write(key: _kRandomZapping, value: 'true');
+      await _write(key: _kRandomZapping, value: 'true');
     } else {
-      await _storage.delete(key: _kRandomZapping);
+      await _delete(key: _kRandomZapping);
     }
   }
 
@@ -87,9 +88,9 @@ class AppSettingsStore {
 
   Future<void> setAlwaysOnTop(bool value) async {
     if (value) {
-      await _storage.write(key: _kAlwaysOnTop, value: 'true');
+      await _write(key: _kAlwaysOnTop, value: 'true');
     } else {
-      await _storage.delete(key: _kAlwaysOnTop);
+      await _delete(key: _kAlwaysOnTop);
     }
   }
 
@@ -103,11 +104,11 @@ class AppSettingsStore {
 
   Future<void> setRememberWindowPlacement(bool value) async {
     if (value) {
-      await _storage.delete(key: _kRememberPlacement);
+      await _delete(key: _kRememberPlacement);
       return;
     }
-    await _storage.write(key: _kRememberPlacement, value: 'false');
-    await _storage.delete(key: _kWindowPlacement);
+    await _write(key: _kRememberPlacement, value: 'false');
+    await _delete(key: _kWindowPlacement);
   }
 
   /// The last recorded placement, as written by `WindowPlacement.encode`, or
@@ -116,7 +117,7 @@ class AppSettingsStore {
   Future<String?> windowPlacement() => _storage.read(key: _kWindowPlacement);
 
   Future<void> setWindowPlacement(String value) =>
-      _storage.write(key: _kWindowPlacement, value: value);
+      _write(key: _kWindowPlacement, value: value);
 
   /// The last PiP frame as `x,y,width,height`, or null when the mini-player was
   /// never used. Same physical-pixel frame space as [windowPlacement].
@@ -124,24 +125,24 @@ class AppSettingsStore {
       _storage.read(key: _kMiniPlayerPlacement);
 
   Future<void> setMiniPlayerPlacement(String value) =>
-      _storage.write(key: _kMiniPlayerPlacement, value: value);
+      _write(key: _kMiniPlayerPlacement, value: value);
 
   Future<String?> playbackVolume() => _storage.read(key: _kPlaybackVolume);
 
   Future<void> setPlaybackVolume(String value) =>
-      _storage.write(key: _kPlaybackVolume, value: value);
+      _write(key: _kPlaybackVolume, value: value);
 
   Future<String?> playbackMuted() => _storage.read(key: _kPlaybackMuted);
 
   Future<void> setPlaybackMuted(String value) =>
-      _storage.write(key: _kPlaybackMuted, value: value);
+      _write(key: _kPlaybackMuted, value: value);
 
   Future<bool> movieQuickPlay() async =>
       (await _storage.read(key: _kMovieQuickPlay)) == 'true';
 
   Future<void> setMovieQuickPlay(bool value) => value
-      ? _storage.write(key: _kMovieQuickPlay, value: 'true')
-      : _storage.delete(key: _kMovieQuickPlay);
+      ? _write(key: _kMovieQuickPlay, value: 'true')
+      : _delete(key: _kMovieQuickPlay);
 
   /// Which side of the Android player's picture adjusts the volume; the other
   /// side adjusts the screen brightness.
@@ -157,8 +158,8 @@ class AppSettingsStore {
       (await _storage.read(key: _kVolumeSwipeOnLeft)) != 'false';
 
   Future<void> setPlayerVolumeSwipeOnLeft(bool value) => value
-      ? _storage.delete(key: _kVolumeSwipeOnLeft)
-      : _storage.write(key: _kVolumeSwipeOnLeft, value: 'false');
+      ? _delete(key: _kVolumeSwipeOnLeft)
+      : _write(key: _kVolumeSwipeOnLeft, value: 'false');
 
   /// The device-wide player aspect mode (`Fit`/`Fill`/`Stretch`/`16:9`/`4:3`).
   ///
@@ -176,8 +177,8 @@ class AppSettingsStore {
 
   Future<void> setPlayerAspectMode(String? label) =>
       (label == null || label.isEmpty)
-      ? _storage.delete(key: _kAspectMode)
-      : _storage.write(key: _kAspectMode, value: label);
+      ? _delete(key: _kAspectMode)
+      : _write(key: _kAspectMode, value: label);
 
   /// Per content kind, whether its **stream** is opened through the configured
   /// proxy (Settings → Proxy, "Streams: Live / Movies / Series").
@@ -193,8 +194,8 @@ class AppSettingsStore {
       (await _storage.read(key: _streamProxyKey(kind))) == 'true';
 
   Future<void> setStreamProxy(StreamKind kind, bool value) => value
-      ? _storage.write(key: _streamProxyKey(kind), value: 'true')
-      : _storage.delete(key: _streamProxyKey(kind));
+      ? _write(key: _streamProxyKey(kind), value: 'true')
+      : _delete(key: _streamProxyKey(kind));
 
   /// Last category browsed in a media tab, per source and kind ("movie" /
   /// "series"). Category ids are provider-specific, so the source id is part of
@@ -215,9 +216,9 @@ class AppSettingsStore {
   ) {
     final key = _mediaCategoryKey(sourceId, kind);
     if (categoryId == null) {
-      return _storage.delete(key: key);
+      return _delete(key: key);
     }
-    return _storage.write(key: key, value: categoryId);
+    return _write(key: key, value: categoryId);
   }
 
   /// Last category browsed in the live tab, per source.
@@ -236,9 +237,9 @@ class AppSettingsStore {
   Future<void> setLiveCategory(String sourceId, String? categoryId) {
     final key = _liveCategoryKey(sourceId);
     if (categoryId == null) {
-      return _storage.delete(key: key);
+      return _delete(key: key);
     }
-    return _storage.write(key: key, value: categoryId);
+    return _write(key: key, value: categoryId);
   }
 
   /// The stored VOD/series card orientation as `VodCardOrientation.storageValue`,
@@ -256,9 +257,9 @@ class AppSettingsStore {
   /// while making the keychain look like the user had chosen something.
   Future<void> setRawVodCardOrientation(String? value) async {
     if (value == null) {
-      await _storage.delete(key: _kVodCardOrientation);
+      await _delete(key: _kVodCardOrientation);
     } else {
-      await _storage.write(key: _kVodCardOrientation, value: value);
+      await _write(key: _kVodCardOrientation, value: value);
     }
   }
 
@@ -285,10 +286,10 @@ class AppSettingsStore {
     final host = value['host'] ?? '';
     final port = value['port'] ?? '';
     if (mode.isEmpty && host.isEmpty && port.isEmpty) {
-      await _storage.delete(key: _kProxy);
+      await _delete(key: _kProxy);
       return;
     }
-    await _storage.write(key: _kProxy, value: '$mode;$host;$port');
+    await _write(key: _kProxy, value: '$mode;$host;$port');
   }
 
   /// The comma list of optional player controls the user hid, or null when the
@@ -302,9 +303,9 @@ class AppSettingsStore {
 
   Future<void> setRawHiddenPlayerControls(String? value) async {
     if (value == null || value.isEmpty) {
-      await _storage.delete(key: _kHiddenPlayerControls);
+      await _delete(key: _kHiddenPlayerControls);
     } else {
-      await _storage.write(key: _kHiddenPlayerControls, value: value);
+      await _write(key: _kHiddenPlayerControls, value: value);
     }
   }
 
@@ -314,9 +315,9 @@ class AppSettingsStore {
 
   Future<void> setRawDoubleTapAction(String? value) async {
     if (value == null || value.isEmpty) {
-      await _storage.delete(key: _kDoubleTapAction);
+      await _delete(key: _kDoubleTapAction);
     } else {
-      await _storage.write(key: _kDoubleTapAction, value: value);
+      await _write(key: _kDoubleTapAction, value: value);
     }
   }
 
@@ -339,9 +340,9 @@ class AppSettingsStore {
 
   Future<void> setShowPlayerClock(bool value) async {
     if (value) {
-      await _storage.delete(key: _kShowPlayerClock);
+      await _delete(key: _kShowPlayerClock);
     } else {
-      await _storage.write(key: _kShowPlayerClock, value: 'false');
+      await _write(key: _kShowPlayerClock, value: 'false');
     }
   }
 
@@ -359,9 +360,9 @@ class AppSettingsStore {
 
   Future<void> setShowPlaybackTimes(bool value) async {
     if (value) {
-      await _storage.delete(key: _kShowPlaybackTimes);
+      await _delete(key: _kShowPlaybackTimes);
     } else {
-      await _storage.write(key: _kShowPlaybackTimes, value: 'false');
+      await _write(key: _kShowPlaybackTimes, value: 'false');
     }
   }
 
@@ -379,9 +380,9 @@ class AppSettingsStore {
 
   Future<void> setShowChannelName(bool value) async {
     if (value) {
-      await _storage.delete(key: _kShowChannelName);
+      await _delete(key: _kShowChannelName);
     } else {
-      await _storage.write(key: _kShowChannelName, value: 'false');
+      await _write(key: _kShowChannelName, value: 'false');
     }
   }
 
@@ -398,9 +399,9 @@ class AppSettingsStore {
 
   Future<void> setAutoPlayNextVideo(bool value) async {
     if (value) {
-      await _storage.write(key: _kAutoPlayNext, value: 'true');
+      await _write(key: _kAutoPlayNext, value: 'true');
     } else {
-      await _storage.delete(key: _kAutoPlayNext);
+      await _delete(key: _kAutoPlayNext);
     }
   }
 
@@ -418,9 +419,9 @@ class AppSettingsStore {
     // The default is absence, so writing it back would make the keychain look
     // like a choice the user made.
     if (value == NextVideoPlayedBehavior.resumeOrSkip) {
-      await _storage.delete(key: _kNextVideoBehavior);
+      await _delete(key: _kNextVideoBehavior);
     } else {
-      await _storage.write(key: _kNextVideoBehavior, value: value.storageValue);
+      await _write(key: _kNextVideoBehavior, value: value.storageValue);
     }
   }
 
@@ -442,9 +443,9 @@ class AppSettingsStore {
     // Store the default as absence, the same contract as every other toggle
     // here: a written key should mean a choice the user actually made.
     if (step == kDefaultSeekStepSeconds) {
-      await _storage.delete(key: _kSeekStepSeconds);
+      await _delete(key: _kSeekStepSeconds);
     } else {
-      await _storage.write(key: _kSeekStepSeconds, value: '$step');
+      await _write(key: _kSeekStepSeconds, value: '$step');
     }
   }
 
@@ -479,14 +480,95 @@ class AppSettingsStore {
   }
 
   Future<void> setCloudEndpoint(CloudEndpoint endpoint) async {
-    await _storage.write(key: _kCloudServerUrl, value: endpoint.url);
-    await _storage.write(key: _kCloudServerKey, value: endpoint.anonKey);
-    await _storage.write(key: _kCloudServerPanel, value: endpoint.panelUrl);
+    await _write(key: _kCloudServerUrl, value: endpoint.url);
+    await _write(key: _kCloudServerKey, value: endpoint.anonKey);
+    await _write(key: _kCloudServerPanel, value: endpoint.panelUrl);
   }
 
   Future<void> clearCloudEndpoint() async {
-    await _storage.delete(key: _kCloudServerUrl);
-    await _storage.delete(key: _kCloudServerKey);
-    await _storage.delete(key: _kCloudServerPanel);
+    await _delete(key: _kCloudServerUrl);
+    await _delete(key: _kCloudServerKey);
+    await _delete(key: _kCloudServerPanel);
   }
+
+  // ---------------------------------------------------------------------------
+  // Per-device settings backup (cloud sync).
+  //
+  // Everything stored as `app_*` plus the profile-picker preference is a
+  // preference this device wants back after a reinstall. `cloud_*` is the
+  // connection itself (it cannot be fetched before it is configured) and the
+  // local-profile keys are profile data, not settings — both are excluded.
+  // The marker is written by the sync service and is excluded too.
+  // ---------------------------------------------------------------------------
+
+  static const String _kSyncedPrefix = 'app_';
+  static const String _kProfilePickerStartup = 'profile_picker_startup';
+  static const String _kCloudSettingsSyncedAt = 'app_settings_cloud_synced_at';
+
+  /// Bumped whenever a synced preference changes. `SettingsAutoSync` debounces
+  /// a push from it; nothing else listens.
+  static final ValueNotifier<int> changes = ValueNotifier<int>(0);
+
+  static bool _isSyncedSetting(String key) =>
+      key.startsWith(_kSyncedPrefix) || key == _kProfilePickerStartup;
+
+  Future<void> _write({required String key, required String value}) async {
+    await _storage.write(key: key, value: value);
+    if (_isSyncedSetting(key) && key != _kCloudSettingsSyncedAt) {
+      changes.value++;
+    }
+  }
+
+  Future<void> _delete({required String key}) async {
+    await _storage.delete(key: key);
+    if (_isSyncedSetting(key) && key != _kCloudSettingsSyncedAt) {
+      changes.value++;
+    }
+  }
+
+  /// The preference map sent to `push_device_settings` (values are the raw
+  /// keychain strings, so no enum/format knowledge is duplicated here).
+  Future<Map<String, String>> settingsForCloud() async {
+    final all = await _storage.readAll();
+    return <String, String>{
+      for (final entry in all.entries)
+        if (_isSyncedSetting(entry.key) &&
+            entry.key != _kCloudSettingsSyncedAt)
+          entry.key: entry.value,
+    };
+  }
+
+  /// Replaces every synced preference with [settings]. Keys absent from the
+  /// map are deleted, which is how a default-valued preference is restored
+  /// (the app stores defaults as absence).
+  Future<void> applyCloudSettings(Map<String, String> settings) async {
+    final all = await _storage.readAll();
+    for (final key in all.keys.toList()) {
+      if (_isSyncedSetting(key) && key != _kCloudSettingsSyncedAt) {
+        await _storage.delete(key: key);
+      }
+    }
+    for (final entry in settings.entries) {
+      if (!_isSyncedSetting(entry.key) ||
+          entry.key == _kCloudSettingsSyncedAt ||
+          entry.value.isEmpty) {
+        continue;
+      }
+      await _storage.write(key: entry.key, value: entry.value);
+    }
+    changes.value++;
+  }
+
+  /// Server `updated_at` of the last applied/pushed device settings, or null
+  /// on a keychain that never synced (a fresh install).
+  Future<DateTime?> cloudSettingsSyncedAt() async {
+    final raw = await _storage.read(key: _kCloudSettingsSyncedAt);
+    return raw == null ? null : DateTime.tryParse(raw)?.toUtc();
+  }
+
+  Future<void> setCloudSettingsSyncedAt(DateTime value) =>
+      _storage.write(
+        key: _kCloudSettingsSyncedAt,
+        value: value.toUtc().toIso8601String(),
+      );
 }

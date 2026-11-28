@@ -22,6 +22,7 @@ import 'data/net.dart' show redactText;
 import 'data/source_identity_migration.dart';
 import 'data/proxy_config.dart';
 import 'data/source_store.dart';
+import 'data/settings_auto_sync.dart';
 import 'data/vod_card_orientation.dart';
 import 'player/clock_format.dart';
 import 'player/playback_audio_session.dart';
@@ -222,6 +223,10 @@ Future<void> main() async {
         'sources=${sources.length}',
   );
   runApp(IptvApp(db: db, store: store));
+  // Device-level preferences: reconcile once the first frame is scheduled and
+  // keep them backed up while the app runs. Best effort — no server, no
+  // session or an offline backend is a no-op.
+  unawaited(SettingsAutoSync.start());
 }
 
 /// Optional cloud backend: reads the server this device was configured with

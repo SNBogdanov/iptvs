@@ -28,8 +28,8 @@ int profileColorIndexFor(String id) {
 enum _ProfileMenuAction { changeProfile, profileSettings, settings }
 
 /// The AppBar avatar: the active profile's initial in its colour, opening a
-/// dropdown with "Change profile", "Settings" (global), and (when wired)
-/// "Profile settings" (cloud sync).
+/// dropdown with "Change profile", "Settings" (global), and "Cloud sync" (the
+/// cloud/pairing screen; always wired since option D).
 class ProfileAvatarButton extends StatelessWidget {
   final String? profileName;
   final int colorIndex;
@@ -95,7 +95,7 @@ class ProfileAvatarButton extends StatelessWidget {
               children: [
                 Icon(Icons.cloud_sync_outlined, size: 18),
                 SizedBox(width: 10),
-                Text('Profile settings'),
+                Text('Cloud sync'),
               ],
             ),
           ),

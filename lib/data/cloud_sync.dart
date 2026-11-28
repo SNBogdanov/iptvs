@@ -1188,6 +1188,46 @@ class CloudSync {
 
   /// Self-unpair: drop the cloud-managed sources locally and remove this
   /// device's pairing rows. The account can also revoke from the panel.
+  /// This device's saved app preferences, or null when the cloud has none (or
+  /// the backend predates the device-settings migration).
+  ///
+  /// [deviceKey] is the hashed hardware identity from `DeviceIdentity`; the RPC
+  /// scopes it to the caller's paired account.
+  Future<Map<String, dynamic>?> pullDeviceSettings(String deviceKey) async {
+    try {
+      final data = await _client.rpc(
+        'get_device_settings',
+        params: <String, dynamic>{'p_device_key': deviceKey},
+      );
+      return data is Map ? Map<String, dynamic>.from(data) : null;
+    } catch (e) {
+      if (isMissingFunctionError(e)) return null;
+      rethrow;
+    }
+  }
+
+  /// Upserts the whole preference map for this device. Returns false when the
+  /// backend predates the device-settings migration; the caller must not mark a
+  /// failed/no-op push as synced.
+  Future<bool> pushDeviceSettings(
+    String deviceKey,
+    Map<String, String> settings,
+  ) async {
+    try {
+      await _client.rpc(
+        'push_device_settings',
+        params: <String, dynamic>{
+          'p_device_key': deviceKey,
+          'p_settings': settings,
+        },
+      );
+      return true;
+    } catch (e) {
+      if (isMissingFunctionError(e)) return false;
+      rethrow;
+    }
+  }
+
   Future<void> unpair(SourceStore store) async {
     for (final id in await _readCloudIds()) {
       await store.delete(id);

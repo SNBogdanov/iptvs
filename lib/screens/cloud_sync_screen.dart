@@ -14,6 +14,7 @@ import '../data/cloud_endpoint.dart';
 import '../data/cloud_runtime.dart';
 import '../data/cloud_sync.dart';
 import '../data/device_label.dart';
+import '../data/settings_auto_sync.dart';
 import '../data/source_store.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
@@ -133,6 +134,9 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       } else {
         await _newCode();
       }
+      // A paired device may have a settings backup from before a reinstall;
+      // an unpaired one simply has no owner yet and the RPC is a no-op.
+      unawaited(SettingsAutoSync.reconcile());
     } catch (e) {
       if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
@@ -278,6 +282,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         setState(() => _paired = true);
         await _loadProfiles();
         await _pull(initial: true);
+        unawaited(SettingsAutoSync.reconcile());
       }
     } catch (_) {
       // Transient network error — the next tick retries.
@@ -310,6 +315,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
             '${initial ? 'Paired — ' : ''}$sources'
             '${metadata ? ' · metadata updated' : ''}.',
       );
+      unawaited(SettingsAutoSync.reconcile());
     } catch (e) {
       if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
@@ -332,7 +338,19 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   Future<void> _openPanel() async {
-    final uri = Uri.tryParse(CloudRuntime.panelUrl);
+    final panelUrl = CloudRuntime.panelUrl;
+    if (panelUrl.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No panel address configured for this server.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
+    final uri = Uri.tryParse(panelUrl);
     var ok = false;
     if (uri != null) {
       try {
@@ -444,6 +462,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
             'Pushed $count source${count == 1 ? '' : 's'} · metadata · favorites '
             '· progress to $_activeProfileName.',
       );
+      unawaited(SettingsAutoSync.pushNow());
     } catch (e) {
       if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
@@ -548,11 +567,20 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   Future<void> _saveServer() async {
+    final panelText = _serverPanel.text.trim();
+    if (_manualServer && panelText.isEmpty) {
+      setState(
+        () => _serverError =
+            'Enter the panel address — the page where the pairing code is '
+            'entered.',
+      );
+      return;
+    }
     final endpoint = _manualServer
         ? CloudEndpoint.parse(
             url: _serverUrl.text,
             anonKey: _serverKey.text,
-            panelUrl: _serverPanel.text,
+            panelUrl: panelText,
           )
         : _checkedEndpoint;
     if (endpoint == null) {
@@ -864,11 +892,6 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       TextButton(
         onPressed: () => setState(() {
           _manualServer = !_manualServer;
-          if (_manualServer && _serverPanel.text.trim().isEmpty) {
-            // The panel is where the pairing code is entered; the build's
-            // fallback is a better guess than the API host.
-            _serverPanel.text = CloudRuntime.panelUrl;
-          }
         }),
         child: Text(
           _manualServer
@@ -893,8 +916,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           autocorrect: false,
           keyboardType: TextInputType.url,
           decoration: const InputDecoration(
-            labelText: 'Panel address (optional)',
-            hintText: 'Defaults to the server address',
+            labelText: 'Panel address',
+            helperText: 'Where the pairing code is entered.',
           ),
         ),
       ],
@@ -998,12 +1021,14 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       ),
     ),
     if (_code case final code?) ...[
-      const SizedBox(height: 20),
-      Center(
-        child: PairingQrView(
-          link: pairingPanelLink(CloudRuntime.panelUrl, code.code),
+      if (CloudRuntime.panelUrl.isNotEmpty) ...[
+        const SizedBox(height: 20),
+        Center(
+          child: PairingQrView(
+            link: pairingPanelLink(CloudRuntime.panelUrl, code.code),
+          ),
         ),
-      ),
+      ],
     ],
     // Read-only on purpose: naming happens in the panel, on a real keyboard.
     // Adding a text field here would put a focus target — and a Back-ladder
@@ -1020,35 +1045,42 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       ),
     ],
     const SizedBox(height: 16),
-    Center(
-      child: InkWell(
-        onTap: _openPanel,
-        borderRadius: BorderRadius.circular(6),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.open_in_new, size: 16, color: AppColors.accent),
-              const SizedBox(width: 6),
-              Text(
-                CloudRuntime.panelUrl,
-                style: const TextStyle(
-                  color: AppColors.accent,
-                  decoration: TextDecoration.underline,
-                  decorationColor: AppColors.accent,
+    if (CloudRuntime.panelUrl.isNotEmpty)
+      Center(
+        child: InkWell(
+          onTap: _openPanel,
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.open_in_new, size: 16, color: AppColors.accent),
+                const SizedBox(width: 6),
+                Text(
+                  CloudRuntime.panelUrl,
+                  style: const TextStyle(
+                    color: AppColors.accent,
+                    decoration: TextDecoration.underline,
+                    decorationColor: AppColors.accent,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
-    ),
     const SizedBox(height: 24),
     FilledButton.icon(
       onPressed: _busy ? null : _newCode,
       icon: const Icon(Icons.refresh),
       label: const Text('New code'),
+    ),
+    const SizedBox(height: 8),
+    TextButton.icon(
+      onPressed: _serverBusy ? null : _openServerSetup,
+      icon: const Icon(Icons.dns_outlined, size: 16),
+      label: const Text('Use a different server'),
     ),
   ];
 
